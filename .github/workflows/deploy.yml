@@ -19,6 +19,7 @@ jobs:
         with:
           node-version: 22
       - run: npm install --legacy-peer-deps
+      - run: npm install --no-save --legacy-peer-deps react-is@$(node -p "require('react/package.json').version")
       - run: npm run build
       - uses: actions/upload-pages-artifact@v3
         with:
