@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --primary: #FFC107;
+    --primary-hover: #FFB300;
+    --primary-light: #FFF8E1;
+    --primary-dark: #FFA000;
+  }
+
+  body {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  /* Custom styling for leaflet dark mode */
+  .dark .leaflet-tile {
+    filter: brightness(0.7) invert(1) contrast(2.5) hue-rotate(185deg) saturate(0.4) brightness(0.85);
+  }
+
+  .dark .leaflet-container {
+    background-color: #111827;
+  }
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.4);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(156, 163, 175, 0.7);
+}
+
+.delivio-btn-yellow {
+  background-color: #FFC107;
+  color: #18181b;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+.delivio-btn-yellow:hover:not(:disabled) {
+  background-color: #FFB300;
+  box-shadow: 0 4px 12px rgba(255, 193, 7, 0.35);
+}
