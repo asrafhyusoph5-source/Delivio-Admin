@@ -1,4 +1,4 @@
-name: Deploy Admin to GitHub Pages
+name: Deploy Admin to GitHub Pages 
 on:
   push:
     branches: [ main ]
