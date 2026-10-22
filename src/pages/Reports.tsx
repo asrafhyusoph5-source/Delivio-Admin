@@ -22,7 +22,10 @@ import {
   AlertTriangle,
   Award,
   Store,
-  Bike
+  Bike,
+  Wallet,
+  CreditCard,
+  Banknote
 } from 'lucide-react';
 import {
   BarChart,
@@ -118,8 +121,17 @@ export const Reports: React.FC = () => {
     const cancellationReasonsMap: Record<string, number> = {};
     const merchantMap: Record<string, { name: string; orders: number; revenue: number }> = {};
     const riderMap: Record<string, { name: string; completed: number; earnings: number }> = {};
+    const paymentMap: Record<string, { name: string; revenue: number; count: number; color: string }> = {
+      cod: { name: 'Cash on Delivery (COD)', revenue: 0, count: 0, color: '#10B981' },
+      wallet: { name: 'Delivio Wallet', revenue: 0, count: 0, color: '#FFC107' },
+      online: { name: 'Paid Online', revenue: 0, count: 0, color: '#3B82F6' },
+      other: { name: 'Other Methods', revenue: 0, count: 0, color: '#8B5CF6' }
+    };
 
     filteredOrders.forEach((o) => {
+      const pm = (o.paymentMethod || o.payment?.method || 'cod').toLowerCase();
+      const pKey = pm === 'cod' ? 'cod' : pm === 'wallet' ? 'wallet' : pm === 'online' ? 'online' : 'other';
+
       if (o.status === 'Delivered') {
         const tot = Number(o.fees?.total || 0);
         const sFee = Number(o.fees?.serviceFee || 0);
@@ -128,6 +140,10 @@ export const Reports: React.FC = () => {
         totalDeliveredRevenue += tot;
         totalPlatformCommission += sFee + sub * 0.15;
         deliveredCount++;
+
+        // Track payment method revenue
+        paymentMap[pKey].revenue += tot;
+        paymentMap[pKey].count += 1;
 
         // Merchant ranking
         if (o.merchantId || o.merchantName) {
@@ -168,6 +184,40 @@ export const Reports: React.FC = () => {
       .sort((a, b) => b.count - a.count)
       .slice(0, 5);
 
+    const paymentChartData = [
+      {
+        name: 'COD',
+        label: 'Cash on Delivery',
+        revenue: paymentMap.cod.revenue,
+        count: paymentMap.cod.count,
+        color: '#10B981'
+      },
+      {
+        name: 'Delivio Wallet',
+        label: 'Delivio Wallet',
+        revenue: paymentMap.wallet.revenue,
+        count: paymentMap.wallet.count,
+        color: '#FFC107'
+      },
+      {
+        name: 'Paid Online',
+        label: 'Paid Online',
+        revenue: paymentMap.online.revenue,
+        count: paymentMap.online.count,
+        color: '#3B82F6'
+      }
+    ];
+
+    if (paymentMap.other.revenue > 0) {
+      paymentChartData.push({
+        name: 'Other',
+        label: 'Other Methods',
+        revenue: paymentMap.other.revenue,
+        count: paymentMap.other.count,
+        color: '#8B5CF6'
+      });
+    }
+
     return {
       totalOrders: filteredOrders.length,
       deliveredCount,
@@ -176,7 +226,9 @@ export const Reports: React.FC = () => {
       totalPlatformCommission,
       merchantRankings,
       riderRankings,
-      cancellationChartData
+      cancellationChartData,
+      paymentMap,
+      paymentChartData
     };
   }, [filteredOrders]);
 
@@ -190,6 +242,7 @@ export const Reports: React.FC = () => {
       Rider: o.riderName || '',
       Total: o.fees?.total || 0,
       ServiceFee: o.fees?.serviceFee || 0,
+      PaymentMethod: o.paymentMethod || 'cod',
       CancelReason: o.cancelReason || '',
       Date: formatTimestamp(o.createdAt)
     }));
@@ -280,6 +333,117 @@ export const Reports: React.FC = () => {
             </span>
           </div>
         </div>
+      </div>
+
+      {/* Revenue by Payment Method Section */}
+      <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-5">
+        <div>
+          <h3 className="font-extrabold text-base text-gray-900 dark:text-white flex items-center gap-2">
+            <DollarSign className="w-5 h-5 text-amber-500" />
+            Revenue by Payment Method
+          </h3>
+          <p className="text-xs text-gray-400 mt-0.5">
+            Breakdown of delivered gross sales and order volume across Cash on Delivery, Delivio Wallet, and Online payments.
+          </p>
+        </div>
+
+        {/* 3 Metric Cards for Payment Methods */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {/* COD */}
+          <div className="p-4 rounded-2xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/50">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
+                <Banknote className="w-4 h-4 text-emerald-600" /> Cash on Delivery (COD)
+              </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300">
+                {metrics.paymentMap.cod.count} orders
+              </span>
+            </div>
+            <div className="text-2xl font-black text-emerald-700 dark:text-emerald-400 mt-2">
+              ₱{metrics.paymentMap.cod.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <p className="text-[11px] text-emerald-600/80 dark:text-emerald-400/70 mt-1">
+              {metrics.totalDeliveredRevenue > 0
+                ? ((metrics.paymentMap.cod.revenue / metrics.totalDeliveredRevenue) * 100).toFixed(1)
+                : 0}
+              % of total delivered sales
+            </p>
+          </div>
+
+          {/* Delivio Wallet */}
+          <div className="p-4 rounded-2xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                <Wallet className="w-4 h-4 text-amber-600" /> Delivio Wallet
+              </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300">
+                {metrics.paymentMap.wallet.count} orders
+              </span>
+            </div>
+            <div className="text-2xl font-black text-amber-700 dark:text-amber-400 mt-2">
+              ₱{metrics.paymentMap.wallet.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <p className="text-[11px] text-amber-600/80 dark:text-amber-400/70 mt-1">
+              {metrics.totalDeliveredRevenue > 0
+                ? ((metrics.paymentMap.wallet.revenue / metrics.totalDeliveredRevenue) * 100).toFixed(1)
+                : 0}
+              % of total delivered sales
+            </p>
+          </div>
+
+          {/* Paid Online */}
+          <div className="p-4 rounded-2xl bg-blue-50/60 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900/50">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-blue-800 dark:text-blue-300 flex items-center gap-1.5">
+                <CreditCard className="w-4 h-4 text-blue-600" /> Paid Online
+              </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-800 dark:text-blue-300">
+                {metrics.paymentMap.online.count} orders
+              </span>
+            </div>
+            <div className="text-2xl font-black text-blue-700 dark:text-blue-400 mt-2">
+              ₱{metrics.paymentMap.online.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <p className="text-[11px] text-blue-600/80 dark:text-blue-400/70 mt-1">
+              {metrics.totalDeliveredRevenue > 0
+                ? ((metrics.paymentMap.online.revenue / metrics.totalDeliveredRevenue) * 100).toFixed(1)
+                : 0}
+              % of total delivered sales
+            </p>
+          </div>
+        </div>
+
+        {/* Revenue Distribution Bar Chart */}
+        {metrics.totalDeliveredRevenue > 0 && (
+          <div className="pt-2">
+            <div className="h-48 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={metrics.paymentChartData}>
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
+                  <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                  <YAxis
+                    tick={{ fontSize: 11 }}
+                    tickFormatter={(v) => `₱${v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v}`}
+                  />
+                  <Tooltip
+                    formatter={(val: any) => [`₱${Number(val).toLocaleString()}`, 'Delivered Sales']}
+                    contentStyle={{
+                      backgroundColor: '#18181b',
+                      borderRadius: '10px',
+                      color: '#fff',
+                      fontSize: '11px'
+                    }}
+                  />
+                  <Bar dataKey="revenue" radius={[6, 6, 0, 0]}>
+                    {metrics.paymentChartData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.color} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Cancellation Reasons Breakdown Chart */}

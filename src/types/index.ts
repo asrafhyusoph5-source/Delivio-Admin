@@ -128,9 +128,19 @@ export interface Order {
   };
   finalReceiptTotal?: number;
   fees: OrderFees;
-  paymentMethod: 'cod' | 'online' | 'merchant';
+  paymentMethod: 'cod' | 'online' | 'merchant' | 'wallet' | string;
+  paymentStatus?: string;
+  paymentProvider?: string;
+  payment?: {
+    method?: string;
+    provider?: string;
+    status?: string;
+    [key: string]: any;
+  };
+  cashToCollect?: number;
   codAmount?: number;
   codCollected?: number;
+  walletRefunded?: boolean;
   cityId?: string;
   cancelReason?: string;
   cancelFault?: 'customer' | 'merchant' | 'rider' | 'platform';
@@ -140,6 +150,22 @@ export interface Order {
   updatedAt?: any;
   pickedUpAt?: any;
   deliveredAt?: any;
+}
+
+export interface WalletTransaction {
+  id?: string;
+  customerId?: string;
+  riderId?: string;
+  type: 'cash_in' | 'adjustment' | 'refund' | 'order_payment' | string;
+  amount: number;
+  note?: string;
+  reason?: string;
+  adminId?: string;
+  adminName?: string;
+  balanceAfter?: number;
+  orderId?: string;
+  orderNumber?: string;
+  createdAt?: any;
 }
 
 export interface Merchant {

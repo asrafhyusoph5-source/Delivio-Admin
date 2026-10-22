@@ -9,8 +9,11 @@ import {
   onSnapshot,
   doc,
   updateDoc,
+  getDoc,
   arrayUnion,
-  Timestamp
+  Timestamp,
+  runTransaction,
+  increment
 } from '../firebase';
 import { useCity } from '../context/CityContext';
 import { useAuth } from '../context/AuthContext';
@@ -38,9 +41,69 @@ import {
   MapPin,
   ExternalLink,
   Loader2,
-  ChevronRight
+  ChevronRight,
+  Wallet,
+  CreditCard,
+  Banknote
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
+
+export const PaymentChip: React.FC<{ order: Order }> = ({ order }) => {
+  const method = (order.paymentMethod || order.payment?.method || 'cod').toLowerCase();
+  const provider = order.paymentProvider || order.payment?.provider;
+  const status =
+    order.paymentStatus ||
+    order.payment?.status ||
+    (order.walletRefunded ? 'Refunded' : method === 'wallet' ? 'Paid' : 'Pending');
+  const isRefunded = order.walletRefunded;
+
+  if (method === 'wallet') {
+    return (
+      <div className="inline-flex flex-col gap-0.5 items-start">
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700">
+          <Wallet className="w-3 h-3 text-amber-600 shrink-0" />
+          <span>Delivio Wallet</span>
+        </span>
+        <span
+          className={`text-[9px] font-semibold px-1 rounded ${
+            isRefunded
+              ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300 font-bold'
+              : 'text-gray-500 dark:text-zinc-400'
+          }`}
+        >
+          {isRefunded ? 'Refunded' : status || 'Paid'}
+        </span>
+      </div>
+    );
+  }
+
+  if (method === 'online') {
+    return (
+      <div className="inline-flex flex-col gap-0.5 items-start">
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-900 dark:bg-blue-950/70 dark:text-blue-300 border border-blue-300 dark:border-blue-700">
+          <CreditCard className="w-3 h-3 text-blue-600 shrink-0" />
+          <span>Paid Online{provider ? ` (${provider})` : ''}</span>
+        </span>
+        <span className="text-[9px] font-semibold text-gray-500 dark:text-zinc-400 px-1">
+          {status || 'Paid'}
+        </span>
+      </div>
+    );
+  }
+
+  // COD default
+  return (
+    <div className="inline-flex flex-col gap-0.5 items-start">
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
+        <Banknote className="w-3 h-3 text-emerald-600 shrink-0" />
+        <span>COD</span>
+      </span>
+      <span className="text-[9px] font-semibold text-gray-500 dark:text-zinc-400 px-1">
+        {order.codCollected ? 'Collected' : status || 'To Collect'}
+      </span>
+    </div>
+  );
+};
 
 const EXACT_STATUSES: OrderStatus[] = [
   'Placed Order',
@@ -85,6 +148,7 @@ export const LiveOrders: React.FC = () => {
   const [cancelFault, setCancelFault] = useState<'customer' | 'merchant' | 'rider' | 'platform'>('customer');
   const [cancelReasonPicker, setCancelReasonPicker] = useState('Customer changed mind');
   const [cancelNote, setCancelNote] = useState('');
+  const [refundToWallet, setRefundToWallet] = useState(true);
   const [cancelling, setCancelling] = useState(false);
 
   // Reassign Modal State
@@ -135,8 +199,13 @@ export const LiveOrders: React.FC = () => {
             finalReceiptTotal: data.finalReceiptTotal,
             fees: data.fees || { subtotal: 0, deliveryFee: 0, serviceFee: 0, discount: 0, total: 0 },
             paymentMethod: data.paymentMethod || 'cod',
+            paymentStatus: data.paymentStatus,
+            paymentProvider: data.paymentProvider,
+            payment: data.payment,
+            cashToCollect: data.cashToCollect,
             codAmount: data.codAmount,
             codCollected: data.codCollected,
+            walletRefunded: data.walletRefunded,
             cityId: data.cityId,
             cancelReason: data.cancelReason,
             cancelFault: data.cancelFault,
@@ -197,8 +266,11 @@ export const LiveOrders: React.FC = () => {
         return false;
       }
       // 4. Payment Method Filter
-      if (paymentFilter !== 'all' && order.paymentMethod !== paymentFilter) {
-        return false;
+      if (paymentFilter !== 'all') {
+        const pm = (order.paymentMethod || order.payment?.method || 'cod').toLowerCase();
+        if (pm !== paymentFilter) {
+          return false;
+        }
       }
       // 5. Date Filter
       if (dateFilter !== 'all') {
@@ -304,7 +376,7 @@ export const LiveOrders: React.FC = () => {
     };
   }, [selectedOrder]);
 
-  // Action 1: Cancel Order
+  // Action 1: Cancel Order (Atomic Transaction for Wallet Refund)
   const handleCancelOrder = async () => {
     if (!selectedOrder) return;
     try {
@@ -312,18 +384,102 @@ export const LiveOrders: React.FC = () => {
       const orderRef = doc(db, 'orders', selectedOrder.id);
       const now = Timestamp.now();
       const fullReason = `${cancelReasonPicker}${cancelNote ? ': ' + cancelNote : ''}`;
+      const isWalletPaid =
+        (selectedOrder.paymentMethod || selectedOrder.payment?.method || '').toLowerCase() ===
+        'wallet';
+      const willRefund = isWalletPaid && refundToWallet;
 
-      await updateDoc(orderRef, {
-        status: 'Cancelled',
-        cancelReason: fullReason,
-        cancelFault: cancelFault,
-        cancelledBy: 'admin',
-        statusHistory: arrayUnion({
-          status: 'Cancelled',
-          at: now,
-          note: `Cancelled by Admin (${adminProfile?.name || 'Operations'}): ${fullReason} (Fault: ${cancelFault})`
-        }),
-        updatedAt: now
+      await runTransaction(db, async (transaction) => {
+        const orderSnap = await transaction.get(orderRef);
+        if (!orderSnap.exists()) {
+          throw new Error('Order not found in database.');
+        }
+        const orderData = orderSnap.data();
+
+        if (orderData.status === 'Cancelled') {
+          throw new Error('This order is already cancelled.');
+        }
+
+        if (willRefund) {
+          // Continue only if walletRefunded is not true
+          if (orderData.walletRefunded === true) {
+            throw new Error('This order has already been refunded to the customer wallet.');
+          }
+
+          const customerId = orderData.customerId || selectedOrder.customerId;
+          if (!customerId) {
+            throw new Error('Customer ID missing on order. Cannot refund to wallet.');
+          }
+
+          const userRef = doc(db, 'users', customerId);
+          const userSnap = await transaction.get(userRef);
+          const currentBal = userSnap.exists() ? Number(userSnap.data()?.walletBalance || 0) : 0;
+          const refundAmount = Number(orderData.fees?.total ?? selectedOrder.fees?.total ?? 0);
+          const newBal = currentBal + refundAmount;
+
+          // 1. Update order: set walletRefunded true and Cancelled status
+          transaction.update(orderRef, {
+            status: 'Cancelled',
+            cancelReason: fullReason,
+            cancelFault: cancelFault,
+            cancelledBy: 'admin',
+            walletRefunded: true,
+            paymentStatus: 'Refunded',
+            statusHistory: arrayUnion({
+              status: 'Cancelled',
+              at: now,
+              note: `Cancelled by Admin (${adminProfile?.name || 'Operations'}): ${fullReason} (Fault: ${cancelFault}). Refunded ₱${refundAmount.toFixed(2)} to customer wallet.`
+            }),
+            updatedAt: now
+          });
+
+          // 2. Increment users.walletBalance by fees.total
+          if (userSnap.exists()) {
+            transaction.update(userRef, {
+              walletBalance: increment(refundAmount),
+              updatedAt: now
+            });
+          } else {
+            transaction.set(
+              userRef,
+              {
+                walletBalance: refundAmount,
+                updatedAt: now
+              },
+              { merge: true }
+            );
+          }
+
+          // 3. Create walletTransactions entry type "refund"
+          const txnRef = doc(collection(db, 'walletTransactions'));
+          transaction.set(txnRef, {
+            customerId,
+            orderId: selectedOrder.id,
+            orderNumber: orderData.orderNumber || selectedOrder.orderNumber,
+            type: 'refund',
+            amount: refundAmount,
+            note: `Refund for cancelled order #${orderData.orderNumber || selectedOrder.orderNumber}`,
+            reason: fullReason,
+            adminId: adminProfile?.uid || 'admin',
+            adminName: adminProfile?.name || 'Administrator',
+            balanceAfter: newBal,
+            createdAt: now
+          });
+        } else {
+          // Standard cancellation without wallet refund
+          transaction.update(orderRef, {
+            status: 'Cancelled',
+            cancelReason: fullReason,
+            cancelFault: cancelFault,
+            cancelledBy: 'admin',
+            statusHistory: arrayUnion({
+              status: 'Cancelled',
+              at: now,
+              note: `Cancelled by Admin (${adminProfile?.name || 'Operations'}): ${fullReason} (Fault: ${cancelFault})`
+            }),
+            updatedAt: now
+          });
+        }
       });
 
       // Write Audit Log
@@ -334,14 +490,34 @@ export const LiveOrders: React.FC = () => {
         action: 'CANCEL_ORDER',
         entityType: 'order',
         entityId: selectedOrder.id,
-        details: `Cancelled order #${selectedOrder.orderNumber}. Fault: ${cancelFault}. Reason: ${fullReason}`,
+        details: `Cancelled order #${selectedOrder.orderNumber}. Fault: ${cancelFault}. Reason: ${fullReason}${
+          willRefund ? ' (Refunded to customer wallet)' : ''
+        }`,
         oldValue: { status: selectedOrder.status },
-        newValue: { status: 'Cancelled', cancelReason: fullReason, cancelFault }
+        newValue: {
+          status: 'Cancelled',
+          cancelReason: fullReason,
+          cancelFault,
+          walletRefunded: willRefund
+        }
       });
 
-      showSuccess(`Order #${selectedOrder.orderNumber} successfully cancelled.`);
+      showSuccess(
+        `Order #${selectedOrder.orderNumber} successfully cancelled.${
+          willRefund ? ' Refunded to customer wallet.' : ''
+        }`
+      );
       setCancelModalOpen(false);
-      setSelectedOrder((prev) => (prev ? { ...prev, status: 'Cancelled', cancelReason: fullReason } : null));
+      setSelectedOrder((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: 'Cancelled',
+              cancelReason: fullReason,
+              walletRefunded: willRefund ? true : prev.walletRefunded
+            }
+          : null
+      );
     } catch (err: any) {
       showError(err);
     } finally {
@@ -416,7 +592,18 @@ export const LiveOrders: React.FC = () => {
       TotalFee: o.fees?.total || 0,
       Subtotal: o.fees?.subtotal || 0,
       DeliveryFee: o.fees?.deliveryFee || 0,
-      PaymentMethod: o.paymentMethod,
+      PaymentMethod: o.paymentMethod || 'cod',
+      PaymentStatus:
+        o.paymentStatus ||
+        (o.walletRefunded
+          ? 'Refunded'
+          : (o.paymentMethod || '').toLowerCase() === 'wallet'
+          ? 'Paid'
+          : 'Pending'),
+      PaymentProvider: o.paymentProvider || o.payment?.provider || '',
+      CashToCollect: o.cashToCollect ?? o.codAmount ?? 0,
+      CODCollected: o.codCollected ?? 0,
+      WalletRefunded: o.walletRefunded ? 'Yes' : 'No',
       City: cities.find((c) => c.id === o.cityId)?.name || o.cityId || '',
       Created: formatTimestamp(o.createdAt)
     }));
@@ -493,7 +680,7 @@ export const LiveOrders: React.FC = () => {
 
       {/* Filter Toolbar */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-4 shadow-xs space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
           {/* Search bar */}
           <div className="lg:col-span-2 relative">
             <Search className="w-4 h-4 absolute left-3.5 top-3 text-gray-400" />
@@ -538,6 +725,20 @@ export const LiveOrders: React.FC = () => {
             </select>
           </div>
 
+          {/* Payment Method Filter */}
+          <div>
+            <select
+              value={paymentFilter}
+              onChange={(e) => setPaymentFilter(e.target.value)}
+              className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+            >
+              <option value="all">All Payment Methods</option>
+              <option value="cod">COD (Cash on Delivery)</option>
+              <option value="wallet">Delivio Wallet</option>
+              <option value="online">Paid Online</option>
+            </select>
+          </div>
+
           {/* Date Filter */}
           <div>
             <select
@@ -566,6 +767,7 @@ export const LiveOrders: React.FC = () => {
                   <th className="px-4 py-3.5">Customer</th>
                   <th className="px-4 py-3.5">Merchant / Pickup</th>
                   <th className="px-4 py-3.5">Rider</th>
+                  <th className="px-4 py-3.5">Payment</th>
                   <th className="px-4 py-3.5">Total Amount</th>
                   <th className="px-4 py-3.5">Created</th>
                   <th className="px-4 py-3.5 text-right">Action</th>
@@ -574,7 +776,7 @@ export const LiveOrders: React.FC = () => {
               <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 font-medium">
                 {filteredOrders.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="text-center py-12 text-gray-400 text-xs">
+                    <td colSpan={10} className="text-center py-12 text-gray-400 text-xs">
                       No matching orders found.
                     </td>
                   </tr>
@@ -630,11 +832,11 @@ export const LiveOrders: React.FC = () => {
                           </span>
                         )}
                       </td>
+                      <td className="px-4 py-3">
+                        <PaymentChip order={order} />
+                      </td>
                       <td className="px-4 py-3 font-bold text-gray-900 dark:text-white">
                         ₱{Number(order.fees?.total || 0).toFixed(2)}
-                        <span className="text-[10px] font-normal uppercase text-gray-400 ml-1">
-                          ({order.paymentMethod})
-                        </span>
                       </td>
                       <td className="px-4 py-3 text-gray-500 dark:text-zinc-400 whitespace-nowrap">
                         {formatRelativeTime(order.createdAt)}
@@ -708,13 +910,19 @@ export const LiveOrders: React.FC = () => {
                         <p className="text-[11px] text-gray-500 dark:text-zinc-400 mb-2">
                           Customer: {ord.customerName}
                         </p>
-                        <div className="flex items-center justify-between pt-2 border-t border-gray-100 dark:border-zinc-800 text-xs">
-                          <span className="font-bold text-amber-600">
-                            ₱{Number(ord.fees?.total || 0).toFixed(2)}
-                          </span>
-                          <span className="text-[11px] font-semibold text-gray-600 dark:text-zinc-400">
-                            {ord.riderName || 'Unassigned'}
-                          </span>
+                        <div className="pt-2 border-t border-gray-100 dark:border-zinc-800 space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <PaymentChip order={ord} />
+                            <span className="font-black text-amber-600 text-xs">
+                              ₱{Number(ord.fees?.total || 0).toFixed(2)}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-gray-500 flex justify-between">
+                            <span>Rider:</span>
+                            <span className="font-semibold text-gray-700 dark:text-zinc-300 truncate max-w-[120px]">
+                              {ord.riderName || 'Unassigned'}
+                            </span>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -790,7 +998,13 @@ export const LiveOrders: React.FC = () => {
                         <RotateCcw className="w-3.5 h-3.5" /> Reassign
                       </button>
                       <button
-                        onClick={() => setCancelModalOpen(true)}
+                        onClick={() => {
+                          const isWalletPaid =
+                            (selectedOrder.paymentMethod || selectedOrder.payment?.method || '').toLowerCase() ===
+                            'wallet';
+                          setRefundToWallet(isWalletPaid);
+                          setCancelModalOpen(true);
+                        }}
                         className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-bold hover:bg-red-700 shadow-xs transition-colors"
                       >
                         <Ban className="w-3.5 h-3.5" /> Cancel Order
@@ -973,12 +1187,76 @@ export const LiveOrders: React.FC = () => {
                     ₱{Number(selectedOrder.fees?.total || 0).toFixed(2)}
                   </span>
                 </div>
-                <div className="pt-1 flex items-center justify-between text-xs text-gray-400">
-                  <span>Payment Method:</span>
-                  <span className="font-bold uppercase text-gray-700 dark:text-zinc-300">
-                    {selectedOrder.paymentMethod}
-                    {selectedOrder.codAmount ? ` (COD: ₱${selectedOrder.codAmount})` : ''}
-                  </span>
+                <div className="pt-2 border-t border-gray-200 dark:border-zinc-800 space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-500">Payment Method:</span>
+                    <span className="font-bold uppercase text-gray-800 dark:text-zinc-200 flex items-center gap-1.5">
+                      {selectedOrder.paymentMethod || 'COD'}
+                      {selectedOrder.paymentProvider && (
+                        <span className="text-[10px] lowercase text-gray-400 font-normal">
+                          ({selectedOrder.paymentProvider})
+                        </span>
+                      )}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-500">Payment Status:</span>
+                    <span
+                      className={`font-bold px-2 py-0.5 rounded text-[10px] uppercase ${
+                        selectedOrder.walletRefunded
+                          ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
+                          : selectedOrder.paymentStatus === 'Paid' ||
+                            ((selectedOrder.paymentMethod || '').toLowerCase() === 'wallet' &&
+                              !selectedOrder.walletRefunded)
+                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                          : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                      }`}
+                    >
+                      {selectedOrder.walletRefunded
+                        ? 'Refunded'
+                        : selectedOrder.paymentStatus ||
+                          ((selectedOrder.paymentMethod || '').toLowerCase() === 'wallet'
+                            ? 'Paid'
+                            : 'Pending')}
+                    </span>
+                  </div>
+
+                  {(selectedOrder.cashToCollect !== undefined ||
+                    selectedOrder.codAmount !== undefined) && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-500">Cash to Collect (Rider):</span>
+                      <span className="font-extrabold text-amber-600">
+                        ₱{Number(selectedOrder.cashToCollect ?? selectedOrder.codAmount ?? 0).toFixed(2)}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-500">COD Collected:</span>
+                    <span
+                      className={`font-bold text-xs ${
+                        Number(selectedOrder.codCollected || 0) > 0
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : 'text-gray-400'
+                      }`}
+                    >
+                      ₱{Number(selectedOrder.codCollected || 0).toFixed(2)}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-500">Wallet Refunded:</span>
+                    <span
+                      className={`font-bold px-2 py-0.5 rounded text-[10px] uppercase ${
+                        selectedOrder.walletRefunded
+                          ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
+                          : 'bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400'
+                      }`}
+                    >
+                      {selectedOrder.walletRefunded ? 'Yes (Refunded)' : 'No'}
+                    </span>
+                  </div>
                 </div>
               </div>
 
@@ -1069,6 +1347,34 @@ export const LiveOrders: React.FC = () => {
                   className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
                 />
               </div>
+
+              {/* Wallet Refund Checkbox (for wallet-paid orders) */}
+              {(selectedOrder.paymentMethod || selectedOrder.payment?.method || '').toLowerCase() ===
+                'wallet' && (
+                <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800">
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={refundToWallet}
+                      onChange={(e) => setRefundToWallet(e.target.checked)}
+                      disabled={selectedOrder.walletRefunded}
+                      className="mt-0.5 rounded border-gray-300 text-amber-500 focus:ring-amber-400"
+                    />
+                    <div>
+                      <span className="font-bold text-xs text-amber-900 dark:text-amber-200 block">
+                        Refund to customer's wallet
+                      </span>
+                      <span className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
+                        {selectedOrder.walletRefunded
+                          ? 'This order has already been refunded to the customer wallet.'
+                          : `Automatically refund ₱${Number(
+                              selectedOrder.fees?.total || 0
+                            ).toFixed(2)} back to customer's Delivio Wallet.`}
+                      </span>
+                    </div>
+                  </label>
+                </div>
+              )}
 
               <div className="flex justify-end gap-2 pt-2">
                 <button

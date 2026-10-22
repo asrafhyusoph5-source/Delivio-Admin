@@ -12,7 +12,9 @@ import {
   updateDoc,
   startAfter,
   Timestamp,
-  arrayUnion
+  arrayUnion,
+  writeBatch,
+  increment
 } from '../firebase';
 import { useCity } from '../context/CityContext';
 import { useAuth } from '../context/AuthContext';
@@ -20,7 +22,7 @@ import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
-import type { UserProfile, UserAddress, Order, EditHistoryEntry } from '../types';
+import type { UserProfile, UserAddress, Order, EditHistoryEntry, WalletTransaction } from '../types';
 import {
   Search,
   Filter,
@@ -43,7 +45,14 @@ import {
   AlertTriangle,
   ArrowUpDown,
   ShoppingBag,
-  ExternalLink
+  ExternalLink,
+  Wallet,
+  PlusCircle,
+  MinusCircle,
+  ArrowDownLeft,
+  ArrowUpRight,
+  Receipt,
+  CheckCircle2
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
@@ -70,9 +79,23 @@ export const Customers: React.FC = () => {
   const [selectedCustomer, setSelectedCustomer] = useState<UserProfile | null>(null);
   const [customerAddresses, setCustomerAddresses] = useState<UserAddress[]>([]);
   const [customerOrders, setCustomerOrders] = useState<Order[]>([]);
+  const [customerWalletTxns, setCustomerWalletTxns] = useState<WalletTransaction[]>([]);
+  const [loadingWallet, setLoadingWallet] = useState(false);
   const [customerEditHistory, setCustomerEditHistory] = useState<EditHistoryEntry[]>([]);
   const [historySortAsc, setHistorySortAsc] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'history' | 'location'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'wallet' | 'transactions' | 'history' | 'location'>('overview');
+
+  // Add Cash Modal
+  const [addCashModalOpen, setAddCashModalOpen] = useState(false);
+  const [addCashAmount, setAddCashAmount] = useState('');
+  const [addCashNote, setAddCashNote] = useState('');
+  const [submittingCashIn, setSubmittingCashIn] = useState(false);
+
+  // Adjust / Deduct Modal
+  const [adjustModalOpen, setAdjustModalOpen] = useState(false);
+  const [adjustAmount, setAdjustAmount] = useState('');
+  const [adjustReason, setAdjustReason] = useState('');
+  const [submittingAdjust, setSubmittingAdjust] = useState(false);
 
   // Edit Customer Modal
   const [editModalOpen, setEditModalOpen] = useState(false);
@@ -195,7 +218,11 @@ export const Customers: React.FC = () => {
             statusHistory: dt.statusHistory || [],
             fees: dt.fees || { subtotal: 0, deliveryFee: 0, serviceFee: 0, discount: 0, total: 0 },
             paymentMethod: dt.paymentMethod || 'cod',
-            createdAt: dt.createdAt
+            payment: dt.payment,
+            paymentStatus: dt.paymentStatus,
+            walletRefunded: dt.walletRefunded,
+            createdAt: dt.createdAt,
+            updatedAt: dt.updatedAt
           });
         });
         ords.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
@@ -205,7 +232,41 @@ export const Customers: React.FC = () => {
       }
     };
 
-    // C. Fetch Edit History
+    // C. Fetch Wallet Transactions
+    const fetchWalletTxns = async () => {
+      try {
+        setLoadingWallet(true);
+        const txRef = collection(db, 'walletTransactions');
+        const q = query(txRef, where('customerId', '==', selectedCustomer.uid), limit(100));
+        const snap = await getDocs(q);
+        const list: WalletTransaction[] = [];
+        snap.forEach((d) => {
+          const dt = d.data();
+          list.push({
+            id: d.id,
+            customerId: dt.customerId,
+            type: dt.type || 'cash_in',
+            amount: Number(dt.amount || 0),
+            note: dt.note || '',
+            reason: dt.reason || '',
+            adminId: dt.adminId,
+            adminName: dt.adminName,
+            balanceAfter: dt.balanceAfter,
+            orderId: dt.orderId,
+            orderNumber: dt.orderNumber,
+            createdAt: dt.createdAt
+          });
+        });
+        list.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+        setCustomerWalletTxns(list);
+      } catch (err) {
+        console.error('Failed to load wallet transactions:', err);
+      } finally {
+        setLoadingWallet(false);
+      }
+    };
+
+    // D. Fetch Edit History
     const fetchEditHistory = async () => {
       try {
         const historyRef = collection(db, 'editHistory');
@@ -235,8 +296,264 @@ export const Customers: React.FC = () => {
 
     fetchAddresses();
     fetchOrders();
+    fetchWalletTxns();
     fetchEditHistory();
   }, [selectedCustomer]);
+
+  // Merged Wallet History (walletTransactions + wallet-paid orders + refunds)
+  const mergedWalletHistory = useMemo(() => {
+    if (!selectedCustomer) return [];
+
+    const items: Array<{
+      id: string;
+      type: 'cash_in' | 'adjustment' | 'refund' | 'order_payment' | string;
+      amount: number;
+      title: string;
+      note?: string;
+      adminName?: string;
+      balanceAfter?: number;
+      createdAt: any;
+      orderNumber?: string;
+    }> = [];
+
+    const seenOrderRefunds = new Set<string>();
+    const seenOrderPayments = new Set<string>();
+
+    customerWalletTxns.forEach((tx) => {
+      if (tx.orderId && tx.type === 'refund') seenOrderRefunds.add(tx.orderId);
+      if (tx.orderId && tx.type === 'order_payment') seenOrderPayments.add(tx.orderId);
+
+      let title = 'Wallet Transaction';
+      if (tx.type === 'cash_in') title = 'Cash In / Top-Up';
+      else if (tx.type === 'adjustment') title = 'Balance Deduction / Adjustment';
+      else if (tx.type === 'refund') title = `Refund ${tx.orderNumber ? '#' + tx.orderNumber : ''}`;
+      else if (tx.type === 'order_payment') title = `Order Payment ${tx.orderNumber ? '#' + tx.orderNumber : ''}`;
+
+      items.push({
+        id: tx.id || Math.random().toString(),
+        type: tx.type,
+        amount: tx.amount,
+        title,
+        note: tx.note || tx.reason,
+        adminName: tx.adminName,
+        balanceAfter: tx.balanceAfter,
+        createdAt: tx.createdAt,
+        orderNumber: tx.orderNumber
+      });
+    });
+
+    // Merge customer's wallet-paid orders
+    customerOrders.forEach((ord) => {
+      const isWallet = ord.paymentMethod === 'wallet' || ord.payment?.method === 'wallet';
+      if (isWallet && !seenOrderPayments.has(ord.id)) {
+        items.push({
+          id: `order-pay-${ord.id}`,
+          type: 'order_payment',
+          amount: -Math.abs(Number(ord.fees?.total || 0)),
+          title: `Paid Order #${ord.orderNumber}`,
+          note: `${ord.merchantName || ord.serviceType} • Status: ${ord.status}`,
+          createdAt: ord.createdAt,
+          orderNumber: ord.orderNumber
+        });
+      }
+
+      // If order has walletRefunded true and not already in walletTransactions
+      if (ord.walletRefunded && !seenOrderRefunds.has(ord.id)) {
+        items.push({
+          id: `order-ref-${ord.id}`,
+          type: 'refund',
+          amount: Math.abs(Number(ord.fees?.total || 0)),
+          title: `Refund for Order #${ord.orderNumber}`,
+          note: `Order cancelled & refunded to wallet`,
+          createdAt: ord.updatedAt || ord.createdAt,
+          orderNumber: ord.orderNumber
+        });
+      }
+    });
+
+    items.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+    return items;
+  }, [customerWalletTxns, customerOrders, selectedCustomer]);
+
+  // Action: Add Cash to Customer Wallet
+  const handleAddCash = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedCustomer) return;
+    const amountNum = parseFloat(addCashAmount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      showError('Please enter a valid amount greater than 0.');
+      return;
+    }
+
+    try {
+      setSubmittingCashIn(true);
+      const batch = writeBatch(db);
+      const userRef = doc(db, 'users', selectedCustomer.uid);
+      const currentBal = Number(selectedCustomer.walletBalance || 0);
+      const newBal = currentBal + amountNum;
+      const now = Timestamp.now();
+      const noteClean = addCashNote.trim() || 'Admin cash deposit';
+
+      // 1. Increment users.walletBalance
+      batch.update(userRef, {
+        walletBalance: increment(amountNum),
+        updatedAt: now
+      });
+
+      // 2. Create walletTransactions entry
+      const txnRef = doc(collection(db, 'walletTransactions'));
+      const txnData: WalletTransaction = {
+        customerId: selectedCustomer.uid,
+        type: 'cash_in',
+        amount: amountNum,
+        note: noteClean,
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        balanceAfter: newBal,
+        createdAt: now
+      };
+      batch.set(txnRef, txnData);
+
+      // Execute batch write
+      await batch.commit();
+
+      // 3. Write auditLogs and editHistory entries
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'WALLET_ADD_CASH',
+        entityType: 'customer',
+        entityId: selectedCustomer.uid,
+        details: `Credited ₱${amountNum.toFixed(2)} cash to customer wallet (${selectedCustomer.name}). Note: ${noteClean}`,
+        oldValue: { walletBalance: currentBal },
+        newValue: { walletBalance: newBal },
+        reason: noteClean
+      });
+
+      await logEditHistory({
+        entityType: 'customer',
+        entityId: selectedCustomer.uid,
+        field: 'walletBalance',
+        oldValue: currentBal,
+        newValue: newBal,
+        editedBy: adminProfile?.uid || 'admin',
+        editedByName: adminProfile?.name || 'Administrator'
+      });
+
+      showSuccess(`Successfully credited ₱${amountNum.toFixed(2)} to ${selectedCustomer.name}'s wallet.`);
+
+      // Update state
+      setSelectedCustomer((prev) => (prev ? { ...prev, walletBalance: newBal } : null));
+      setCustomers((prev) =>
+        prev.map((c) => (c.uid === selectedCustomer.uid ? { ...c, walletBalance: newBal } : c))
+      );
+      setCustomerWalletTxns((prev) => [{ id: txnRef.id, ...txnData }, ...prev]);
+
+      setAddCashAmount('');
+      setAddCashNote('');
+      setAddCashModalOpen(false);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSubmittingCashIn(false);
+    }
+  };
+
+  // Action: Adjust / Deduct from Customer Wallet
+  const handleAdjustDeduct = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedCustomer) return;
+    const amountNum = parseFloat(adjustAmount);
+    const reasonClean = adjustReason.trim();
+
+    if (isNaN(amountNum) || amountNum <= 0) {
+      showError('Please enter a valid deduction amount greater than 0.');
+      return;
+    }
+    if (!reasonClean) {
+      showError('A mandatory reason is required to adjust or deduct wallet balance.');
+      return;
+    }
+    const currentBal = Number(selectedCustomer.walletBalance || 0);
+    if (amountNum > currentBal) {
+      showError(`Cannot deduct ₱${amountNum.toFixed(2)}. Customer balance is only ₱${currentBal.toFixed(2)} (balance cannot go below 0).`);
+      return;
+    }
+
+    try {
+      setSubmittingAdjust(true);
+      const batch = writeBatch(db);
+      const userRef = doc(db, 'users', selectedCustomer.uid);
+      const newBal = Math.max(0, currentBal - amountNum);
+      const now = Timestamp.now();
+
+      // 1. Decrement users.walletBalance
+      batch.update(userRef, {
+        walletBalance: increment(-amountNum),
+        updatedAt: now
+      });
+
+      // 2. Create walletTransactions entry
+      const txnRef = doc(collection(db, 'walletTransactions'));
+      const txnData: WalletTransaction = {
+        customerId: selectedCustomer.uid,
+        type: 'adjustment',
+        amount: -amountNum,
+        note: reasonClean,
+        reason: reasonClean,
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        balanceAfter: newBal,
+        createdAt: now
+      };
+      batch.set(txnRef, txnData);
+
+      // Execute batch write
+      await batch.commit();
+
+      // 3. Write auditLogs and editHistory entries
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'WALLET_ADJUST_DEDUCT',
+        entityType: 'customer',
+        entityId: selectedCustomer.uid,
+        details: `Deducted/adjusted ₱${amountNum.toFixed(2)} from ${selectedCustomer.name}'s wallet. Reason: ${reasonClean}`,
+        oldValue: { walletBalance: currentBal },
+        newValue: { walletBalance: newBal },
+        reason: reasonClean
+      });
+
+      await logEditHistory({
+        entityType: 'customer',
+        entityId: selectedCustomer.uid,
+        field: 'walletBalance',
+        oldValue: currentBal,
+        newValue: newBal,
+        editedBy: adminProfile?.uid || 'admin',
+        editedByName: adminProfile?.name || 'Administrator'
+      });
+
+      showSuccess(`Successfully deducted ₱${amountNum.toFixed(2)} from ${selectedCustomer.name}'s wallet.`);
+
+      // Update state
+      setSelectedCustomer((prev) => (prev ? { ...prev, walletBalance: newBal } : null));
+      setCustomers((prev) =>
+        prev.map((c) => (c.uid === selectedCustomer.uid ? { ...c, walletBalance: newBal } : c))
+      );
+      setCustomerWalletTxns((prev) => [{ id: txnRef.id, ...txnData }, ...prev]);
+
+      setAdjustAmount('');
+      setAdjustReason('');
+      setAdjustModalOpen(false);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSubmittingAdjust(false);
+    }
+  };
 
   // 3. Location Leaflet map for customer
   useEffect(() => {
@@ -734,6 +1051,7 @@ export const Customers: React.FC = () => {
             <div className="flex border-b border-gray-200 dark:border-zinc-800 px-5 pt-2">
               {[
                 { id: 'overview', label: 'Overview' },
+                { id: 'wallet', label: `Wallet (₱${Number(selectedCustomer.walletBalance || 0).toFixed(2)})` },
                 { id: 'transactions', label: `Orders (${customerOrders.length})` },
                 { id: 'history', label: `Edit History (${customerEditHistory.length})` },
                 { id: 'location', label: 'Saved Location' }
@@ -852,7 +1170,178 @@ export const Customers: React.FC = () => {
                 </div>
               )}
 
-              {/* TAB 2: TRANSACTIONS / ORDERS */}
+              {/* TAB: WALLET MANAGEMENT & HISTORY */}
+              {activeTab === 'wallet' && (
+                <div className="space-y-6">
+                  {/* Wallet Balance Hero Card */}
+                  <div className="p-5 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-500 text-gray-950 shadow-md">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="p-2 bg-black/10 rounded-xl">
+                          <Wallet className="w-5 h-5 text-gray-950" />
+                        </div>
+                        <span className="text-xs font-black uppercase tracking-wider text-gray-900/80">
+                          Delivio Customer Wallet
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-black/15 text-gray-950">
+                        Realtime Balance
+                      </span>
+                    </div>
+
+                    <div className="mt-4">
+                      <div className="text-3xl font-black tracking-tight">
+                        ₱{Number(selectedCustomer.walletBalance || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </div>
+                      <p className="text-xs text-gray-900/80 mt-1 font-medium">
+                        Stored in <code className="font-mono bg-black/10 px-1 rounded">users/{selectedCustomer.uid}.walletBalance</code>
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 mt-5">
+                      <button
+                        onClick={() => {
+                          setAddCashAmount('');
+                          setAddCashNote('');
+                          setAddCashModalOpen(true);
+                        }}
+                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-gray-950 hover:bg-gray-900 text-white font-bold text-xs shadow-xs transition-colors"
+                      >
+                        <PlusCircle className="w-4 h-4 text-amber-400" />
+                        <span>Add Cash</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          setAdjustAmount('');
+                          setAdjustReason('');
+                          setAdjustModalOpen(true);
+                        }}
+                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-white/90 hover:bg-white text-gray-900 font-bold text-xs shadow-xs transition-colors"
+                      >
+                        <MinusCircle className="w-4 h-4 text-red-600" />
+                        <span>Adjust / Deduct</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Wallet History List */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400">
+                        Wallet Activity & Ledger ({mergedWalletHistory.length})
+                      </h4>
+                      {mergedWalletHistory.length > 0 && (
+                        <button
+                          onClick={() => {
+                            const rows = mergedWalletHistory.map((item) => ({
+                              ID: item.id,
+                              Type: item.type,
+                              Title: item.title,
+                              Amount: item.amount,
+                              BalanceAfter: item.balanceAfter ?? '',
+                              Note: item.note || '',
+                              Admin: item.adminName || '',
+                              Date: formatTimestamp(item.createdAt)
+                            }));
+                            exportToCsv(`${selectedCustomer.name}_wallet_history`, rows);
+                          }}
+                          className="text-xs text-amber-600 font-bold flex items-center gap-1 hover:underline"
+                        >
+                          <Download className="w-3.5 h-3.5" /> Export Ledger
+                        </button>
+                      )}
+                    </div>
+
+                    {loadingWallet ? (
+                      <div className="py-8 flex justify-center text-xs text-gray-400 items-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+                        <span>Loading wallet ledger...</span>
+                      </div>
+                    ) : mergedWalletHistory.length === 0 ? (
+                      <div className="p-8 text-center text-xs text-gray-400 rounded-2xl bg-gray-50 dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800">
+                        No wallet transactions or wallet orders found for this customer.
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {mergedWalletHistory.map((tx) => {
+                          const isPositive = tx.amount > 0;
+                          return (
+                            <div
+                              key={tx.id}
+                              className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800 text-xs flex items-start justify-between gap-3"
+                            >
+                              <div className="flex items-start gap-3">
+                                <div
+                                  className={`p-2 rounded-xl shrink-0 mt-0.5 ${
+                                    tx.type === 'cash_in'
+                                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                      : tx.type === 'refund'
+                                      ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
+                                      : tx.type === 'adjustment'
+                                      ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                                      : 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300'
+                                  }`}
+                                >
+                                  {tx.type === 'cash_in' && <ArrowDownLeft className="w-4 h-4" />}
+                                  {tx.type === 'adjustment' && <ArrowUpRight className="w-4 h-4" />}
+                                  {tx.type === 'refund' && <CheckCircle2 className="w-4 h-4" />}
+                                  {tx.type === 'order_payment' && <Receipt className="w-4 h-4" />}
+                                </div>
+
+                                <div className="space-y-0.5">
+                                  <div className="font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                                    <span>{tx.title}</span>
+                                    <span
+                                      className={`text-[9px] uppercase px-1.5 py-0.2 rounded font-extrabold ${
+                                        tx.type === 'cash_in'
+                                          ? 'bg-emerald-100 text-emerald-800'
+                                          : tx.type === 'refund'
+                                          ? 'bg-blue-100 text-blue-800'
+                                          : tx.type === 'adjustment'
+                                          ? 'bg-amber-100 text-amber-800'
+                                          : 'bg-gray-200 text-gray-800 dark:bg-zinc-800 dark:text-zinc-200'
+                                      }`}
+                                    >
+                                      {tx.type}
+                                    </span>
+                                  </div>
+                                  {tx.note && (
+                                    <p className="text-[11px] text-gray-600 dark:text-zinc-400">
+                                      {tx.note}
+                                    </p>
+                                  )}
+                                  <div className="flex items-center gap-2 text-[10px] text-gray-400 pt-0.5">
+                                    <span>{formatTimestamp(tx.createdAt)}</span>
+                                    {tx.adminName && <span>• Admin: {tx.adminName}</span>}
+                                    {tx.balanceAfter !== undefined && (
+                                      <span>• Balance after: ₱{Number(tx.balanceAfter).toFixed(2)}</span>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="text-right shrink-0">
+                                <div
+                                  className={`text-sm font-black font-mono ${
+                                    isPositive
+                                      ? 'text-emerald-600 dark:text-emerald-400'
+                                      : 'text-red-600 dark:text-red-400'
+                                  }`}
+                                >
+                                  {isPositive ? '+' : ''}₱{Math.abs(tx.amount).toFixed(2)}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 3: TRANSACTIONS / ORDERS */}
               {activeTab === 'transactions' && (
                 <div className="space-y-4">
                   <div className="flex justify-between items-center">
@@ -1105,6 +1594,177 @@ export const Customers: React.FC = () => {
                 >
                   {savingEdit && <Loader2 className="w-4 h-4 animate-spin" />}
                   Save Changes
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Add Cash to Customer Wallet Modal */}
+      {addCashModalOpen && selectedCustomer && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 rounded-xl">
+                  <PlusCircle className="w-5 h-5" />
+                </div>
+                <h3 className="font-bold text-lg text-gray-900 dark:text-white">
+                  Add Cash to Customer Wallet
+                </h3>
+              </div>
+              <button
+                onClick={() => setAddCashModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-gray-500 mb-4">
+              Directly credit cash into <span className="font-bold text-gray-900 dark:text-white">{selectedCustomer.name}</span>'s wallet.
+              Current balance: <span className="font-bold text-emerald-600">₱{Number(selectedCustomer.walletBalance || 0).toFixed(2)}</span>
+            </p>
+
+            <form onSubmit={handleAddCash} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  Amount to Deposit (PHP) <span className="text-red-500">*</span>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-2.5 font-bold text-gray-400 text-sm">₱</span>
+                  <input
+                    type="number"
+                    min="1"
+                    step="0.01"
+                    value={addCashAmount}
+                    onChange={(e) => setAddCashAmount(e.target.value)}
+                    placeholder="0.00"
+                    required
+                    className="w-full pl-8 pr-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm font-bold text-gray-900 dark:text-white"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  Note / Reference Description
+                </label>
+                <textarea
+                  rows={2}
+                  value={addCashNote}
+                  onChange={(e) => setAddCashNote(e.target.value)}
+                  placeholder="e.g. Cash payment received at office, bank transfer ref #..."
+                  className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAddCashModalOpen(false)}
+                  disabled={submittingCashIn}
+                  className="px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-xl"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingCashIn}
+                  className="delivio-btn-yellow px-5 py-2 text-xs font-bold rounded-xl flex items-center gap-2 disabled:opacity-50"
+                >
+                  {submittingCashIn && <Loader2 className="w-4 h-4 animate-spin" />}
+                  Confirm Cash In
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Adjust / Deduct Customer Wallet Modal */}
+      {adjustModalOpen && selectedCustomer && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300 rounded-xl">
+                  <MinusCircle className="w-5 h-5" />
+                </div>
+                <h3 className="font-bold text-lg text-gray-900 dark:text-white">
+                  Adjust / Deduct Customer Wallet
+                </h3>
+              </div>
+              <button
+                onClick={() => setAdjustModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3 mb-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-xs text-amber-800 dark:text-amber-300">
+              Current Available Balance:{' '}
+              <span className="font-extrabold text-sm">
+                ₱{Number(selectedCustomer.walletBalance || 0).toFixed(2)}
+              </span>
+              <p className="text-[11px] mt-1 text-amber-700 dark:text-amber-400">
+                Wallet deductions cannot take the balance below ₱0.00. A valid operational reason is required.
+              </p>
+            </div>
+
+            <form onSubmit={handleAdjustDeduct} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  Amount to Deduct (PHP) <span className="text-red-500">*</span>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-2.5 font-bold text-gray-400 text-sm">₱</span>
+                  <input
+                    type="number"
+                    min="0.01"
+                    max={Number(selectedCustomer.walletBalance || 0)}
+                    step="0.01"
+                    value={adjustAmount}
+                    onChange={(e) => setAdjustAmount(e.target.value)}
+                    placeholder="0.00"
+                    required
+                    className="w-full pl-8 pr-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm font-bold text-gray-900 dark:text-white"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  Reason for Deduction <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  rows={2}
+                  value={adjustReason}
+                  onChange={(e) => setAdjustReason(e.target.value)}
+                  required
+                  placeholder="e.g. Reversing incorrect top-up, dispute resolution, fee penalty..."
+                  className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAdjustModalOpen(false)}
+                  disabled={submittingAdjust}
+                  className="px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-xl"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingAdjust || parseFloat(adjustAmount) > Number(selectedCustomer.walletBalance || 0)}
+                  className="px-5 py-2 text-xs font-bold rounded-xl bg-red-600 hover:bg-red-700 text-white flex items-center gap-2 disabled:opacity-50"
+                >
+                  {submittingAdjust && <Loader2 className="w-4 h-4 animate-spin" />}
+                  Confirm Deduction
                 </button>
               </div>
             </form>
