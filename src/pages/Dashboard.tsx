@@ -82,13 +82,17 @@ export const Dashboard: React.FC = () => {
           status: d.status || 'Placed Order',
           statusHistory: d.statusHistory || [],
           items: d.items || [],
-          fees: d.fees || {
-            subtotal: 0,
-            deliveryFee: 0,
-            serviceFee: 0,
-            discount: 0,
-            total: 0
+          fees: {
+            subtotal: d.fees?.subtotal || 0,
+            deliveryFee: d.fees?.deliveryFee || 0,
+            serviceFee: d.fees?.serviceFee || 0,
+            discount: d.fees?.discount || 0,
+            tip: d.fees?.tip || 0,
+            total: d.fees?.total || 0
           },
+          isPickup: Boolean(d.isPickup || d.fulfillmentType === 'pickup' || d.serviceType === 'pickup'),
+          fulfillmentType: d.fulfillmentType,
+          scheduledFor: d.scheduledFor,
           paymentMethod: d.paymentMethod || 'cod',
           cityId: d.cityId || '',
           cancelReason: d.cancelReason,
@@ -164,7 +168,7 @@ export const Dashboard: React.FC = () => {
       snap.forEach((d) => {
         const data = d.data();
         const st = data.status;
-        const isFinished = st === 'Delivered' || st === 'Rejected' || st === 'Cancelled';
+        const isFinished = st === 'Delivered' || st === 'Completed' || st === 'Rejected' || st === 'Cancelled';
         if (!isFinished) {
           active.push({
             id: d.id,
@@ -177,7 +181,17 @@ export const Dashboard: React.FC = () => {
             riderName: data.riderName,
             status: data.status || 'Placed Order',
             statusHistory: data.statusHistory || [],
-            fees: data.fees || { subtotal: 0, deliveryFee: 0, serviceFee: 0, discount: 0, total: 0 },
+            fees: {
+              subtotal: data.fees?.subtotal || 0,
+              deliveryFee: data.fees?.deliveryFee || 0,
+              serviceFee: data.fees?.serviceFee || 0,
+              discount: data.fees?.discount || 0,
+              tip: data.fees?.tip || 0,
+              total: data.fees?.total || 0
+            },
+            isPickup: Boolean(data.isPickup || data.fulfillmentType === 'pickup' || data.serviceType === 'pickup'),
+            fulfillmentType: data.fulfillmentType,
+            scheduledFor: data.scheduledFor,
             paymentMethod: data.paymentMethod || 'cod',
             cityId: data.cityId || '',
             createdAt: data.createdAt
@@ -241,12 +255,13 @@ export const Dashboard: React.FC = () => {
         ordersTodayCount++;
       }
 
-      if (o.status === 'Delivered') {
-        const tot = Number(o.fees?.total) || 0;
+      if (o.status === 'Delivered' || o.status === 'Completed') {
+        const tip = Number(o.fees?.tip) || 0;
+        const tot = Math.max(0, (Number(o.fees?.total) || 0) - tip);
         const sFee = Number(o.fees?.serviceFee) || 0;
         const sub = Number(o.fees?.subtotal) || 0;
         deliveredRevenue += tot;
-        // Estimated commission: platform serviceFee + 15% merchant commission
+        // Estimated commission: platform serviceFee + 15% merchant commission (excluding tip)
         platformCommission += sFee + sub * 0.15;
         deliveredCount++;
 
@@ -299,8 +314,9 @@ export const Dashboard: React.FC = () => {
         const key = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
         if (daysMap[key]) {
           daysMap[key].orders++;
-          if (o.status === 'Delivered') {
-            daysMap[key].revenue += Number(o.fees?.total) || 0;
+          if (o.status === 'Delivered' || o.status === 'Completed') {
+            const tip = Number(o.fees?.tip) || 0;
+            daysMap[key].revenue += Math.max(0, (Number(o.fees?.total) || 0) - tip);
           }
         }
       }
@@ -346,10 +362,12 @@ export const Dashboard: React.FC = () => {
       .slice(0, 6);
   }, [orders, cities]);
 
-  // Orders waiting for rider over 5 minutes
+  // Orders waiting for rider over 5 minutes (ignoring pick-up orders)
   const waitingOrdersOver5Min = useMemo(() => {
     const nowSec = Math.floor(Date.now() / 1000);
     return filteredActiveOrders.filter((o) => {
+      const isPick = Boolean(o.isPickup || o.fulfillmentType === 'pickup' || (o.serviceType as any) === 'pickup');
+      if (isPick) return false;
       const noRider = !o.riderId;
       const isPending = o.status === 'Placed Order' || o.status === 'Preparing';
       if (noRider && isPending && o.createdAt?.seconds) {

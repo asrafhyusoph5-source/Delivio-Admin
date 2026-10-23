@@ -16,6 +16,7 @@ export interface UserProfile {
   photoUrl?: string;
   status?: UserStatus;
   walletBalance?: number;
+  linkedRiderId?: string | null;
   location?: UserLocation;
   adminNote?: string;
   cityId?: string;
@@ -41,6 +42,7 @@ export type OrderStatus =
   | 'Ready'
   | 'Rider is on the way'
   | 'Delivered'
+  | 'Completed'
   | 'Rejected'
   | 'Cancelled'
   | 'Rider is on the way to sender'
@@ -79,12 +81,16 @@ export interface OrderFees {
   serviceFee: number;
   discount: number;
   total: number;
+  tip?: number;
 }
 
 export interface Order {
   id: string;
   orderNumber?: string;
   serviceType: OrderServiceType;
+  fulfillmentType?: 'delivery' | 'pickup' | 'scheduled' | string;
+  isPickup?: boolean;
+  scheduledFor?: any;
   customerId: string;
   customerName: string;
   customerPhone?: string;
@@ -156,7 +162,7 @@ export interface WalletTransaction {
   id?: string;
   customerId?: string;
   riderId?: string;
-  type: 'cash_in' | 'adjustment' | 'refund' | 'order_payment' | string;
+  type: 'cash_in' | 'adjustment' | 'refund' | 'order_payment' | 'merge' | string;
   amount: number;
   note?: string;
   reason?: string;
@@ -232,6 +238,10 @@ export interface Rider {
   cashRemitted?: number;
   rating?: number;
   ridesThisMonth?: number;
+  linkedCustomerUid?: string | null;
+  linkedCustomerEmail?: string | null;
+  linkedCustomerName?: string | null;
+  linkedAt?: any;
   createdAt?: any;
 }
 

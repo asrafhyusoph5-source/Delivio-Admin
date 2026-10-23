@@ -71,8 +71,19 @@ export const Reports: React.FC = () => {
             riderEarning: dt.riderEarning,
             status: dt.status,
             statusHistory: dt.statusHistory || [],
-            fees: dt.fees || { subtotal: 0, deliveryFee: 0, serviceFee: 0, discount: 0, total: 0 },
+            fees: {
+              subtotal: dt.fees?.subtotal || 0,
+              deliveryFee: dt.fees?.deliveryFee || 0,
+              serviceFee: dt.fees?.serviceFee || 0,
+              discount: dt.fees?.discount || 0,
+              tip: dt.fees?.tip || 0,
+              total: dt.fees?.total || 0
+            },
+            isPickup: Boolean(dt.isPickup || dt.fulfillmentType === 'pickup' || dt.serviceType === 'pickup'),
+            fulfillmentType: dt.fulfillmentType,
+            scheduledFor: dt.scheduledFor,
             paymentMethod: dt.paymentMethod,
+            payment: dt.payment,
             cityId: dt.cityId,
             cancelReason: dt.cancelReason,
             createdAt: dt.createdAt
@@ -132,8 +143,9 @@ export const Reports: React.FC = () => {
       const pm = (o.paymentMethod || o.payment?.method || 'cod').toLowerCase();
       const pKey = pm === 'cod' ? 'cod' : pm === 'wallet' ? 'wallet' : pm === 'online' ? 'online' : 'other';
 
-      if (o.status === 'Delivered') {
-        const tot = Number(o.fees?.total || 0);
+      if (o.status === 'Delivered' || o.status === 'Completed') {
+        const tip = Number(o.fees?.tip || 0);
+        const tot = Math.max(0, Number(o.fees?.total || 0) - tip);
         const sFee = Number(o.fees?.serviceFee || 0);
         const sub = Number(o.fees?.subtotal || 0);
 
@@ -141,7 +153,7 @@ export const Reports: React.FC = () => {
         totalPlatformCommission += sFee + sub * 0.15;
         deliveredCount++;
 
-        // Track payment method revenue
+        // Track payment method revenue (excluding tip)
         paymentMap[pKey].revenue += tot;
         paymentMap[pKey].count += 1;
 
@@ -235,12 +247,15 @@ export const Reports: React.FC = () => {
   const handleExportCsv = () => {
     const rows = filteredOrders.map((o) => ({
       OrderNumber: o.orderNumber,
+      Fulfillment: o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
       Service: o.serviceType,
       Status: o.status,
       Customer: o.customerName,
       Merchant: o.merchantName || '',
-      Rider: o.riderName || '',
-      Total: o.fees?.total || 0,
+      Rider: o.isPickup ? 'No rider (Pick Up)' : o.riderName || '',
+      Tip: o.fees?.tip || 0,
+      TotalDue: o.fees?.total || 0,
+      TotalSalesExclTip: Math.max(0, (o.fees?.total || 0) - (o.fees?.tip || 0)),
       ServiceFee: o.fees?.serviceFee || 0,
       PaymentMethod: o.paymentMethod || 'cod',
       CancelReason: o.cancelReason || '',
@@ -296,7 +311,7 @@ export const Reports: React.FC = () => {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="p-5 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-xs">
           <span className="text-xs font-bold uppercase tracking-wider text-gray-400">
-            Delivered Orders
+            Delivered / Completed Orders
           </span>
           <div className="text-2xl font-black text-gray-900 dark:text-white mt-2">
             {metrics.deliveredCount}{' '}
@@ -306,7 +321,7 @@ export const Reports: React.FC = () => {
 
         <div className="p-5 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-xs">
           <span className="text-xs font-bold uppercase tracking-wider text-gray-400">
-            Gross Delivered Sales
+            Gross Completed Sales (excl. tips)
           </span>
           <div className="text-2xl font-black text-emerald-600 mt-2">
             ₱{metrics.totalDeliveredRevenue.toLocaleString('en-US', { minimumFractionDigits: 2 })}

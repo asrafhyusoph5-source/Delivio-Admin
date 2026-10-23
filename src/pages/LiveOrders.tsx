@@ -44,9 +44,42 @@ import {
   ChevronRight,
   Wallet,
   CreditCard,
-  Banknote
+  Banknote,
+  Truck,
+  ChevronDown,
+  Calendar
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
+
+export const FulfillmentChip: React.FC<{ order: Order }> = ({ order }) => {
+  const isScheduled = Boolean(order.scheduledFor || (order as any).isScheduled || order.fulfillmentType === 'scheduled');
+  const isPickup = Boolean(order.isPickup || order.fulfillmentType === 'pickup' || (order.serviceType as any) === 'pickup');
+
+  if (isScheduled) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-900 dark:bg-purple-950/70 dark:text-purple-300 border border-purple-300 dark:border-purple-800 whitespace-nowrap">
+        <Clock className="w-3 h-3 text-purple-600 shrink-0" />
+        <span>Scheduled{order.scheduledFor ? ` (${formatTimestamp(order.scheduledFor)})` : ''}</span>
+      </span>
+    );
+  }
+
+  if (isPickup) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700 whitespace-nowrap">
+        <Store className="w-3 h-3 text-amber-700 shrink-0" />
+        <span>Pick Up</span>
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200 dark:border-blue-800 whitespace-nowrap">
+      <Bike className="w-3 h-3 text-blue-600 shrink-0" />
+      <span>Delivery</span>
+    </span>
+  );
+};
 
 export const PaymentChip: React.FC<{ order: Order }> = ({ order }) => {
   const method = (order.paymentMethod || order.payment?.method || 'cod').toLowerCase();
@@ -117,6 +150,7 @@ const EXACT_STATUSES: OrderStatus[] = [
   'Rider is on the way to recipient',
   'Arrived at recipient',
   'Delivered',
+  'Completed',
   'Cancelled',
   'Rejected'
 ];
@@ -197,7 +231,17 @@ export const LiveOrders: React.FC = () => {
             parcel: data.parcel,
             pabili: data.pabili,
             finalReceiptTotal: data.finalReceiptTotal,
-            fees: data.fees || { subtotal: 0, deliveryFee: 0, serviceFee: 0, discount: 0, total: 0 },
+            fees: {
+              subtotal: data.fees?.subtotal || 0,
+              deliveryFee: data.fees?.deliveryFee || 0,
+              serviceFee: data.fees?.serviceFee || 0,
+              discount: data.fees?.discount || 0,
+              tip: data.fees?.tip || 0,
+              total: data.fees?.total || 0
+            },
+            fulfillmentType: data.fulfillmentType,
+            isPickup: Boolean(data.isPickup || data.fulfillmentType === 'pickup' || data.serviceType === 'pickup'),
+            scheduledFor: data.scheduledFor,
             paymentMethod: data.paymentMethod || 'cod',
             paymentStatus: data.paymentStatus,
             paymentProvider: data.paymentProvider,
@@ -250,6 +294,27 @@ export const LiveOrders: React.FC = () => {
     }
   }, [initialSearch]);
 
+  const [fulfillmentFilter, setFulfillmentFilter] = useState<'all' | 'delivery' | 'pickup' | 'scheduled'>('all');
+
+  // Upcoming scheduled orders (not finished/cancelled)
+  const upcomingScheduledOrders = useMemo(() => {
+    return orders
+      .filter((o) => {
+        const isSched = Boolean(o.scheduledFor || (o as any).isScheduled || o.fulfillmentType === 'scheduled');
+        const isNotDone =
+          o.status !== 'Delivered' &&
+          o.status !== 'Completed' &&
+          o.status !== 'Cancelled' &&
+          o.status !== 'Rejected';
+        return isSched && isNotDone;
+      })
+      .sort((a, b) => {
+        const tA = a.scheduledFor?.seconds ? a.scheduledFor.seconds * 1000 : 0;
+        const tB = b.scheduledFor?.seconds ? b.scheduledFor.seconds * 1000 : 0;
+        return tA - tB;
+      });
+  }, [orders]);
+
   // Filtered Orders
   const filteredOrders = useMemo(() => {
     return orders.filter((order) => {
@@ -262,17 +327,32 @@ export const LiveOrders: React.FC = () => {
         return false;
       }
       // 3. Status Filter
-      if (statusFilter !== 'all' && order.status !== statusFilter) {
-        return false;
+      if (statusFilter !== 'all') {
+        if (statusFilter === 'Completed' || statusFilter === 'Delivered') {
+          // Treat Delivered and Completed equivalently if selected or check exact
+          if (order.status !== 'Completed' && order.status !== 'Delivered') {
+            return false;
+          }
+        } else if (order.status !== statusFilter) {
+          return false;
+        }
       }
-      // 4. Payment Method Filter
+      // 4. Fulfillment Filter
+      if (fulfillmentFilter !== 'all') {
+        const isSched = Boolean(order.scheduledFor || (order as any).isScheduled || order.fulfillmentType === 'scheduled');
+        const isPick = Boolean(order.isPickup || order.fulfillmentType === 'pickup' || (order.serviceType as any) === 'pickup');
+        if (fulfillmentFilter === 'scheduled' && !isSched) return false;
+        if (fulfillmentFilter === 'pickup' && !isPick) return false;
+        if (fulfillmentFilter === 'delivery' && (isSched || isPick)) return false;
+      }
+      // 5. Payment Method Filter
       if (paymentFilter !== 'all') {
         const pm = (order.paymentMethod || order.payment?.method || 'cod').toLowerCase();
         if (pm !== paymentFilter) {
           return false;
         }
       }
-      // 5. Date Filter
+      // 6. Date Filter
       if (dateFilter !== 'all') {
         const orderTime = order.createdAt?.seconds ? order.createdAt.seconds * 1000 : 0;
         const now = Date.now();
@@ -283,7 +363,7 @@ export const LiveOrders: React.FC = () => {
           if (now - orderTime > 7 * 24 * 60 * 60 * 1000) return false;
         }
       }
-      // 6. Search Query
+      // 7. Search Query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const num = (order.orderNumber || '').toLowerCase();
@@ -303,7 +383,7 @@ export const LiveOrders: React.FC = () => {
       }
       return true;
     });
-  }, [orders, selectedCityId, serviceFilter, statusFilter, paymentFilter, dateFilter, searchQuery]);
+  }, [orders, selectedCityId, serviceFilter, statusFilter, fulfillmentFilter, paymentFilter, dateFilter, searchQuery]);
 
   // Mini map rendering inside detail drawer
   useEffect(() => {
@@ -579,16 +659,55 @@ export const LiveOrders: React.FC = () => {
     }
   };
 
+  // Action 3: Mark Order Completed
+  const handleMarkCompleted = async () => {
+    if (!selectedOrder) return;
+    try {
+      const orderRef = doc(db, 'orders', selectedOrder.id);
+      const now = Timestamp.now();
+      await updateDoc(orderRef, {
+        status: 'Completed',
+        statusHistory: arrayUnion({
+          status: 'Completed',
+          at: now,
+          note: `Marked as Completed by Admin (${adminProfile?.name || 'Operations'})`
+        }),
+        updatedAt: now,
+        deliveredAt: now
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'UPDATE_ORDER_STATUS',
+        entityType: 'order',
+        entityId: selectedOrder.id,
+        details: `Marked order #${selectedOrder.orderNumber} as Completed.`,
+        oldValue: { status: selectedOrder.status },
+        newValue: { status: 'Completed' }
+      });
+
+      showSuccess(`Order #${selectedOrder.orderNumber} marked as Completed.`);
+      setSelectedOrder((prev) => (prev ? { ...prev, status: 'Completed', deliveredAt: now } : null));
+    } catch (err: any) {
+      showError(err);
+    }
+  };
+
   // CSV Export
   const handleExportCsv = () => {
     const rows = filteredOrders.map((o) => ({
       OrderNumber: o.orderNumber,
+      Fulfillment: o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
+      ScheduledFor: o.scheduledFor ? formatTimestamp(o.scheduledFor) : '',
       Service: o.serviceType,
       Status: o.status,
       Customer: o.customerName,
       CustomerPhone: o.customerPhone || '',
       Merchant: o.merchantName || '',
-      Rider: o.riderName || 'Unassigned',
+      Rider: o.isPickup ? 'No rider (Pick Up)' : o.riderName || 'Unassigned',
+      Tip: o.fees?.tip || 0,
       TotalFee: o.fees?.total || 0,
       Subtotal: o.fees?.subtotal || 0,
       DeliveryFee: o.fees?.deliveryFee || 0,
@@ -613,6 +732,7 @@ export const LiveOrders: React.FC = () => {
   const getStatusBadge = (st: string) => {
     switch (st) {
       case 'Delivered':
+      case 'Completed':
         return 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-300';
       case 'Cancelled':
       case 'Rejected':
@@ -678,9 +798,61 @@ export const LiveOrders: React.FC = () => {
         </div>
       </div>
 
+      {/* Upcoming Scheduled Orders Alert / Panel */}
+      {upcomingScheduledOrders.length > 0 && (
+        <div className="bg-purple-50/70 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/60 rounded-2xl p-4 shadow-xs">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 rounded-lg bg-purple-600 text-white">
+                <Calendar className="w-4 h-4" />
+              </div>
+              <h3 className="font-extrabold text-sm text-purple-950 dark:text-purple-200">
+                Upcoming Scheduled Orders ({upcomingScheduledOrders.length})
+              </h3>
+            </div>
+            <span className="text-[11px] font-semibold text-purple-700 dark:text-purple-400">
+              Future fulfillment queue
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {upcomingScheduledOrders.slice(0, 6).map((schedOrder) => (
+              <div
+                key={schedOrder.id}
+                onClick={() => setSelectedOrder(schedOrder)}
+                className="bg-white dark:bg-zinc-900 p-3 rounded-xl border border-purple-200 dark:border-purple-900/50 shadow-xs hover:border-purple-400 dark:hover:border-purple-600 cursor-pointer transition-all flex flex-col justify-between"
+              >
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="font-mono font-bold text-xs text-purple-900 dark:text-purple-300">
+                      #{schedOrder.orderNumber}
+                    </span>
+                    <FulfillmentChip order={schedOrder} />
+                  </div>
+                  <div className="text-xs font-semibold text-gray-900 dark:text-white truncate">
+                    {schedOrder.customerName}
+                  </div>
+                  <div className="text-[11px] text-gray-500 dark:text-zinc-400 truncate">
+                    {schedOrder.merchantName || schedOrder.serviceType}
+                  </div>
+                </div>
+                <div className="mt-2.5 pt-2 border-t border-gray-100 dark:border-zinc-800 flex items-center justify-between text-xs">
+                  <span className="font-bold text-purple-700 dark:text-purple-400">
+                    ₱{Number(schedOrder.fees?.total || 0).toFixed(2)}
+                  </span>
+                  <span className="text-[10px] text-gray-400">
+                    {schedOrder.scheduledFor ? formatTimestamp(schedOrder.scheduledFor) : 'Scheduled'}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Filter Toolbar */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-4 shadow-xs space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3">
           {/* Search bar */}
           <div className="lg:col-span-2 relative">
             <Search className="w-4 h-4 absolute left-3.5 top-3 text-gray-400" />
@@ -691,6 +863,20 @@ export const LiveOrders: React.FC = () => {
               placeholder="Search order #, customer, merchant, phone..."
               className="w-full pl-9 pr-4 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
             />
+          </div>
+
+          {/* Fulfillment Filter */}
+          <div>
+            <select
+              value={fulfillmentFilter}
+              onChange={(e) => setFulfillmentFilter(e.target.value as any)}
+              className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+            >
+              <option value="all">All Fulfillments</option>
+              <option value="delivery">Delivery</option>
+              <option value="pickup">Pick Up</option>
+              <option value="scheduled">Scheduled</option>
+            </select>
           </div>
 
           {/* Service Filter */}
@@ -762,12 +948,14 @@ export const LiveOrders: React.FC = () => {
               <thead className="bg-gray-50 dark:bg-zinc-850/60 uppercase font-bold text-gray-500 dark:text-zinc-400 border-b border-gray-200 dark:border-zinc-800">
                 <tr>
                   <th className="px-4 py-3.5">Order #</th>
+                  <th className="px-4 py-3.5">Fulfillment</th>
                   <th className="px-4 py-3.5">Service</th>
                   <th className="px-4 py-3.5">Status</th>
                   <th className="px-4 py-3.5">Customer</th>
                   <th className="px-4 py-3.5">Merchant / Pickup</th>
                   <th className="px-4 py-3.5">Rider</th>
                   <th className="px-4 py-3.5">Payment</th>
+                  <th className="px-4 py-3.5">Tip</th>
                   <th className="px-4 py-3.5">Total Amount</th>
                   <th className="px-4 py-3.5">Created</th>
                   <th className="px-4 py-3.5 text-right">Action</th>
@@ -776,7 +964,7 @@ export const LiveOrders: React.FC = () => {
               <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 font-medium">
                 {filteredOrders.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="text-center py-12 text-gray-400 text-xs">
+                    <td colSpan={12} className="text-center py-12 text-gray-400 text-xs">
                       No matching orders found.
                     </td>
                   </tr>
@@ -789,6 +977,9 @@ export const LiveOrders: React.FC = () => {
                     >
                       <td className="px-4 py-3 font-mono font-bold text-gray-900 dark:text-white">
                         #{order.orderNumber}
+                      </td>
+                      <td className="px-4 py-3">
+                        <FulfillmentChip order={order} />
                       </td>
                       <td className="px-4 py-3">
                         <span className="capitalize px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
@@ -821,7 +1012,11 @@ export const LiveOrders: React.FC = () => {
                         </div>
                       </td>
                       <td className="px-4 py-3">
-                        {order.riderName ? (
+                        {order.isPickup || order.fulfillmentType === 'pickup' ? (
+                          <span className="text-gray-400 dark:text-zinc-500 text-[11px] font-medium italic">
+                            No rider (Pick Up)
+                          </span>
+                        ) : order.riderName ? (
                           <div className="flex items-center gap-1.5 font-semibold text-gray-900 dark:text-white">
                             <Bike className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                             <span>{order.riderName}</span>
@@ -834,6 +1029,15 @@ export const LiveOrders: React.FC = () => {
                       </td>
                       <td className="px-4 py-3">
                         <PaymentChip order={order} />
+                      </td>
+                      <td className="px-4 py-3 font-semibold text-gray-700 dark:text-zinc-300">
+                        {Number(order.fees?.tip || 0) > 0 ? (
+                          <span className="text-emerald-600 dark:text-emerald-400 font-bold">
+                            ₱{Number(order.fees?.tip).toFixed(2)}
+                          </span>
+                        ) : (
+                          <span className="text-gray-400">₱0.00</span>
+                        )}
                       </td>
                       <td className="px-4 py-3 font-bold text-gray-900 dark:text-white">
                         ₱{Number(order.fees?.total || 0).toFixed(2)}
@@ -862,9 +1066,12 @@ export const LiveOrders: React.FC = () => {
       ) : (
         /* Kanban View */
         <div className="flex gap-4 overflow-x-auto pb-4 pt-1">
-          {['Placed Order', 'Preparing', 'Ready', 'Rider is on the way', 'Delivered', 'Cancelled'].map(
+          {['Placed Order', 'Preparing', 'Ready', 'Rider is on the way', 'Delivered / Completed', 'Cancelled'].map(
             (colStatus) => {
               const colOrders = filteredOrders.filter((o) => {
+                if (colStatus === 'Delivered / Completed') {
+                  return o.status === 'Delivered' || o.status === 'Completed';
+                }
                 if (colStatus === 'Rider is on the way') {
                   return (
                     o.status === 'Rider is on the way' ||
@@ -900,9 +1107,7 @@ export const LiveOrders: React.FC = () => {
                           <span className="font-mono font-bold text-xs text-gray-900 dark:text-white">
                             #{ord.orderNumber}
                           </span>
-                          <span className="text-[10px] font-bold text-gray-400">
-                            {formatRelativeTime(ord.createdAt)}
-                          </span>
+                          <FulfillmentChip order={ord} />
                         </div>
                         <p className="text-xs font-semibold text-gray-900 dark:text-zinc-100">
                           {ord.merchantName || ord.serviceType}
@@ -913,14 +1118,23 @@ export const LiveOrders: React.FC = () => {
                         <div className="pt-2 border-t border-gray-100 dark:border-zinc-800 space-y-1.5">
                           <div className="flex items-center justify-between">
                             <PaymentChip order={ord} />
-                            <span className="font-black text-amber-600 text-xs">
-                              ₱{Number(ord.fees?.total || 0).toFixed(2)}
-                            </span>
+                            <div className="text-right">
+                              <span className="font-black text-amber-600 text-xs">
+                                ₱{Number(ord.fees?.total || 0).toFixed(2)}
+                              </span>
+                              {Number(ord.fees?.tip || 0) > 0 && (
+                                <div className="text-[10px] text-emerald-600 font-semibold">
+                                  +₱{Number(ord.fees?.tip).toFixed(2)} tip
+                                </div>
+                              )}
+                            </div>
                           </div>
                           <div className="text-[10px] text-gray-500 flex justify-between">
                             <span>Rider:</span>
                             <span className="font-semibold text-gray-700 dark:text-zinc-300 truncate max-w-[120px]">
-                              {ord.riderName || 'Unassigned'}
+                              {ord.isPickup || ord.fulfillmentType === 'pickup'
+                                ? 'No rider (Pick Up)'
+                                : ord.riderName || 'Unassigned'}
                             </span>
                           </div>
                         </div>
@@ -951,6 +1165,7 @@ export const LiveOrders: React.FC = () => {
                   <span className="capitalize px-2 py-0.5 rounded-md text-xs font-bold bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300">
                     {selectedOrder.serviceType}
                   </span>
+                  <FulfillmentChip order={selectedOrder} />
                 </div>
                 <p className="text-xs text-gray-400 mt-0.5">
                   Placed on {formatTimestamp(selectedOrder.createdAt)}
@@ -988,15 +1203,24 @@ export const LiveOrders: React.FC = () => {
 
                 {/* Dispatch Actions buttons */}
                 {selectedOrder.status !== 'Delivered' &&
+                  selectedOrder.status !== 'Completed' &&
                   selectedOrder.status !== 'Cancelled' &&
                   selectedOrder.status !== 'Rejected' && (
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => setReassignModalOpen(true)}
-                        className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white/90 text-gray-800 text-xs font-bold hover:bg-white shadow-xs transition-colors"
+                        onClick={handleMarkCompleted}
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 shadow-xs transition-colors"
                       >
-                        <RotateCcw className="w-3.5 h-3.5" /> Reassign
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Mark Completed
                       </button>
+                      {!selectedOrder.isPickup && selectedOrder.fulfillmentType !== 'pickup' && (
+                        <button
+                          onClick={() => setReassignModalOpen(true)}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white/90 text-gray-800 text-xs font-bold hover:bg-white shadow-xs transition-colors"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" /> Reassign
+                        </button>
+                      )}
                       <button
                         onClick={() => {
                           const isWalletPaid =
@@ -1060,18 +1284,27 @@ export const LiveOrders: React.FC = () => {
                   <div className="flex items-center gap-1.5 text-gray-400 font-bold uppercase text-[10px]">
                     <Bike className="w-3.5 h-3.5 text-emerald-500" /> Assigned Rider
                   </div>
-                  <div className="font-bold text-gray-900 dark:text-white truncate">
-                    {selectedOrder.riderName || 'Unassigned'}
-                  </div>
-                  {selectedOrder.riderPhone ? (
-                    <a
-                      href={`tel:${selectedOrder.riderPhone}`}
-                      className="text-amber-600 dark:text-amber-400 font-semibold hover:underline flex items-center gap-1 text-[11px]"
-                    >
-                      <Phone className="w-3 h-3" /> {selectedOrder.riderPhone}
-                    </a>
+                  {selectedOrder.isPickup || selectedOrder.fulfillmentType === 'pickup' ? (
+                    <div>
+                      <div className="font-bold text-gray-900 dark:text-white">Store Pick Up</div>
+                      <div className="text-gray-400 text-[11px]">No rider needed (Customer pickup)</div>
+                    </div>
                   ) : (
-                    <div className="text-amber-600 text-[11px]">Searching for rider...</div>
+                    <>
+                      <div className="font-bold text-gray-900 dark:text-white truncate">
+                        {selectedOrder.riderName || 'Unassigned'}
+                      </div>
+                      {selectedOrder.riderPhone ? (
+                        <a
+                          href={`tel:${selectedOrder.riderPhone}`}
+                          className="text-amber-600 dark:text-amber-400 font-semibold hover:underline flex items-center gap-1 text-[11px]"
+                        >
+                          <Phone className="w-3 h-3" /> {selectedOrder.riderPhone}
+                        </a>
+                      ) : (
+                        <div className="text-amber-600 text-[11px]">Searching for rider...</div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -1179,6 +1412,12 @@ export const LiveOrders: React.FC = () => {
                   <div className="flex justify-between text-emerald-600 font-semibold">
                     <span>Voucher Discount</span>
                     <span>-₱{Number(selectedOrder.fees?.discount).toFixed(2)}</span>
+                  </div>
+                )}
+                {Number(selectedOrder.fees?.tip || 0) > 0 && (
+                  <div className="flex justify-between text-emerald-600 font-semibold">
+                    <span>Rider Tip (Direct to Rider)</span>
+                    <span>+₱{Number(selectedOrder.fees?.tip).toFixed(2)}</span>
                   </div>
                 )}
                 <div className="pt-2 border-t border-gray-200 dark:border-zinc-800 flex justify-between text-base font-black text-gray-900 dark:text-white">

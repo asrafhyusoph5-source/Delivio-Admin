@@ -12,7 +12,9 @@ import {
   addDoc,
   increment,
   writeBatch,
-  Timestamp
+  Timestamp,
+  runTransaction,
+  getDoc
 } from '../firebase';
 import { useCity } from '../context/CityContext';
 import { useAuth } from '../context/AuthContext';
@@ -20,7 +22,7 @@ import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
-import type { Rider, Order, OrderServiceType, EditHistoryEntry, TierEvent } from '../types';
+import type { Rider, Order, OrderServiceType, EditHistoryEntry, TierEvent, UserProfile, WalletTransaction } from '../types';
 import {
   Search,
   Bike,
@@ -39,7 +41,13 @@ import {
   Loader2,
   Download,
   PlusCircle,
-  Award
+  MinusCircle,
+  Award,
+  Link2,
+  Unlink,
+  User,
+  Users,
+  Wallet
 } from 'lucide-react';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
@@ -96,11 +104,29 @@ export const Riders: React.FC = () => {
   const [recordingRemittance, setRecordingRemittance] = useState(false);
   const [remittancesList, setRemittancesList] = useState<any[]>([]);
 
-  // Wallet Cash-in
+  // Wallet Cash-in & Adjust
   const [cashInAmount, setCashInAmount] = useState<number>(0);
   const [cashInNote, setCashInNote] = useState('');
   const [addingCash, setAddingCash] = useState(false);
+  const [adjustAmount, setAdjustAmount] = useState<number>(0);
+  const [adjustReason, setAdjustReason] = useState('');
+  const [submittingAdjust, setSubmittingAdjust] = useState(false);
+  const [adjustModalOpen, setAdjustModalOpen] = useState(false);
   const [walletTxns, setWalletTxns] = useState<any[]>([]);
+
+  // Linked Customer & Merged Wallet
+  const [linkedCustomer, setLinkedCustomer] = useState<UserProfile | null>(null);
+  const [loadingLinkedCustomer, setLoadingLinkedCustomer] = useState(false);
+  const [linkModalOpen, setLinkModalOpen] = useState(false);
+  const [customerSearchQuery, setCustomerSearchQuery] = useState('');
+  const [allCustomers, setAllCustomers] = useState<UserProfile[]>([]);
+  const [loadingCustomers, setLoadingCustomers] = useState(false);
+  const [selectedCandidateCustomer, setSelectedCandidateCustomer] = useState<UserProfile | null>(null);
+  const [confirmMergeModalOpen, setConfirmMergeModalOpen] = useState(false);
+  const [linking, setLinking] = useState(false);
+  const [unlinkModalOpen, setUnlinkModalOpen] = useState(false);
+  const [unlinkReason, setUnlinkReason] = useState('');
+  const [unlinking, setUnlinking] = useState(false);
 
   // Tiers
   const [tierEvents, setTierEvents] = useState<TierEvent[]>([]);
@@ -144,6 +170,10 @@ export const Riders: React.FC = () => {
           cashRemitted: Number(dt.cashRemitted) || 0,
           rating: Number(dt.rating) || 5,
           ridesThisMonth: Number(dt.ridesThisMonth) || 0,
+          linkedCustomerUid: dt.linkedCustomerUid || null,
+          linkedCustomerEmail: dt.linkedCustomerEmail || null,
+          linkedCustomerName: dt.linkedCustomerName || null,
+          linkedAt: dt.linkedAt || null,
           createdAt: dt.createdAt
         });
       });
@@ -210,13 +240,34 @@ export const Riders: React.FC = () => {
       remits.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
       setRemittancesList(remits);
 
-      // 3. Wallet transactions
+      // 3. Wallet transactions (riderId and customerId if linked)
+      let allTxns: any[] = [];
       const qTx = query(collection(db, 'walletTransactions'), where('riderId', '==', riderId), limit(50));
       const txSnap = await getDocs(qTx);
-      const txns: any[] = [];
-      txSnap.forEach((d) => txns.push({ id: d.id, ...d.data() }));
-      txns.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
-      setWalletTxns(txns);
+      txSnap.forEach((d) => allTxns.push({ id: d.id, ...d.data() }));
+
+      // Find current rider object
+      const riderObj = riders.find((r) => r.id === riderId) || selectedRider;
+      if (riderObj?.linkedCustomerUid) {
+        try {
+          const qCustTx = query(
+            collection(db, 'walletTransactions'),
+            where('customerId', '==', riderObj.linkedCustomerUid),
+            limit(50)
+          );
+          const custTxSnap = await getDocs(qCustTx);
+          const seenIds = new Set(allTxns.map((t) => t.id));
+          custTxSnap.forEach((d) => {
+            if (!seenIds.has(d.id)) {
+              allTxns.push({ id: d.id, ...d.data() });
+            }
+          });
+        } catch (e) {
+          console.error('Failed to load linked customer wallet transactions:', e);
+        }
+      }
+      allTxns.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+      setWalletTxns(allTxns);
 
       // 4. Tier events
       const qTier = query(collection(db, 'tierEvents'), where('riderId', '==', riderId), limit(50));
@@ -232,6 +283,35 @@ export const Riders: React.FC = () => {
       histSnap.forEach((d) => hList.push({ id: d.id, ...d.data() } as EditHistoryEntry));
       hList.sort((a, b) => (b.at?.seconds || 0) - (a.at?.seconds || 0));
       setEditHistory(hList);
+
+      // 6. Linked customer data if any
+      if (riderObj?.linkedCustomerUid) {
+        setLoadingLinkedCustomer(true);
+        try {
+          const custSnap = await getDoc(doc(db, 'users', riderObj.linkedCustomerUid));
+          if (custSnap.exists()) {
+            const cData = custSnap.data();
+            setLinkedCustomer({
+              uid: custSnap.id,
+              role: cData.role || 'customer',
+              email: cData.email || '',
+              name: cData.name || 'Customer',
+              phone: cData.phone || '',
+              walletBalance: Number(cData.walletBalance || 0),
+              status: cData.status || 'active'
+            });
+          } else {
+            setLinkedCustomer(null);
+          }
+        } catch (e) {
+          console.error('Failed to fetch linked customer:', e);
+          setLinkedCustomer(null);
+        } finally {
+          setLoadingLinkedCustomer(false);
+        }
+      } else {
+        setLinkedCustomer(null);
+      }
     } catch (err) {
       console.error('Failed to load rider sub data:', err);
     }
@@ -257,6 +337,20 @@ export const Riders: React.FC = () => {
   }, [riders, selectedCityId, onlineFilter, statusFilter, vehicleFilter, searchQuery]);
 
   const onlineCount = useMemo(() => riders.filter((r) => r.isOnline).length, [riders]);
+
+  // Filter registered customers for linking type-ahead
+  const filteredCandidates = useMemo(() => {
+    if (!customerSearchQuery.trim()) return allCustomers.slice(0, 10);
+    const q = customerSearchQuery.toLowerCase().trim();
+    return allCustomers
+      .filter(
+        (c) =>
+          (c.email || '').toLowerCase().includes(q) ||
+          (c.name || '').toLowerCase().includes(q) ||
+          (c.phone || '').toLowerCase().includes(q)
+      )
+      .slice(0, 15);
+  }, [allCustomers, customerSearchQuery]);
 
   // Action: Save Details
   const handleSaveDetails = async (e: React.FormEvent) => {
@@ -421,43 +515,441 @@ export const Riders: React.FC = () => {
     }
   };
 
-  // Action: Add Cash to Wallet (Batch)
+  // Action: Open Link Modal and fetch registered customers
+  const openLinkModal = async () => {
+    setLinkModalOpen(true);
+    setCustomerSearchQuery('');
+    setSelectedCandidateCustomer(null);
+    try {
+      setLoadingCustomers(true);
+      const qCust = query(collection(db, 'users'), where('role', '==', 'customer'), limit(150));
+      const snap = await getDocs(qCust);
+      const list: UserProfile[] = [];
+      snap.forEach((d) => {
+        const dt = d.data();
+        list.push({
+          uid: d.id,
+          role: 'customer',
+          email: dt.email || '',
+          name: dt.name || 'Customer',
+          phone: dt.phone || '',
+          walletBalance: Number(dt.walletBalance || 0),
+          status: dt.status || 'active'
+        });
+      });
+      list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      setAllCustomers(list);
+    } catch (err) {
+      showError('Failed to load registered customers.');
+    } finally {
+      setLoadingCustomers(false);
+    }
+  };
+
+  // Action: Confirm and Execute Wallet Link in ONE Transaction
+  const handleConfirmLink = async () => {
+    if (!selectedRider || !selectedCandidateCustomer) return;
+    try {
+      setLinking(true);
+
+      // 1. Validate that the customer exists and has role "customer"
+      const custDocRef = doc(db, 'users', selectedCandidateCustomer.uid);
+      const custDocSnap = await getDoc(custDocRef);
+      if (!custDocSnap.exists()) {
+        throw new Error('Customer account does not exist.');
+      }
+      const custData = custDocSnap.data();
+      if ((custData.role || '').toLowerCase() !== 'customer') {
+        throw new Error(`Customer must have role "customer", found "${custData.role}".`);
+      }
+
+      // 2. Validate not linked to another rider (query riders where linkedCustomerUid == customerUid)
+      const qCheck = query(
+        collection(db, 'riders'),
+        where('linkedCustomerUid', '==', selectedCandidateCustomer.uid)
+      );
+      const checkSnap = await getDocs(qCheck);
+      const otherLinked = checkSnap.docs.filter((d) => d.id !== selectedRider.id);
+      if (otherLinked.length > 0) {
+        const otherData = otherLinked[0].data();
+        throw new Error(
+          `Customer ${selectedCandidateCustomer.email} is already linked to rider "${otherData.name || otherLinked[0].id}". A customer account cannot be linked to multiple riders.`
+        );
+      }
+
+      // 3. ONE Transaction:
+      // set riders/{rid} {linkedCustomerUid, linkedCustomerEmail, linkedCustomerName, linkedAt};
+      // add riders.walletBalance into users/{cid}.walletBalance and set riders.walletBalance to 0;
+      // write a walletTransactions entry type "merge" (riderId, customerId, amount);
+      // write auditLogs.
+      const riderRef = doc(db, 'riders', selectedRider.id);
+      const now = Timestamp.now();
+      const txnRef = doc(collection(db, 'walletTransactions'));
+
+      let riderBal = 0;
+      let custBal = 0;
+      let mergedBal = 0;
+
+      await runTransaction(db, async (transaction) => {
+        const rSnap = await transaction.get(riderRef);
+        if (!rSnap.exists()) throw new Error('Rider not found.');
+        const cSnap = await transaction.get(custDocRef);
+        if (!cSnap.exists()) throw new Error('Customer record not found.');
+
+        riderBal = Number(rSnap.data()?.walletBalance || 0);
+        custBal = Number(cSnap.data()?.walletBalance || 0);
+        mergedBal = custBal + riderBal;
+
+        // Set riders/{rid}
+        transaction.update(riderRef, {
+          linkedCustomerUid: selectedCandidateCustomer.uid,
+          linkedCustomerEmail: selectedCandidateCustomer.email,
+          linkedCustomerName: selectedCandidateCustomer.name,
+          linkedAt: now,
+          walletBalance: 0,
+          updatedAt: now
+        });
+
+        // Add riders.walletBalance into users/{cid}.walletBalance and set riders.walletBalance to 0
+        transaction.update(custDocRef, {
+          walletBalance: mergedBal,
+          updatedAt: now
+        });
+
+        // walletTransactions entry type "merge" (riderId, customerId, amount)
+        transaction.set(txnRef, {
+          type: 'merge',
+          riderId: selectedRider.id,
+          customerId: selectedCandidateCustomer.uid,
+          amount: riderBal,
+          note: `Merged rider wallet (₱${riderBal.toFixed(2)}) into shared customer account balance`,
+          adminId: adminProfile?.uid || 'admin',
+          adminName: adminProfile?.name || 'Administrator',
+          balanceAfter: mergedBal,
+          createdAt: now
+        });
+      });
+
+      // Write auditLogs
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'LINK_RIDER_CUSTOMER_WALLET',
+        entityType: 'rider',
+        entityId: selectedRider.id,
+        details: `Linked rider ${selectedRider.name} to customer account (${selectedCandidateCustomer.email}). Merged ₱${riderBal.toFixed(2)} into unified balance of ₱${mergedBal.toFixed(2)}.`,
+        oldValue: { riderBalance: riderBal, customerBalance: custBal },
+        newValue: { sharedBalance: mergedBal, linkedCustomerUid: selectedCandidateCustomer.uid }
+      });
+
+      showSuccess(`Rider and customer wallets merged successfully! Shared balance: ₱${mergedBal.toFixed(2)}.`);
+
+      const updatedLinkedCustomer: UserProfile = {
+        ...selectedCandidateCustomer,
+        walletBalance: mergedBal
+      };
+      setLinkedCustomer(updatedLinkedCustomer);
+      setSelectedRider((prev) =>
+        prev
+          ? {
+              ...prev,
+              linkedCustomerUid: selectedCandidateCustomer.uid,
+              linkedCustomerEmail: selectedCandidateCustomer.email,
+              linkedCustomerName: selectedCandidateCustomer.name,
+              linkedAt: now,
+              walletBalance: 0
+            }
+          : null
+      );
+      setRiders((prev) =>
+        prev.map((r) =>
+          r.id === selectedRider.id
+            ? {
+                ...r,
+                linkedCustomerUid: selectedCandidateCustomer.uid,
+                linkedCustomerEmail: selectedCandidateCustomer.email,
+                linkedCustomerName: selectedCandidateCustomer.name,
+                linkedAt: now,
+                walletBalance: 0
+              }
+            : r
+        )
+      );
+
+      setConfirmMergeModalOpen(false);
+      setLinkModalOpen(false);
+      setSelectedCandidateCustomer(null);
+      fetchRiderSubData(selectedRider.id);
+    } catch (err: any) {
+      showError(err?.message || err);
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  // Action: Unlink Rider Wallet (reason required; balance stays on customer account)
+  const handleUnlinkRider = async (customReason?: string) => {
+    if (!selectedRider || !selectedRider.linkedCustomerUid) return;
+    const reasonClean = (customReason || unlinkReason).trim();
+    if (!reasonClean) {
+      showError('A mandatory reason is required to unlink customer account.');
+      return;
+    }
+
+    try {
+      setUnlinking(true);
+      const rRef = doc(db, 'riders', selectedRider.id);
+      const prevCustEmail = selectedRider.linkedCustomerEmail;
+      const prevCustUid = selectedRider.linkedCustomerUid;
+
+      await updateDoc(rRef, {
+        linkedCustomerUid: null,
+        linkedCustomerEmail: null,
+        linkedCustomerName: null,
+        linkedAt: null,
+        updatedAt: Timestamp.now()
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        action: 'UNLINK_RIDER_WALLET',
+        entityType: 'rider',
+        entityId: selectedRider.id,
+        details: `Unlinked rider ${selectedRider.name} from customer (${prevCustEmail || prevCustUid}). Shared balance remains on customer account. Reason: ${reasonClean}`,
+        reason: reasonClean
+      });
+
+      showSuccess('Rider unlinked from customer account. Balance remains on customer wallet.');
+      setLinkedCustomer(null);
+      setSelectedRider((prev) =>
+        prev
+          ? {
+              ...prev,
+              linkedCustomerUid: null,
+              linkedCustomerEmail: null,
+              linkedCustomerName: null,
+              linkedAt: null
+            }
+          : null
+      );
+      setRiders((prev) =>
+        prev.map((r) =>
+          r.id === selectedRider.id
+            ? {
+                ...r,
+                linkedCustomerUid: null,
+                linkedCustomerEmail: null,
+                linkedCustomerName: null,
+                linkedAt: null
+              }
+            : r
+        )
+      );
+      setUnlinkModalOpen(false);
+      setUnlinkReason('');
+      fetchRiderSubData(selectedRider.id);
+    } catch (err: any) {
+      showError(err?.message || err);
+    } finally {
+      setUnlinking(false);
+    }
+  };
+
+  // Action: Add Cash to Wallet (ONE transaction)
   const handleAddWalletCash = async () => {
     if (!selectedRider || cashInAmount <= 0) return;
     try {
       setAddingCash(true);
-      const batch = writeBatch(db);
-      const newBal = (selectedRider.walletBalance || 0) + Number(cashInAmount);
+      const now = Timestamp.now();
+      const noteClean = cashInNote.trim() || 'Admin top-up';
+      const txnRef = doc(collection(db, 'walletTransactions'));
+      const isLinked = Boolean(selectedRider.linkedCustomerUid);
 
-      const txCol = collection(db, 'walletTransactions');
-      const newTxRef = doc(txCol);
+      let finalBal = 0;
+      let oldBal = 0;
 
-      batch.set(newTxRef, {
-        riderId: selectedRider.id,
-        amount: Number(cashInAmount),
-        type: 'cash_in',
-        note: cashInNote.trim() || 'Admin top-up',
+      if (isLinked && selectedRider.linkedCustomerUid) {
+        // Change users/{cid}.walletBalance in ONE transaction
+        const userRef = doc(db, 'users', selectedRider.linkedCustomerUid);
+        await runTransaction(db, async (transaction) => {
+          const uSnap = await transaction.get(userRef);
+          oldBal = uSnap.exists() ? Number(uSnap.data()?.walletBalance || 0) : 0;
+          finalBal = oldBal + Number(cashInAmount);
+
+          transaction.update(userRef, {
+            walletBalance: finalBal,
+            updatedAt: now
+          });
+
+          // Every walletTransactions entry carries both riderId and customerId
+          transaction.set(txnRef, {
+            riderId: selectedRider.id,
+            customerId: selectedRider.linkedCustomerUid,
+            amount: Number(cashInAmount),
+            type: 'cash_in',
+            note: noteClean,
+            adminId: adminProfile?.uid || 'admin',
+            adminName: adminProfile?.name || 'Administrator',
+            balanceAfter: finalBal,
+            createdAt: now
+          });
+        });
+
+        setLinkedCustomer((prev) => (prev ? { ...prev, walletBalance: finalBal } : null));
+      } else {
+        // Unlinked rider wallet
+        const rRef = doc(db, 'riders', selectedRider.id);
+        await runTransaction(db, async (transaction) => {
+          const rSnap = await transaction.get(rRef);
+          oldBal = rSnap.exists() ? Number(rSnap.data()?.walletBalance || 0) : 0;
+          finalBal = oldBal + Number(cashInAmount);
+
+          transaction.update(rRef, {
+            walletBalance: finalBal,
+            updatedAt: now
+          });
+
+          transaction.set(txnRef, {
+            riderId: selectedRider.id,
+            amount: Number(cashInAmount),
+            type: 'cash_in',
+            note: noteClean,
+            adminId: adminProfile?.uid || 'admin',
+            adminName: adminProfile?.name || 'Administrator',
+            balanceAfter: finalBal,
+            createdAt: now
+          });
+        });
+
+        setSelectedRider((prev) => (prev ? { ...prev, walletBalance: finalBal } : null));
+      }
+
+      await logAuditEvent({
         adminId: adminProfile?.uid || 'admin',
-        balanceAfter: newBal,
-        createdAt: Timestamp.now()
+        adminName: adminProfile?.name || 'Administrator',
+        action: 'RIDER_WALLET_ADD_CASH',
+        entityType: 'rider',
+        entityId: selectedRider.id,
+        details: `Credited ₱${Number(cashInAmount).toFixed(2)} to ${isLinked ? 'shared customer wallet (' + selectedRider.linkedCustomerEmail + ')' : 'rider wallet'}. Note: ${noteClean}`,
+        oldValue: { walletBalance: oldBal },
+        newValue: { walletBalance: finalBal }
       });
 
-      const rRef = doc(db, 'riders', selectedRider.id);
-      batch.update(rRef, {
-        walletBalance: increment(Number(cashInAmount))
-      });
-
-      await batch.commit();
-
-      showSuccess(`Added ₱${cashInAmount.toFixed(2)} to rider wallet.`);
+      showSuccess(`Added ₱${Number(cashInAmount).toFixed(2)} to wallet.`);
       setCashInAmount(0);
       setCashInNote('');
-      fetchRiders();
       fetchRiderSubData(selectedRider.id);
     } catch (err: any) {
       showError(err);
     } finally {
       setAddingCash(false);
+    }
+  };
+
+  // Action: Adjust / Deduct from Wallet (ONE transaction)
+  const handleAdjustWalletCash = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedRider || adjustAmount <= 0) return;
+    const reasonClean = adjustReason.trim();
+    if (!reasonClean) {
+      showError('A mandatory reason is required to adjust or deduct wallet balance.');
+      return;
+    }
+
+    try {
+      setSubmittingAdjust(true);
+      const now = Timestamp.now();
+      const txnRef = doc(collection(db, 'walletTransactions'));
+      const isLinked = Boolean(selectedRider.linkedCustomerUid);
+
+      let finalBal = 0;
+      let oldBal = 0;
+
+      if (isLinked && selectedRider.linkedCustomerUid) {
+        const userRef = doc(db, 'users', selectedRider.linkedCustomerUid);
+        await runTransaction(db, async (transaction) => {
+          const uSnap = await transaction.get(userRef);
+          oldBal = uSnap.exists() ? Number(uSnap.data()?.walletBalance || 0) : 0;
+          if (adjustAmount > oldBal) {
+            throw new Error(`Cannot deduct ₱${adjustAmount.toFixed(2)}. Shared balance is only ₱${oldBal.toFixed(2)}.`);
+          }
+          finalBal = oldBal - adjustAmount;
+
+          transaction.update(userRef, {
+            walletBalance: finalBal,
+            updatedAt: now
+          });
+
+          // Every walletTransactions entry carries both riderId and customerId
+          transaction.set(txnRef, {
+            riderId: selectedRider.id,
+            customerId: selectedRider.linkedCustomerUid,
+            amount: -adjustAmount,
+            type: 'adjustment',
+            note: reasonClean,
+            reason: reasonClean,
+            adminId: adminProfile?.uid || 'admin',
+            adminName: adminProfile?.name || 'Administrator',
+            balanceAfter: finalBal,
+            createdAt: now
+          });
+        });
+
+        setLinkedCustomer((prev) => (prev ? { ...prev, walletBalance: finalBal } : null));
+      } else {
+        const rRef = doc(db, 'riders', selectedRider.id);
+        await runTransaction(db, async (transaction) => {
+          const rSnap = await transaction.get(rRef);
+          oldBal = rSnap.exists() ? Number(rSnap.data()?.walletBalance || 0) : 0;
+          if (adjustAmount > oldBal) {
+            throw new Error(`Cannot deduct ₱${adjustAmount.toFixed(2)}. Rider balance is only ₱${oldBal.toFixed(2)}.`);
+          }
+          finalBal = oldBal - adjustAmount;
+
+          transaction.update(rRef, {
+            walletBalance: finalBal,
+            updatedAt: now
+          });
+
+          transaction.set(txnRef, {
+            riderId: selectedRider.id,
+            amount: -adjustAmount,
+            type: 'adjustment',
+            note: reasonClean,
+            reason: reasonClean,
+            adminId: adminProfile?.uid || 'admin',
+            adminName: adminProfile?.name || 'Administrator',
+            balanceAfter: finalBal,
+            createdAt: now
+          });
+        });
+
+        setSelectedRider((prev) => (prev ? { ...prev, walletBalance: finalBal } : null));
+      }
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        action: 'RIDER_WALLET_ADJUST',
+        entityType: 'rider',
+        entityId: selectedRider.id,
+        details: `Deducted ₱${Number(adjustAmount).toFixed(2)} from ${isLinked ? 'shared customer wallet' : 'rider wallet'}. Reason: ${reasonClean}`,
+        oldValue: { walletBalance: oldBal },
+        newValue: { walletBalance: finalBal },
+        reason: reasonClean
+      });
+
+      showSuccess(`Deducted ₱${Number(adjustAmount).toFixed(2)} successfully.`);
+      setAdjustAmount(0);
+      setAdjustReason('');
+      setAdjustModalOpen(false);
+      fetchRiderSubData(selectedRider.id);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSubmittingAdjust(false);
     }
   };
 
@@ -744,7 +1236,12 @@ export const Riders: React.FC = () => {
                 { id: 'services', label: 'Services' },
                 { id: 'orders', label: `Orders (${riderOrders.length})` },
                 { id: 'cash', label: 'Cash Collection' },
-                { id: 'wallet', label: 'Wallet & Cash-In' },
+                {
+                  id: 'wallet',
+                  label: selectedRider?.linkedCustomerUid
+                    ? `Shared Wallet (₱${Number(linkedCustomer?.walletBalance ?? 0).toFixed(2)})`
+                    : `Wallet (₱${Number(selectedRider?.walletBalance || 0).toFixed(2)})`
+                },
                 { id: 'tiers', label: 'Tiers & Coins' },
                 { id: 'inbox', label: 'Send Message' },
                 { id: 'history', label: 'Edit History' }
@@ -1107,28 +1604,166 @@ export const Riders: React.FC = () => {
 
               {/* TAB 6: WALLET & CASH-IN */}
               {activeTab === 'wallet' && (
-                <div className="space-y-4">
-                  <div className="p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 flex justify-between items-center">
-                    <div>
-                      <span className="text-xs uppercase font-bold text-emerald-800 dark:text-emerald-300">
-                        Current Rider Wallet Balance
-                      </span>
-                      <div className="text-2xl font-black text-emerald-600 mt-1">
-                        ₱{Number(selectedRider.walletBalance || 0).toFixed(2)}
+                <div className="space-y-5">
+                  {/* Shared Wallet Status Banner */}
+                  {selectedRider.linkedCustomerUid ? (
+                    <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2.5">
+                          <span className="p-2 rounded-xl bg-amber-500 text-white font-bold">
+                            <Link2 className="w-4 h-4" />
+                          </span>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs uppercase font-extrabold text-amber-900 dark:text-amber-300">
+                                Shared Wallet Active
+                              </span>
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 dark:bg-amber-800 text-amber-900 dark:text-amber-100">
+                                Unified Balance
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
+                              Linked to customer: {selectedRider.linkedCustomerName || linkedCustomer?.name || 'Customer'} ({selectedRider.linkedCustomerEmail})
+                            </p>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => {
+                            setUnlinkReason('');
+                            setUnlinkModalOpen(true);
+                          }}
+                          className="px-2.5 py-1 text-xs font-bold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg border border-red-200 dark:border-red-900 transition-colors"
+                        >
+                          Unlink
+                        </button>
                       </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-xs pt-1 border-t border-amber-200 dark:border-amber-900/40">
+                        <div>
+                          <span className="text-gray-500 dark:text-zinc-400 text-[11px]">Customer Name:</span>
+                          <p className="font-bold text-gray-900 dark:text-white">
+                            {selectedRider.linkedCustomerName || linkedCustomer?.name || 'Customer'}
+                          </p>
+                        </div>
+                        <div>
+                          <span className="text-gray-500 dark:text-zinc-400 text-[11px]">Customer Email:</span>
+                          <p className="font-medium text-gray-700 dark:text-zinc-300 truncate">
+                            {selectedRider.linkedCustomerEmail || linkedCustomer?.email}
+                          </p>
+                        </div>
+                        <div>
+                          <span className="text-gray-500 dark:text-zinc-400 text-[11px]">Contact Phone:</span>
+                          <p className="font-medium text-gray-700 dark:text-zinc-300">
+                            {linkedCustomer?.phone || 'N/A'}
+                          </p>
+                        </div>
+                        <div>
+                          <span className="text-gray-500 dark:text-zinc-400 text-[11px]">Linked Date:</span>
+                          <p className="font-medium text-gray-700 dark:text-zinc-300">
+                            {formatTimestamp(selectedRider.linkedAt)}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 flex items-center justify-between">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs uppercase font-extrabold text-gray-700 dark:text-zinc-300">
+                            Independent Rider Wallet
+                          </span>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-200 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400">
+                            Not Linked
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          Link to a registered customer account to share one unified wallet balance.
+                        </p>
+                      </div>
+                      <button
+                        onClick={openLinkModal}
+                        className="delivio-btn-yellow px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                      >
+                        <Link2 className="w-3.5 h-3.5" />
+                        <span>Link to customer account</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Wallet Balance Card */}
+                  <div className="p-5 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-500 text-gray-950 shadow-md">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="p-2 bg-black/10 rounded-xl">
+                          <Wallet className="w-5 h-5 text-gray-950" />
+                        </div>
+                        <span className="text-xs font-black uppercase tracking-wider text-gray-900/80">
+                          {selectedRider.linkedCustomerUid ? 'Shared Wallet Balance' : 'Rider Wallet Balance'}
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-black/15 text-gray-950">
+                        {selectedRider.linkedCustomerUid ? 'Shared with Customer' : 'Rider Only'}
+                      </span>
+                    </div>
+
+                    <div className="mt-4">
+                      <div className="text-3xl font-black tracking-tight">
+                        ₱{Number(
+                          selectedRider.linkedCustomerUid
+                            ? linkedCustomer?.walletBalance ?? 0
+                            : selectedRider.walletBalance ?? 0
+                        ).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </div>
+                      <p className="text-xs text-gray-900/80 mt-1 font-medium">
+                        {selectedRider.linkedCustomerUid ? (
+                          <>Stored on customer account (<code className="font-mono bg-black/10 px-1 rounded">users/{selectedRider.linkedCustomerUid}.walletBalance</code>)</>
+                        ) : (
+                          <>Stored on rider document (<code className="font-mono bg-black/10 px-1 rounded">riders/{selectedRider.id}.walletBalance</code>)</>
+                        )}
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 mt-5">
+                      <button
+                        onClick={() => {
+                          setCashInAmount(0);
+                          setCashInNote('');
+                          // focus cash-in input or scroll
+                          const el = document.getElementById('rider-cash-in-input');
+                          if (el) el.focus();
+                        }}
+                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-gray-950 hover:bg-gray-900 text-white font-bold text-xs shadow-xs transition-colors"
+                      >
+                        <PlusCircle className="w-4 h-4 text-amber-400" />
+                        <span>Add Cash</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          setAdjustAmount(0);
+                          setAdjustReason('');
+                          setAdjustModalOpen(true);
+                        }}
+                        className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-white/90 hover:bg-white text-gray-900 font-bold text-xs shadow-xs transition-colors"
+                      >
+                        <MinusCircle className="w-4 h-4 text-red-600" />
+                        <span>Adjust / Deduct</span>
+                      </button>
                     </div>
                   </div>
 
-                  {/* Add Cash */}
+                  {/* Add Cash Section */}
                   <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 space-y-3">
                     <span className="text-xs font-bold uppercase text-gray-700 dark:text-zinc-300 block">
                       Admin Cash Top-Up (Add Cash)
                     </span>
                     <div className="flex gap-2">
                       <input
+                        id="rider-cash-in-input"
                         type="number"
                         min="1"
-                        value={cashInAmount}
+                        value={cashInAmount || ''}
                         onChange={(e) => setCashInAmount(Number(e.target.value))}
                         placeholder="Top-up Amount (₱)"
                         className="flex-1 px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 font-bold text-gray-900 dark:text-white"
@@ -1137,37 +1772,77 @@ export const Riders: React.FC = () => {
                         type="text"
                         value={cashInNote}
                         onChange={(e) => setCashInNote(e.target.value)}
-                        placeholder="Reason (e.g. Over-the-counter deposit)"
+                        placeholder="Reason / Note (e.g. Counter deposit)"
                         className="flex-1 px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
                       />
                       <button
                         onClick={handleAddWalletCash}
                         disabled={addingCash || cashInAmount <= 0}
-                        className="delivio-btn-yellow px-4 py-2 text-xs font-bold rounded-xl"
+                        className="delivio-btn-yellow px-4 py-2 text-xs font-bold rounded-xl flex items-center gap-1.5"
                       >
+                        {addingCash && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                         Add Cash
                       </button>
                     </div>
+                  </div>
 
-                    {/* Txn History */}
-                    <div className="space-y-1.5 pt-2">
-                      {walletTxns.map((tx) => (
-                        <div
-                          key={tx.id}
-                          className="flex items-center justify-between p-2 rounded-xl bg-white dark:bg-zinc-850 text-xs"
-                        >
-                          <div>
-                            <span className="font-bold text-emerald-600">
-                              +₱{Number(tx.amount).toFixed(2)}
-                            </span>
-                            <span className="text-gray-400 ml-2">
-                              {formatTimestamp(tx.createdAt)}
-                            </span>
-                          </div>
-                          <span className="text-gray-400 text-[11px]">{tx.note}</span>
-                        </div>
-                      ))}
+                  {/* Wallet Activity Ledger */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold uppercase text-gray-500">
+                        Wallet Activity & Ledger ({walletTxns.length})
+                      </span>
                     </div>
+
+                    {walletTxns.length === 0 ? (
+                      <div className="p-6 text-center text-xs text-gray-400 bg-gray-50 dark:bg-zinc-900 rounded-xl border border-gray-100 dark:border-zinc-800">
+                        No wallet transactions recorded.
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5 max-h-80 overflow-y-auto pr-1">
+                        {walletTxns.map((tx) => {
+                          const isNegative = Number(tx.amount || 0) < 0;
+                          return (
+                            <div
+                              key={tx.id}
+                              className="flex items-center justify-between p-2.5 rounded-xl bg-gray-50 dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800 text-xs"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                    tx.type === 'merge'
+                                      ? 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300'
+                                      : isNegative
+                                      ? 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
+                                      : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                  }`}
+                                >
+                                  {tx.type || 'cash_in'}
+                                </span>
+                                <div>
+                                  <span className={`font-bold ${isNegative ? 'text-red-600' : 'text-emerald-600'}`}>
+                                    {isNegative ? '' : '+'}₱{Math.abs(Number(tx.amount || 0)).toFixed(2)}
+                                  </span>
+                                  <p className="text-[11px] text-gray-500 truncate max-w-[200px]">
+                                    {tx.note || tx.reason || 'Transaction'}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <div className="text-[10px] text-gray-400">
+                                  {formatTimestamp(tx.createdAt)}
+                                </div>
+                                {tx.balanceAfter !== undefined && (
+                                  <div className="text-[10px] font-mono text-gray-500">
+                                    Bal: ₱{Number(tx.balanceAfter).toFixed(2)}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -1325,6 +2000,291 @@ export const Riders: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+      {/* MODAL 1: LINK TO CUSTOMER ACCOUNT (Type-ahead search) */}
+      {linkModalOpen && selectedRider && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div
+            className="w-full max-w-lg bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl shadow-2xl p-6 overflow-hidden flex flex-col max-h-[85vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-xl bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400">
+                  <Link2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-gray-900 dark:text-white">
+                    Link Rider to Customer Account
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    Search registered customer accounts by email to create a shared wallet.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setLinkModalOpen(false)}
+                className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Type-ahead search input */}
+            <div className="relative mb-3">
+              <Search className="w-4 h-4 absolute left-3.5 top-3 text-gray-400" />
+              <input
+                type="text"
+                value={customerSearchQuery}
+                onChange={(e) => setCustomerSearchQuery(e.target.value)}
+                placeholder="Type customer email, name, or phone..."
+                autoFocus
+                className="w-full pl-9 pr-4 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+              />
+            </div>
+
+            {/* Candidate list */}
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-[220px]">
+              {loadingCustomers ? (
+                <div className="p-8 text-center text-xs text-gray-400 flex items-center justify-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+                  Loading registered customers...
+                </div>
+              ) : filteredCandidates.length === 0 ? (
+                <div className="p-8 text-center text-xs text-gray-400">
+                  No matching registered customers found.
+                </div>
+              ) : (
+                filteredCandidates.map((cust) => (
+                  <div
+                    key={cust.uid}
+                    onClick={() => {
+                      setSelectedCandidateCustomer(cust);
+                      setConfirmMergeModalOpen(true);
+                    }}
+                    className="p-3 rounded-xl border border-gray-200 dark:border-zinc-800 hover:border-amber-400 dark:hover:border-amber-500 bg-gray-50/60 dark:bg-zinc-850 cursor-pointer transition-all flex items-center justify-between group"
+                  >
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-xs text-gray-900 dark:text-white group-hover:text-amber-600 transition-colors">
+                          {cust.name}
+                        </span>
+                        <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-50 dark:bg-emerald-950/60 px-1.5 py-0.2 rounded">
+                          Bal: ₱{Number(cust.walletBalance || 0).toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3 text-[11px] text-gray-500 mt-0.5">
+                        <span className="flex items-center gap-1 font-mono">
+                          <Mail className="w-3 h-3" /> {cust.email}
+                        </span>
+                        {cust.phone && (
+                          <span className="flex items-center gap-1">
+                            <Phone className="w-3 h-3" /> {cust.phone}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="px-2.5 py-1 rounded-lg text-xs font-bold text-amber-600 bg-amber-50 dark:bg-amber-950/40 group-hover:bg-amber-500 group-hover:text-white transition-colors"
+                    >
+                      Select &rarr;
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="pt-3 border-t border-gray-100 dark:border-zinc-800 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setLinkModalOpen(false)}
+                className="px-4 py-2 text-xs font-bold text-gray-600 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-xl"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: CONFIRM MERGE WALLETS MODAL */}
+      {confirmMergeModalOpen && selectedRider && selectedCandidateCustomer && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div
+            className="w-full max-w-md bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl shadow-2xl p-6 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2.5 rounded-xl bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <h3 className="text-base font-bold text-gray-900 dark:text-white">
+                Confirm Shared Wallet Link
+              </h3>
+            </div>
+
+            <p className="text-xs text-gray-600 dark:text-zinc-300 mb-4 leading-relaxed font-semibold">
+              Both wallets will be merged into one shared balance on the customer account.
+            </p>
+
+            <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-2 text-xs mb-4">
+              <div className="flex justify-between items-center">
+                <span className="text-gray-500">Rider: {selectedRider.name}</span>
+                <span className="font-bold text-gray-900 dark:text-white">
+                  ₱{Number(selectedRider.walletBalance || 0).toFixed(2)}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-gray-500">Customer: {selectedCandidateCustomer.email}</span>
+                <span className="font-bold text-gray-900 dark:text-white">
+                  ₱{Number(selectedCandidateCustomer.walletBalance || 0).toFixed(2)}
+                </span>
+              </div>
+              <div className="pt-2 border-t border-gray-200 dark:border-zinc-700 flex justify-between items-center text-sm font-extrabold text-amber-600">
+                <span>New Shared Balance:</span>
+                <span>
+                  ₱{(Number(selectedRider.walletBalance || 0) + Number(selectedCandidateCustomer.walletBalance || 0)).toFixed(2)}
+                </span>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-gray-500 mb-4">
+              After merging, the rider's balance document will be set to ₱0 and the combined funds will be kept on the customer account. Future top-ups and adjustments update the shared balance for both users.
+            </p>
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmMergeModalOpen(false)}
+                disabled={linking}
+                className="px-4 py-2 text-xs font-bold text-gray-600 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-xl"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmLink}
+                disabled={linking}
+                className="delivio-btn-yellow px-5 py-2 text-xs font-bold rounded-xl flex items-center gap-2"
+              >
+                {linking && <Loader2 className="w-4 h-4 animate-spin" />}
+                Confirm & Merge Wallets
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 3: ADJUST / DEDUCT WALLET MODAL */}
+      {adjustModalOpen && selectedRider && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div
+            className="w-full max-w-md bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl shadow-2xl p-6 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-xl bg-red-100 text-red-600 dark:bg-red-950/60 dark:text-red-400">
+                  <MinusCircle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-gray-900 dark:text-white">
+                    Adjust / Deduct Balance
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    {selectedRider.linkedCustomerUid ? 'Deducts from shared customer balance' : 'Deducts from rider wallet'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setAdjustModalOpen(false)}
+                className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleAdjustWalletCash} className="space-y-4">
+              <div className="p-3 rounded-xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 text-xs flex justify-between">
+                <span className="text-gray-500">Available Balance:</span>
+                <span className="font-bold text-gray-900 dark:text-white">
+                  ₱{Number(
+                    selectedRider.linkedCustomerUid
+                      ? linkedCustomer?.walletBalance ?? 0
+                      : selectedRider.walletBalance ?? 0
+                  ).toFixed(2)}
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  Deduction Amount (₱) <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={adjustAmount || ''}
+                  onChange={(e) => setAdjustAmount(Number(e.target.value))}
+                  required
+                  placeholder="0.00"
+                  className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  Reason for Adjustment <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  rows={2}
+                  value={adjustReason}
+                  onChange={(e) => setAdjustReason(e.target.value)}
+                  required
+                  placeholder="Mandatory reason (e.g. overpayment correction, penalty, user dispute)..."
+                  className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAdjustModalOpen(false)}
+                  disabled={submittingAdjust}
+                  className="px-4 py-2 text-xs font-bold text-gray-600 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-xl"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingAdjust || adjustAmount <= 0}
+                  className="px-5 py-2 text-xs font-bold rounded-xl bg-red-600 hover:bg-red-700 text-white flex items-center gap-2 disabled:opacity-50"
+                >
+                  {submittingAdjust && <Loader2 className="w-4 h-4 animate-spin" />}
+                  Confirm Deduction
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 4: UNLINK RIDER CONFIRMATION MODAL */}
+      {unlinkModalOpen && selectedRider && (
+        <ConfirmationModal
+          isOpen={unlinkModalOpen}
+          onClose={() => setUnlinkModalOpen(false)}
+          onConfirm={async (reason) => {
+            await handleUnlinkRider(reason);
+          }}
+          title={`Unlink Rider ${selectedRider.name}`}
+          message={`Are you sure you want to unlink rider ${selectedRider.name} from customer account (${selectedRider.linkedCustomerEmail})? The shared balance will remain on the customer account. The rider's wallet balance will start at ₱0.`}
+          confirmLabel="Unlink Account"
+          reasonRequired={true}
+          reasonPlaceholder="Specify mandatory reason for unlinking account..."
+          isDestructive={true}
+        />
       )}
     </div>
   );

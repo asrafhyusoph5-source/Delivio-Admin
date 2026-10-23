@@ -14,7 +14,8 @@ import {
   Timestamp,
   arrayUnion,
   writeBatch,
-  increment
+  increment,
+  runTransaction
 } from '../firebase';
 import { useCity } from '../context/CityContext';
 import { useAuth } from '../context/AuthContext';
@@ -22,7 +23,7 @@ import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
-import type { UserProfile, UserAddress, Order, EditHistoryEntry, WalletTransaction } from '../types';
+import type { UserProfile, UserAddress, Order, EditHistoryEntry, WalletTransaction, Rider } from '../types';
 import {
   Search,
   Filter,
@@ -52,7 +53,9 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   Receipt,
-  CheckCircle2
+  CheckCircle2,
+  Bike,
+  Link2
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
@@ -83,6 +86,10 @@ export const Customers: React.FC = () => {
   const [loadingWallet, setLoadingWallet] = useState(false);
   const [customerEditHistory, setCustomerEditHistory] = useState<EditHistoryEntry[]>([]);
   const [historySortAsc, setHistorySortAsc] = useState(false);
+  const [linkedRider, setLinkedRider] = useState<Rider | null>(null);
+  const [unlinkModalOpen, setUnlinkModalOpen] = useState(false);
+  const [unlinkReason, setUnlinkReason] = useState('');
+  const [unlinking, setUnlinking] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'wallet' | 'transactions' | 'history' | 'location'>('overview');
 
   // Add Cash Modal
@@ -294,10 +301,51 @@ export const Customers: React.FC = () => {
       }
     };
 
+    // E. Fetch Linked Rider (query riders where linkedCustomerUid == uid)
+    const fetchLinkedRider = async () => {
+      try {
+        const ridersRef = collection(db, 'riders');
+        const q = query(ridersRef, where('linkedCustomerUid', '==', selectedCustomer.uid), limit(1));
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          const d = snap.docs[0];
+          const dt = d.data();
+          setLinkedRider({
+            id: d.id,
+            name: dt.name || 'Rider',
+            email: dt.email || '',
+            phone: dt.phone || '',
+            riderCode: dt.riderCode || d.id.substring(0, 8),
+            status: dt.status || 'active',
+            vehicleType: dt.vehicleType || 'Motorcycle',
+            vehicleModel: dt.vehicleModel || '',
+            plate: dt.plate || '',
+            allowedServices: dt.allowedServices || [],
+            activeServices: dt.activeServices || [],
+            isOnline: Boolean(dt.isOnline),
+            coins: dt.coins || 0,
+            walletBalance: dt.walletBalance || 0,
+            cashRemitted: dt.cashRemitted || 0,
+            linkedCustomerUid: dt.linkedCustomerUid,
+            linkedCustomerEmail: dt.linkedCustomerEmail,
+            linkedCustomerName: dt.linkedCustomerName,
+            linkedAt: dt.linkedAt,
+            createdAt: dt.createdAt
+          });
+        } else {
+          setLinkedRider(null);
+        }
+      } catch (err) {
+        console.error('Failed to load linked rider:', err);
+        setLinkedRider(null);
+      }
+    };
+
     fetchAddresses();
     fetchOrders();
     fetchWalletTxns();
     fetchEditHistory();
+    fetchLinkedRider();
   }, [selectedCustomer]);
 
   // Merged Wallet History (walletTransactions + wallet-paid orders + refunds)
@@ -375,7 +423,7 @@ export const Customers: React.FC = () => {
     return items;
   }, [customerWalletTxns, customerOrders, selectedCustomer]);
 
-  // Action: Add Cash to Customer Wallet
+  // Action: Add Cash to Customer Wallet (Runs in ONE transaction)
   const handleAddCash = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedCustomer) return;
@@ -387,37 +435,56 @@ export const Customers: React.FC = () => {
 
     try {
       setSubmittingCashIn(true);
-      const batch = writeBatch(db);
       const userRef = doc(db, 'users', selectedCustomer.uid);
-      const currentBal = Number(selectedCustomer.walletBalance || 0);
-      const newBal = currentBal + amountNum;
       const now = Timestamp.now();
       const noteClean = addCashNote.trim() || 'Admin cash deposit';
+      const txnRef = doc(collection(db, 'walletTransactions'));
 
-      // 1. Increment users.walletBalance
-      batch.update(userRef, {
-        walletBalance: increment(amountNum),
-        updatedAt: now
+      let finalBal = 0;
+      let oldBal = 0;
+
+      await runTransaction(db, async (transaction) => {
+        const userSnap = await transaction.get(userRef);
+        oldBal = userSnap.exists() ? Number(userSnap.data()?.walletBalance || 0) : 0;
+        finalBal = oldBal + amountNum;
+
+        if (userSnap.exists()) {
+          transaction.update(userRef, {
+            walletBalance: finalBal,
+            updatedAt: now
+          });
+        } else {
+          transaction.set(
+            userRef,
+            {
+              walletBalance: finalBal,
+              role: 'customer',
+              email: selectedCustomer.email,
+              name: selectedCustomer.name,
+              status: 'active',
+              updatedAt: now
+            },
+            { merge: true }
+          );
+        }
+
+        const txnData: any = {
+          customerId: selectedCustomer.uid,
+          type: 'cash_in',
+          amount: amountNum,
+          note: noteClean,
+          adminId: adminProfile?.uid || 'admin',
+          adminName: adminProfile?.name || 'Administrator',
+          balanceAfter: finalBal,
+          createdAt: now
+        };
+        if (linkedRider?.id) {
+          txnData.riderId = linkedRider.id;
+        }
+        transaction.set(txnRef, txnData);
       });
 
-      // 2. Create walletTransactions entry
-      const txnRef = doc(collection(db, 'walletTransactions'));
-      const txnData: WalletTransaction = {
-        customerId: selectedCustomer.uid,
-        type: 'cash_in',
-        amount: amountNum,
-        note: noteClean,
-        adminId: adminProfile?.uid || 'admin',
-        adminName: adminProfile?.name || 'Administrator',
-        balanceAfter: newBal,
-        createdAt: now
-      };
-      batch.set(txnRef, txnData);
-
-      // Execute batch write
-      await batch.commit();
-
-      // 3. Write auditLogs and editHistory entries
+      // Write auditLogs and editHistory
       await logAuditEvent({
         adminId: adminProfile?.uid || 'admin',
         adminName: adminProfile?.name || 'Administrator',
@@ -425,9 +492,9 @@ export const Customers: React.FC = () => {
         action: 'WALLET_ADD_CASH',
         entityType: 'customer',
         entityId: selectedCustomer.uid,
-        details: `Credited ₱${amountNum.toFixed(2)} cash to customer wallet (${selectedCustomer.name}). Note: ${noteClean}`,
-        oldValue: { walletBalance: currentBal },
-        newValue: { walletBalance: newBal },
+        details: `Credited ₱${amountNum.toFixed(2)} cash to ${linkedRider ? 'shared ' : ''}customer wallet (${selectedCustomer.name}). Note: ${noteClean}`,
+        oldValue: { walletBalance: oldBal },
+        newValue: { walletBalance: finalBal },
         reason: noteClean
       });
 
@@ -435,8 +502,8 @@ export const Customers: React.FC = () => {
         entityType: 'customer',
         entityId: selectedCustomer.uid,
         field: 'walletBalance',
-        oldValue: currentBal,
-        newValue: newBal,
+        oldValue: oldBal,
+        newValue: finalBal,
         editedBy: adminProfile?.uid || 'admin',
         editedByName: adminProfile?.name || 'Administrator'
       });
@@ -444,11 +511,25 @@ export const Customers: React.FC = () => {
       showSuccess(`Successfully credited ₱${amountNum.toFixed(2)} to ${selectedCustomer.name}'s wallet.`);
 
       // Update state
-      setSelectedCustomer((prev) => (prev ? { ...prev, walletBalance: newBal } : null));
+      setSelectedCustomer((prev) => (prev ? { ...prev, walletBalance: finalBal } : null));
       setCustomers((prev) =>
-        prev.map((c) => (c.uid === selectedCustomer.uid ? { ...c, walletBalance: newBal } : c))
+        prev.map((c) => (c.uid === selectedCustomer.uid ? { ...c, walletBalance: finalBal } : c))
       );
-      setCustomerWalletTxns((prev) => [{ id: txnRef.id, ...txnData }, ...prev]);
+      setCustomerWalletTxns((prev) => [
+        {
+          id: txnRef.id,
+          customerId: selectedCustomer.uid,
+          riderId: linkedRider?.id,
+          type: 'cash_in',
+          amount: amountNum,
+          note: noteClean,
+          adminId: adminProfile?.uid || 'admin',
+          adminName: adminProfile?.name || 'Administrator',
+          balanceAfter: finalBal,
+          createdAt: now
+        },
+        ...prev
+      ]);
 
       setAddCashAmount('');
       setAddCashNote('');
@@ -460,7 +541,7 @@ export const Customers: React.FC = () => {
     }
   };
 
-  // Action: Adjust / Deduct from Customer Wallet
+  // Action: Adjust / Deduct from Customer Wallet (Runs in ONE transaction)
   const handleAdjustDeduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedCustomer) return;
@@ -475,44 +556,49 @@ export const Customers: React.FC = () => {
       showError('A mandatory reason is required to adjust or deduct wallet balance.');
       return;
     }
-    const currentBal = Number(selectedCustomer.walletBalance || 0);
-    if (amountNum > currentBal) {
-      showError(`Cannot deduct ₱${amountNum.toFixed(2)}. Customer balance is only ₱${currentBal.toFixed(2)} (balance cannot go below 0).`);
-      return;
-    }
 
     try {
       setSubmittingAdjust(true);
-      const batch = writeBatch(db);
       const userRef = doc(db, 'users', selectedCustomer.uid);
-      const newBal = Math.max(0, currentBal - amountNum);
       const now = Timestamp.now();
+      const txnRef = doc(collection(db, 'walletTransactions'));
 
-      // 1. Decrement users.walletBalance
-      batch.update(userRef, {
-        walletBalance: increment(-amountNum),
-        updatedAt: now
+      let finalBal = 0;
+      let oldBal = 0;
+
+      await runTransaction(db, async (transaction) => {
+        const userSnap = await transaction.get(userRef);
+        oldBal = userSnap.exists() ? Number(userSnap.data()?.walletBalance || 0) : 0;
+        if (amountNum > oldBal) {
+          throw new Error(
+            `Cannot deduct ₱${amountNum.toFixed(2)}. Customer balance is only ₱${oldBal.toFixed(2)} (balance cannot go below 0).`
+          );
+        }
+        finalBal = oldBal - amountNum;
+
+        transaction.update(userRef, {
+          walletBalance: finalBal,
+          updatedAt: now
+        });
+
+        const txnData: any = {
+          customerId: selectedCustomer.uid,
+          type: 'adjustment',
+          amount: -amountNum,
+          note: reasonClean,
+          reason: reasonClean,
+          adminId: adminProfile?.uid || 'admin',
+          adminName: adminProfile?.name || 'Administrator',
+          balanceAfter: finalBal,
+          createdAt: now
+        };
+        if (linkedRider?.id) {
+          txnData.riderId = linkedRider.id;
+        }
+        transaction.set(txnRef, txnData);
       });
 
-      // 2. Create walletTransactions entry
-      const txnRef = doc(collection(db, 'walletTransactions'));
-      const txnData: WalletTransaction = {
-        customerId: selectedCustomer.uid,
-        type: 'adjustment',
-        amount: -amountNum,
-        note: reasonClean,
-        reason: reasonClean,
-        adminId: adminProfile?.uid || 'admin',
-        adminName: adminProfile?.name || 'Administrator',
-        balanceAfter: newBal,
-        createdAt: now
-      };
-      batch.set(txnRef, txnData);
-
-      // Execute batch write
-      await batch.commit();
-
-      // 3. Write auditLogs and editHistory entries
+      // Write auditLogs and editHistory entries
       await logAuditEvent({
         adminId: adminProfile?.uid || 'admin',
         adminName: adminProfile?.name || 'Administrator',
@@ -520,9 +606,9 @@ export const Customers: React.FC = () => {
         action: 'WALLET_ADJUST_DEDUCT',
         entityType: 'customer',
         entityId: selectedCustomer.uid,
-        details: `Deducted/adjusted ₱${amountNum.toFixed(2)} from ${selectedCustomer.name}'s wallet. Reason: ${reasonClean}`,
-        oldValue: { walletBalance: currentBal },
-        newValue: { walletBalance: newBal },
+        details: `Deducted/adjusted ₱${amountNum.toFixed(2)} from ${linkedRider ? 'shared ' : ''}${selectedCustomer.name}'s wallet. Reason: ${reasonClean}`,
+        oldValue: { walletBalance: oldBal },
+        newValue: { walletBalance: finalBal },
         reason: reasonClean
       });
 
@@ -530,20 +616,35 @@ export const Customers: React.FC = () => {
         entityType: 'customer',
         entityId: selectedCustomer.uid,
         field: 'walletBalance',
-        oldValue: currentBal,
-        newValue: newBal,
+        oldValue: oldBal,
+        newValue: finalBal,
         editedBy: adminProfile?.uid || 'admin',
         editedByName: adminProfile?.name || 'Administrator'
       });
 
-      showSuccess(`Successfully deducted ₱${amountNum.toFixed(2)} from ${selectedCustomer.name}'s wallet.`);
+      showSuccess(`Successfully deducted ₱${amountNum.toFixed(2)}.`);
 
       // Update state
-      setSelectedCustomer((prev) => (prev ? { ...prev, walletBalance: newBal } : null));
+      setSelectedCustomer((prev) => (prev ? { ...prev, walletBalance: finalBal } : null));
       setCustomers((prev) =>
-        prev.map((c) => (c.uid === selectedCustomer.uid ? { ...c, walletBalance: newBal } : c))
+        prev.map((c) => (c.uid === selectedCustomer.uid ? { ...c, walletBalance: finalBal } : c))
       );
-      setCustomerWalletTxns((prev) => [{ id: txnRef.id, ...txnData }, ...prev]);
+      setCustomerWalletTxns((prev) => [
+        {
+          id: txnRef.id,
+          customerId: selectedCustomer.uid,
+          riderId: linkedRider?.id,
+          type: 'adjustment',
+          amount: -amountNum,
+          note: reasonClean,
+          reason: reasonClean,
+          adminId: adminProfile?.uid || 'admin',
+          adminName: adminProfile?.name || 'Administrator',
+          balanceAfter: finalBal,
+          createdAt: now
+        },
+        ...prev
+      ]);
 
       setAdjustAmount('');
       setAdjustReason('');
@@ -552,6 +653,46 @@ export const Customers: React.FC = () => {
       showError(err);
     } finally {
       setSubmittingAdjust(false);
+    }
+  };
+
+  // Action: Unlink Rider from Customer (Reason required; balance stays on customer account)
+  const handleUnlinkRider = async (customReason?: string) => {
+    if (!linkedRider || !selectedCustomer) return;
+    const reasonClean = (customReason || unlinkReason).trim();
+    if (!reasonClean) {
+      showError('A mandatory reason is required to unlink rider account.');
+      return;
+    }
+    try {
+      setUnlinking(true);
+      const rRef = doc(db, 'riders', linkedRider.id);
+      await updateDoc(rRef, {
+        linkedCustomerUid: null,
+        linkedCustomerEmail: null,
+        linkedCustomerName: null,
+        linkedAt: null,
+        updatedAt: Timestamp.now()
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        action: 'UNLINK_RIDER_WALLET',
+        entityType: 'rider',
+        entityId: linkedRider.id,
+        details: `Unlinked rider ${linkedRider.name} from customer ${selectedCustomer.name} (${selectedCustomer.email}). Reason: ${reasonClean}. Shared balance remains with customer account.`,
+        reason: reasonClean
+      });
+
+      showSuccess(`Rider ${linkedRider.name} unlinked. Balance remains on customer account.`);
+      setLinkedRider(null);
+      setUnlinkModalOpen(false);
+      setUnlinkReason('');
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setUnlinking(false);
     }
   };
 
@@ -1101,6 +1242,66 @@ export const Customers: React.FC = () => {
                     </div>
                   </div>
 
+                  {/* Linked Rider Card (query riders where linkedCustomerUid == uid) */}
+                  {linkedRider ? (
+                    <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="p-2 rounded-xl bg-amber-500 text-white font-bold">
+                            <Bike className="w-4 h-4" />
+                          </span>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs uppercase font-extrabold text-amber-900 dark:text-amber-300">
+                                Linked Rider Account
+                              </span>
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 dark:bg-amber-800 text-amber-900 dark:text-amber-100">
+                                Shared Wallet Active
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
+                              Both accounts share one unified wallet balance
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setUnlinkReason('');
+                            setUnlinkModalOpen(true);
+                          }}
+                          className="px-2.5 py-1 text-xs font-bold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg border border-red-200 dark:border-red-900 transition-colors"
+                        >
+                          Unlink
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-xs pt-1 border-t border-amber-200 dark:border-amber-900/40">
+                        <div>
+                          <span className="text-gray-500 dark:text-zinc-400 text-[11px]">Rider Name:</span>
+                          <p className="font-bold text-gray-900 dark:text-white">{linkedRider.name}</p>
+                        </div>
+                        <div>
+                          <span className="text-gray-500 dark:text-zinc-400 text-[11px]">Rider Code:</span>
+                          <p className="font-bold font-mono text-gray-900 dark:text-white">{linkedRider.riderCode}</p>
+                        </div>
+                        <div>
+                          <span className="text-gray-500 dark:text-zinc-400 text-[11px]">Email:</span>
+                          <p className="font-medium text-gray-700 dark:text-zinc-300 truncate">{linkedRider.email}</p>
+                        </div>
+                        <div>
+                          <span className="text-gray-500 dark:text-zinc-400 text-[11px]">Phone:</span>
+                          <p className="font-medium text-gray-700 dark:text-zinc-300">{linkedRider.phone || 'N/A'}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 flex items-center justify-between text-xs text-gray-500">
+                      <div className="flex items-center gap-2">
+                        <Bike className="w-4 h-4 text-gray-400" />
+                        <span>No rider account linked to this customer.</span>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Internal Admin Note */}
                   <div className="p-4 rounded-2xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/40">
                     <span className="text-xs font-bold uppercase tracking-wider text-amber-900 dark:text-amber-300 block mb-1">
@@ -1173,6 +1374,39 @@ export const Customers: React.FC = () => {
               {/* TAB: WALLET MANAGEMENT & HISTORY */}
               {activeTab === 'wallet' && (
                 <div className="space-y-6">
+                  {/* Shared Wallet Badge if linked */}
+                  {linkedRider && (
+                    <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-300 dark:border-amber-700 flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <span className="p-1.5 rounded-xl bg-amber-500 text-white font-bold">
+                          <Link2 className="w-4 h-4" />
+                        </span>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-black text-amber-900 dark:text-amber-200 uppercase tracking-wide">
+                              Shared Wallet Active
+                            </span>
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 dark:bg-amber-800 text-amber-900 dark:text-amber-100">
+                              Linked with {linkedRider.name}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-amber-800 dark:text-amber-300 mt-0.5">
+                            Rider ({linkedRider.email}) and Customer share this identical balance. Top-ups & deductions update both accounts.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setUnlinkReason('');
+                          setUnlinkModalOpen(true);
+                        }}
+                        className="text-xs font-bold text-red-600 dark:text-red-400 hover:underline px-2.5 py-1.5 rounded-lg border border-red-200 dark:border-red-900"
+                      >
+                        Unlink
+                      </button>
+                    </div>
+                  )}
+
                   {/* Wallet Balance Hero Card */}
                   <div className="p-5 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-500 text-gray-950 shadow-md">
                     <div className="flex items-center justify-between">
@@ -1794,6 +2028,23 @@ export const Customers: React.FC = () => {
           reasonRequired={true}
           reasonPlaceholder="Specify reason (e.g. repeated fraudulent orders, chargebacks, user request)..."
           isDestructive={customerToToggle.status !== 'blocked'}
+        />
+      )}
+
+      {/* Unlink Rider Confirmation Modal */}
+      {unlinkModalOpen && linkedRider && selectedCustomer && (
+        <ConfirmationModal
+          isOpen={unlinkModalOpen}
+          onClose={() => setUnlinkModalOpen(false)}
+          onConfirm={async (reason) => {
+            await handleUnlinkRider(reason);
+          }}
+          title={`Unlink Rider ${linkedRider.name}`}
+          message={`Are you sure you want to unlink rider ${linkedRider.name} from customer ${selectedCustomer.name}? The shared wallet balance will remain on the customer account (${selectedCustomer.email}). The rider's wallet balance will be separate.`}
+          confirmLabel="Unlink Rider Account"
+          reasonRequired={true}
+          reasonPlaceholder="State mandatory reason for unlinking (e.g. driver switched phone, account split, admin audit)..."
+          isDestructive={true}
         />
       )}
     </div>
