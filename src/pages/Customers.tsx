@@ -23,7 +23,7 @@ import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
-import type { UserProfile, UserAddress, Order, EditHistoryEntry, WalletTransaction, Rider } from '../types';
+import type { UserProfile, UserAddress, Order, EditHistoryEntry, WalletTransaction, Rider, WalletTransfer } from '../types';
 import {
   Search,
   Filter,
@@ -55,7 +55,8 @@ import {
   Receipt,
   CheckCircle2,
   Bike,
-  Link2
+  Link2,
+  Send
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
@@ -83,6 +84,7 @@ export const Customers: React.FC = () => {
   const [customerAddresses, setCustomerAddresses] = useState<UserAddress[]>([]);
   const [customerOrders, setCustomerOrders] = useState<Order[]>([]);
   const [customerWalletTxns, setCustomerWalletTxns] = useState<WalletTransaction[]>([]);
+  const [customerTransfers, setCustomerTransfers] = useState<WalletTransfer[]>([]);
   const [loadingWallet, setLoadingWallet] = useState(false);
   const [customerEditHistory, setCustomerEditHistory] = useState<EditHistoryEntry[]>([]);
   const [historySortAsc, setHistorySortAsc] = useState(false);
@@ -341,20 +343,79 @@ export const Customers: React.FC = () => {
       }
     };
 
+    // F. Fetch Wallet Transfers (where fromUid == uid OR toUid == uid)
+    const fetchWalletTransfers = async () => {
+      try {
+        const transfersRef = collection(db, 'walletTransfers');
+        const qSent = query(transfersRef, where('fromUid', '==', selectedCustomer.uid), limit(50));
+        const qRecv = query(transfersRef, where('toUid', '==', selectedCustomer.uid), limit(50));
+
+        const [snapSent, snapRecv] = await Promise.all([getDocs(qSent), getDocs(qRecv)]);
+        const map = new Map<string, WalletTransfer>();
+
+        snapSent.forEach((d) => {
+          const dt = d.data();
+          map.set(d.id, {
+            id: d.id,
+            reference: dt.reference || d.id.substring(0, 8).toUpperCase(),
+            fromUid: dt.fromUid || '',
+            fromName: dt.fromName || 'User',
+            fromEmail: dt.fromEmail,
+            toUid: dt.toUid || '',
+            toName: dt.toName || 'User',
+            toEmail: dt.toEmail,
+            amount: Number(dt.amount || 0),
+            note: dt.note || '',
+            method: dt.method || 'send',
+            status: dt.status || 'completed',
+            createdAt: dt.createdAt
+          });
+        });
+
+        snapRecv.forEach((d) => {
+          const dt = d.data();
+          if (!map.has(d.id)) {
+            map.set(d.id, {
+              id: d.id,
+              reference: dt.reference || d.id.substring(0, 8).toUpperCase(),
+              fromUid: dt.fromUid || '',
+              fromName: dt.fromName || 'User',
+              fromEmail: dt.fromEmail,
+              toUid: dt.toUid || '',
+              toName: dt.toName || 'User',
+              toEmail: dt.toEmail,
+              amount: Number(dt.amount || 0),
+              note: dt.note || '',
+              method: dt.method || 'send',
+              status: dt.status || 'completed',
+              createdAt: dt.createdAt
+            });
+          }
+        });
+
+        const list = Array.from(map.values());
+        list.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+        setCustomerTransfers(list);
+      } catch (err) {
+        console.error('Failed to load wallet transfers:', err);
+      }
+    };
+
     fetchAddresses();
     fetchOrders();
     fetchWalletTxns();
     fetchEditHistory();
     fetchLinkedRider();
+    fetchWalletTransfers();
   }, [selectedCustomer]);
 
-  // Merged Wallet History (walletTransactions + wallet-paid orders + refunds)
+  // Merged Wallet History (walletTransactions + wallet-paid orders + refunds + transfers)
   const mergedWalletHistory = useMemo(() => {
     if (!selectedCustomer) return [];
 
     const items: Array<{
       id: string;
-      type: 'cash_in' | 'adjustment' | 'refund' | 'order_payment' | string;
+      type: 'cash_in' | 'adjustment' | 'refund' | 'order_payment' | 'transfer_sent' | 'transfer_received' | string;
       amount: number;
       title: string;
       note?: string;
@@ -419,9 +480,38 @@ export const Customers: React.FC = () => {
       }
     });
 
+    // Merge Wallet Transfers (Sent & Received)
+    customerTransfers.forEach((tr) => {
+      const isSender = tr.fromUid === selectedCustomer.uid;
+      const isRecipient = tr.toUid === selectedCustomer.uid;
+      const methodLabel = tr.method === 'qr' ? 'QR Code Transfer' : 'Direct Send';
+
+      if (isSender) {
+        items.push({
+          id: `transfer-sent-${tr.id}`,
+          type: 'transfer_sent',
+          amount: -Math.abs(tr.amount),
+          title: `Sent to ${tr.toName || 'User'}`,
+          note: `${methodLabel}${tr.note ? ` • "${tr.note}"` : ''} • Ref: ${tr.reference || tr.id}`,
+          createdAt: tr.createdAt
+        });
+      }
+
+      if (isRecipient && !isSender) {
+        items.push({
+          id: `transfer-recv-${tr.id}`,
+          type: 'transfer_received',
+          amount: Math.abs(tr.amount),
+          title: `Received from ${tr.fromName || 'User'}`,
+          note: `${methodLabel}${tr.note ? ` • "${tr.note}"` : ''} • Ref: ${tr.reference || tr.id}`,
+          createdAt: tr.createdAt
+        });
+      }
+    });
+
     items.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
     return items;
-  }, [customerWalletTxns, customerOrders, selectedCustomer]);
+  }, [customerWalletTxns, customerOrders, customerTransfers, selectedCustomer]);
 
   // Action: Add Cash to Customer Wallet (Runs in ONE transaction)
   const handleAddCash = async (e: React.FormEvent) => {
@@ -1512,15 +1602,22 @@ export const Customers: React.FC = () => {
                                       ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
                                       : tx.type === 'refund'
                                       ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
+                                      : tx.type === 'transfer_received'
+                                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                      : tx.type === 'transfer_sent'
+                                      ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
                                       : tx.type === 'adjustment'
                                       ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
                                       : 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300'
                                   }`}
                                 >
                                   {tx.type === 'cash_in' && <ArrowDownLeft className="w-4 h-4" />}
+                                  {tx.type === 'transfer_received' && <ArrowDownLeft className="w-4 h-4" />}
+                                  {tx.type === 'transfer_sent' && <ArrowUpRight className="w-4 h-4" />}
                                   {tx.type === 'adjustment' && <ArrowUpRight className="w-4 h-4" />}
                                   {tx.type === 'refund' && <CheckCircle2 className="w-4 h-4" />}
                                   {tx.type === 'order_payment' && <Receipt className="w-4 h-4" />}
+                                  {tx.type === 'merge' && <Link2 className="w-4 h-4" />}
                                 </div>
 
                                 <div className="space-y-0.5">
@@ -1529,15 +1626,27 @@ export const Customers: React.FC = () => {
                                     <span
                                       className={`text-[9px] uppercase px-1.5 py-0.2 rounded font-extrabold ${
                                         tx.type === 'cash_in'
-                                          ? 'bg-emerald-100 text-emerald-800'
+                                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                          : tx.type === 'transfer_received'
+                                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                          : tx.type === 'transfer_sent'
+                                          ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
                                           : tx.type === 'refund'
-                                          ? 'bg-blue-100 text-blue-800'
+                                          ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
                                           : tx.type === 'adjustment'
-                                          ? 'bg-amber-100 text-amber-800'
+                                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
                                           : 'bg-gray-200 text-gray-800 dark:bg-zinc-800 dark:text-zinc-200'
                                       }`}
                                     >
-                                      {tx.type}
+                                      {tx.type === 'transfer_sent'
+                                        ? 'Sent'
+                                        : tx.type === 'transfer_received'
+                                        ? 'Received'
+                                        : tx.type === 'cash_in'
+                                        ? 'Top-up'
+                                        : tx.type === 'order_payment'
+                                        ? 'Order'
+                                        : tx.type}
                                     </span>
                                   </div>
                                   {tx.note && (

@@ -17,7 +17,8 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
-  Sparkles
+  Sparkles,
+  ArrowLeftRight
 } from 'lucide-react';
 import { useBadgeCounts } from '../../context/BadgeCountsContext';
 
@@ -46,6 +47,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { name: 'Live Map', path: '/map', icon: MapPin },
     { name: 'Live Orders', path: '/orders', icon: ShoppingBag },
     { name: 'Customers', path: '/customers', icon: Users },
+    { name: 'Wallet Transfers', path: '/wallet-transfers', icon: ArrowLeftRight },
     {
       name: 'Merchants',
       path: '/merchants',

@@ -162,7 +162,7 @@ export interface WalletTransaction {
   id?: string;
   customerId?: string;
   riderId?: string;
-  type: 'cash_in' | 'adjustment' | 'refund' | 'order_payment' | 'merge' | string;
+  type: 'cash_in' | 'adjustment' | 'refund' | 'order_payment' | 'merge' | 'transfer_sent' | 'transfer_received' | string;
   amount: number;
   note?: string;
   reason?: string;
@@ -172,6 +172,34 @@ export interface WalletTransaction {
   orderId?: string;
   orderNumber?: string;
   createdAt?: any;
+}
+
+export interface WalletTransfer {
+  id: string;
+  reference?: string;
+  fromUid: string;
+  fromName: string;
+  fromEmail?: string;
+  fromPhone?: string;
+  toUid: string;
+  toName: string;
+  toEmail?: string;
+  toPhone?: string;
+  amount: number;
+  note?: string;
+  method: 'send' | 'qr' | string;
+  status?: string;
+  createdAt?: any;
+}
+
+export interface WalletDirectoryEntry {
+  id: string; // "email_{email}" or "phone_63XXXXXXXXXX"
+  uid: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+  role?: string;
+  updatedAt?: any;
 }
 
 export interface Merchant {

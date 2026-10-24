@@ -7,7 +7,8 @@ import {
   getDocs,
   collection,
   writeBatch,
-  Timestamp
+  Timestamp,
+  deleteDoc
 } from '../firebase';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
@@ -25,7 +26,14 @@ import {
   Save,
   Loader2,
   Sparkles,
-  Server
+  Server,
+  Search,
+  Trash2,
+  User,
+  Wallet,
+  BookOpen,
+  Copy,
+  Check
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
@@ -46,6 +54,148 @@ export const Settings: React.FC = () => {
   const [initDbModalOpen, setInitDbModalOpen] = useState(false);
   const [initializingDb, setInitializingDb] = useState(false);
   const [initSummary, setInitSummary] = useState<string[]>([]);
+
+  // Wallet Directory Tool state
+  const [directorySearchInput, setDirectorySearchInput] = useState('');
+  const [searchingDirectory, setSearchingDirectory] = useState(false);
+  const [directoryEntry, setDirectoryEntry] = useState<{
+    id: string;
+    uid: string;
+    name?: string;
+    email?: string;
+    phone?: string;
+    role?: string;
+    status?: string;
+    updatedAt?: any;
+    userData?: any;
+  } | null>(null);
+  const [directorySearchedId, setDirectorySearchedId] = useState<string | null>(null);
+  const [directoryNotFound, setDirectoryNotFound] = useState(false);
+  const [deleteDirectoryModalOpen, setDeleteDirectoryModalOpen] = useState(false);
+  const [deletingDirectoryEntry, setDeletingDirectoryEntry] = useState(false);
+  const [copiedDocId, setCopiedDocId] = useState(false);
+
+  // Helper to derive document ID ("email_{email}" and "phone_63XXXXXXXXXX")
+  const deriveDirectoryDocId = (input: string): string => {
+    const raw = input.trim();
+    if (raw.startsWith('email_') || raw.startsWith('phone_')) {
+      return raw;
+    }
+    if (raw.includes('@')) {
+      return `email_${raw.toLowerCase()}`;
+    }
+    // Clean phone digits
+    const digits = raw.replace(/\D/g, '');
+    if (digits.startsWith('63') && digits.length === 12) {
+      return `phone_${digits}`;
+    }
+    if (digits.startsWith('09') && digits.length === 11) {
+      return `phone_63${digits.slice(1)}`;
+    }
+    if (digits.startsWith('9') && digits.length === 10) {
+      return `phone_63${digits}`;
+    }
+    return `phone_${digits || raw}`;
+  };
+
+  const handleSearchDirectory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!directorySearchInput.trim()) {
+      showError('Please enter an exact email or phone number to look up.');
+      return;
+    }
+
+    try {
+      setSearchingDirectory(true);
+      setDirectoryEntry(null);
+      setDirectoryNotFound(false);
+
+      const docId = deriveDirectoryDocId(directorySearchInput);
+      setDirectorySearchedId(docId);
+
+      let docRef = doc(db, 'walletDirectory', docId);
+      let snap = await getDoc(docRef);
+
+      // If phone wasn't found with 63, try raw digits if different
+      if (!snap.exists() && docId.startsWith('phone_')) {
+        const rawDigits = directorySearchInput.replace(/\D/g, '');
+        if (rawDigits && `phone_${rawDigits}` !== docId) {
+          const altRef = doc(db, 'walletDirectory', `phone_${rawDigits}`);
+          const altSnap = await getDoc(altRef);
+          if (altSnap.exists()) {
+            docRef = altRef;
+            snap = altSnap;
+            setDirectorySearchedId(`phone_${rawDigits}`);
+          }
+        }
+      }
+
+      if (snap.exists()) {
+        const dt = snap.data();
+        const ownerUid = dt.uid || dt.ownerUid || dt.userId || '';
+
+        let userData = null;
+        if (ownerUid) {
+          try {
+            const userSnap = await getDoc(doc(db, 'users', ownerUid));
+            if (userSnap.exists()) {
+              userData = userSnap.data();
+            }
+          } catch (e) {
+            console.error('Failed to load owner user profile:', e);
+          }
+        }
+
+        setDirectoryEntry({
+          id: snap.id,
+          uid: ownerUid,
+          name: dt.name || userData?.name,
+          email: dt.email || userData?.email,
+          phone: dt.phone || userData?.phone,
+          role: dt.role || userData?.role,
+          status: dt.status || userData?.status,
+          updatedAt: dt.updatedAt || dt.createdAt,
+          userData
+        });
+      } else {
+        setDirectoryNotFound(true);
+      }
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSearchingDirectory(false);
+    }
+  };
+
+  const handleDeleteDirectoryEntry = async (reason?: string) => {
+    if (!directoryEntry) return;
+    try {
+      setDeletingDirectoryEntry(true);
+      const targetDocId = directoryEntry.id;
+      await deleteDoc(doc(db, 'walletDirectory', targetDocId));
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'DELETE_WALLET_DIRECTORY_ENTRY',
+        entityType: 'walletDirectory',
+        entityId: targetDocId,
+        details: `Deleted wallet directory entry ${targetDocId} (Owner: ${directoryEntry.uid || 'N/A'}). Reason: ${reason || 'Manual deletion'}`,
+        oldValue: directoryEntry,
+        reason: reason
+      });
+
+      showSuccess(`Wallet directory entry "${targetDocId}" successfully deleted.`);
+      setDirectoryEntry(null);
+      setDirectorySearchedId(null);
+      setDeleteDirectoryModalOpen(false);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setDeletingDirectoryEntry(false);
+    }
+  };
 
   // Fetch settings/platform
   useEffect(() => {
@@ -375,6 +525,156 @@ export const Settings: React.FC = () => {
         </div>
       </div>
 
+      {/* Wallet Directory Tool Panel */}
+      <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-gray-100 dark:border-zinc-800">
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-amber-400 text-black">
+              <BookOpen className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                Wallet Directory Inspector
+              </h3>
+              <p className="text-xs text-gray-400">
+                Inspect document routing in <code className="font-mono text-amber-600 bg-amber-50 dark:bg-amber-950/40 px-1 rounded">walletDirectory</code> by exact email or phone number.
+              </p>
+            </div>
+          </div>
+          <span className="text-[11px] font-semibold text-gray-400">
+            Internal routing lookup
+          </span>
+        </div>
+
+        {/* Search Form */}
+        <form onSubmit={handleSearchDirectory} className="space-y-3">
+          <label className="block text-xs font-semibold text-gray-700 dark:text-zinc-300">
+            Search Identifier (Email or Phone Number)
+          </label>
+          <div className="flex flex-col sm:flex-row gap-3">
+            <div className="flex-1 relative">
+              <Search className="w-4 h-4 absolute left-3.5 top-3 text-gray-400" />
+              <input
+                type="text"
+                value={directorySearchInput}
+                onChange={(e) => setDirectorySearchInput(e.target.value)}
+                placeholder="e.g. user@example.com or 09171234567 or email_... / phone_639..."
+                className="w-full pl-9 pr-4 py-2.5 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400 font-medium"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={searchingDirectory}
+              className="delivio-btn-yellow px-5 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-xs shrink-0"
+            >
+              {searchingDirectory ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+              <span>Inspect Directory</span>
+            </button>
+          </div>
+          <p className="text-[11px] text-gray-400">
+            Maps to documents formatted as <span className="font-mono text-gray-600 dark:text-zinc-400">email_{'{email}'}</span> or <span className="font-mono text-gray-600 dark:text-zinc-400">phone_63XXXXXXXXXX</span>.
+          </p>
+        </form>
+
+        {/* Not Found Advisory */}
+        {directoryNotFound && (
+          <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 text-xs text-gray-600 dark:text-zinc-400 flex items-start gap-3">
+            <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-bold text-gray-900 dark:text-white block mb-0.5">
+                No Entry Found
+              </span>
+              <span>
+                No document matches ID <code className="font-mono text-amber-600 font-bold">{directorySearchedId}</code> in <code className="font-mono">walletDirectory</code>. This identifier is unallocated.
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Found Directory Entry Display */}
+        {directoryEntry && (
+          <div className="p-5 rounded-2xl bg-amber-50/40 dark:bg-zinc-850 border border-amber-200 dark:border-zinc-700 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-amber-100 dark:border-zinc-750">
+              <div>
+                <span className="text-[10px] uppercase font-extrabold text-amber-700 dark:text-amber-400 tracking-wider">
+                  Document ID in walletDirectory
+                </span>
+                <div className="font-mono font-bold text-sm text-gray-900 dark:text-white flex items-center gap-2 mt-0.5">
+                  <span>{directoryEntry.id}</span>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(directoryEntry.id);
+                      setCopiedDocId(true);
+                      setTimeout(() => setCopiedDocId(false), 2000);
+                    }}
+                    className="p-1 text-gray-400 hover:text-gray-600"
+                    title="Copy Document ID"
+                  >
+                    {copiedDocId ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setDeleteDirectoryModalOpen(true)}
+                className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-xs transition-colors self-start sm:self-auto"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete Entry</span>
+              </button>
+            </div>
+
+            {/* Owner Details */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+              <div className="p-3 rounded-xl bg-white dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800">
+                <span className="text-[10px] text-gray-400 uppercase font-bold block mb-1">
+                  Owner UID
+                </span>
+                <span className="font-mono font-bold text-gray-900 dark:text-white truncate block">
+                  {directoryEntry.uid || '—'}
+                </span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-white dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800">
+                <span className="text-[10px] text-gray-400 uppercase font-bold block mb-1">
+                  Owner Name
+                </span>
+                <span className="font-bold text-gray-900 dark:text-white truncate block">
+                  {directoryEntry.name || 'Unknown'}
+                </span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-white dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800">
+                <span className="text-[10px] text-gray-400 uppercase font-bold block mb-1">
+                  Registered Email
+                </span>
+                <span className="font-semibold text-gray-900 dark:text-white truncate block">
+                  {directoryEntry.email || '—'}
+                </span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-white dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800">
+                <span className="text-[10px] text-gray-400 uppercase font-bold block mb-1">
+                  Registered Phone
+                </span>
+                <span className="font-semibold text-gray-900 dark:text-white truncate block">
+                  {directoryEntry.phone || '—'}
+                </span>
+              </div>
+            </div>
+
+            {directoryEntry.userData && (
+              <div className="p-3 rounded-xl bg-white dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800 text-[11px] flex items-center justify-between text-gray-500">
+                <span>Account Role: <strong className="text-gray-900 dark:text-white capitalize">{directoryEntry.userData.role || 'customer'}</strong></span>
+                <span>Account Status: <strong className="text-gray-900 dark:text-white capitalize">{directoryEntry.userData.status || 'active'}</strong></span>
+                <span>Wallet Balance: <strong className="text-amber-600 font-mono">₱{Number(directoryEntry.userData.walletBalance || 0).toFixed(2)}</strong></span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* Confirmation Modal for Database Init */}
       {initDbModalOpen && (
         <ConfirmationModal
@@ -386,6 +686,20 @@ export const Settings: React.FC = () => {
           confirmLabel="Run Initializer"
           reasonRequired={false}
           isDestructive={false}
+        />
+      )}
+
+      {/* Confirmation Modal for Deleting Wallet Directory Entry */}
+      {deleteDirectoryModalOpen && directoryEntry && (
+        <ConfirmationModal
+          isOpen={deleteDirectoryModalOpen}
+          onClose={() => setDeleteDirectoryModalOpen(false)}
+          onConfirm={handleDeleteDirectoryEntry}
+          title={`Delete Wallet Directory Entry "${directoryEntry.id}"?`}
+          message={`Are you sure you want to delete this document from walletDirectory? This will unlink the identifier (${directoryEntry.email || directoryEntry.phone || directoryEntry.id}) from owner UID ${directoryEntry.uid}. This operation cannot be undone.`}
+          confirmLabel="Delete Directory Entry"
+          reasonRequired={true}
+          isDestructive={true}
         />
       )}
     </div>

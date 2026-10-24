@@ -13,6 +13,7 @@ import { Dashboard } from './pages/Dashboard';
 import { LiveMap } from './pages/LiveMap';
 import { LiveOrders } from './pages/LiveOrders';
 import { Customers } from './pages/Customers';
+import { WalletTransfers } from './pages/WalletTransfers';
 import { Merchants } from './pages/Merchants';
 import { Riders } from './pages/Riders';
 import { Applications } from './pages/Applications';
@@ -43,6 +44,7 @@ export default function App() {
                     <Route path="map" element={<LiveMap />} />
                     <Route path="orders" element={<LiveOrders />} />
                     <Route path="customers" element={<Customers />} />
+                    <Route path="wallet-transfers" element={<WalletTransfers />} />
                     <Route path="merchants" element={<Merchants />} />
                     <Route path="riders" element={<Riders />} />
                     <Route path="applications" element={<Applications />} />
