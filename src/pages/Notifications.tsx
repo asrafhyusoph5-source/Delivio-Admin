@@ -23,6 +23,7 @@ import {
   CheckCheck,
   ExternalLink,
   Bike,
+  Car,
   ShoppingBag,
   Filter
 } from 'lucide-react';
@@ -126,7 +127,7 @@ export const Notifications: React.FC = () => {
             Notifications Center
           </h1>
           <p className="text-sm text-gray-500 dark:text-zinc-400 mt-0.5">
-            Emergency SOS triggers, rider incidents, and automated milestone alerts.
+            Emergency SOS triggers, driver incidents, and automated milestone alerts.
           </p>
         </div>
 
@@ -211,7 +212,7 @@ export const Notifications: React.FC = () => {
                         onClick={() => navigate(`/riders?search=${item.riderId}`)}
                         className="text-amber-600 dark:text-amber-400 font-bold hover:underline flex items-center gap-1"
                       >
-                        <Bike className="w-3 h-3" /> View Rider
+                        <Car className="w-3 h-3" /> View Driver
                       </button>
                     )}
                   </div>

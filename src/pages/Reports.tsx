@@ -13,6 +13,11 @@ import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp } from '../utils/date';
 import type { Order } from '../types';
 import {
+  VEHICLE_TYPES,
+  VEHICLE_LABELS,
+  type VehicleType
+} from '../constants';
+import {
   BarChart3,
   Calendar,
   Download,
@@ -22,10 +27,11 @@ import {
   AlertTriangle,
   Award,
   Store,
-  Bike,
+  Car,
   Wallet,
   CreditCard,
-  Banknote
+  Banknote,
+  Layers
 } from 'lucide-react';
 import {
   BarChart,
@@ -62,12 +68,14 @@ export const Reports: React.FC = () => {
             id: d.id,
             orderNumber: dt.orderNumber || d.id.substring(0, 8),
             serviceType: dt.serviceType,
+            vehicleType: dt.vehicleType,
             customerId: dt.customerId,
             customerName: dt.customerName,
             merchantId: dt.merchantId,
             merchantName: dt.merchantName,
             riderId: dt.riderId,
             riderName: dt.riderName,
+            riderVehicle: dt.riderVehicle,
             riderEarning: dt.riderEarning,
             status: dt.status,
             statusHistory: dt.statusHistory || [],
@@ -131,7 +139,7 @@ export const Reports: React.FC = () => {
 
     const cancellationReasonsMap: Record<string, number> = {};
     const merchantMap: Record<string, { name: string; orders: number; revenue: number }> = {};
-    const riderMap: Record<string, { name: string; completed: number; earnings: number }> = {};
+    const driverMap: Record<string, { name: string; completed: number; earnings: number }> = {};
     const paymentMap: Record<string, { name: string; revenue: number; count: number; color: string }> = {
       cod: { name: 'Cash on Delivery (COD)', revenue: 0, count: 0, color: '#10B981' },
       wallet: { name: 'Delivio Wallet', revenue: 0, count: 0, color: '#FFC107' },
@@ -139,9 +147,38 @@ export const Reports: React.FC = () => {
       other: { name: 'Other Methods', revenue: 0, count: 0, color: '#8B5CF6' }
     };
 
+    // Orders and revenue by service type
+    const serviceMap: Record<string, { name: string; orders: number; revenue: number; color: string }> = {
+      food: { name: 'Food Delivery', orders: 0, revenue: 0, color: '#FFC107' },
+      convenience: { name: 'Convenience', orders: 0, revenue: 0, color: '#3B82F6' },
+      parcel: { name: 'Parcel Express', orders: 0, revenue: 0, color: '#10B981' },
+      pabili: { name: 'Pabili Service', orders: 0, revenue: 0, color: '#EC4899' },
+      request_rider: { name: 'Request Driver', orders: 0, revenue: 0, color: '#8B5CF6' },
+      taxi: { name: 'Taxi Service', orders: 0, revenue: 0, color: '#0EA5E9' }
+    };
+
+    // Taxi orders & revenue by vehicle type
+    const taxiVehicleMap: Record<VehicleType, { name: string; orders: number; revenue: number; color: string }> = {
+      motorcycle: { name: 'Motorcycle', orders: 0, revenue: 0, color: '#10B981' },
+      tricycle: { name: 'Tricycle', orders: 0, revenue: 0, color: '#F59E0B' },
+      car4: { name: '4-Seater Car', orders: 0, revenue: 0, color: '#3B82F6' },
+      car8: { name: '8-Seater Car', orders: 0, revenue: 0, color: '#8B5CF6' }
+    };
+
     filteredOrders.forEach((o) => {
       const pm = (o.paymentMethod || o.payment?.method || 'cod').toLowerCase();
       const pKey = pm === 'cod' ? 'cod' : pm === 'wallet' ? 'wallet' : pm === 'online' ? 'online' : 'other';
+      const svc = o.serviceType || 'food';
+
+      if (serviceMap[svc]) {
+        serviceMap[svc].orders++;
+      }
+
+      if (svc === 'taxi') {
+        const vtype = (o.vehicleType || o.riderVehicle?.vehicleType || 'motorcycle') as VehicleType;
+        const validV: VehicleType = ['motorcycle', 'tricycle', 'car4', 'car8'].includes(vtype) ? vtype : 'motorcycle';
+        taxiVehicleMap[validV].orders++;
+      }
 
       if (o.status === 'Delivered' || o.status === 'Completed') {
         const tip = Number(o.fees?.tip || 0);
@@ -153,9 +190,19 @@ export const Reports: React.FC = () => {
         totalPlatformCommission += sFee + sub * 0.15;
         deliveredCount++;
 
-        // Track payment method revenue (excluding tip)
+        // Track payment method revenue
         paymentMap[pKey].revenue += tot;
         paymentMap[pKey].count += 1;
+
+        if (serviceMap[svc]) {
+          serviceMap[svc].revenue += tot;
+        }
+
+        if (svc === 'taxi') {
+          const vtype = (o.vehicleType || o.riderVehicle?.vehicleType || 'motorcycle') as VehicleType;
+          const validV: VehicleType = ['motorcycle', 'tricycle', 'car4', 'car8'].includes(vtype) ? vtype : 'motorcycle';
+          taxiVehicleMap[validV].revenue += tot;
+        }
 
         // Merchant ranking
         if (o.merchantId || o.merchantName) {
@@ -167,14 +214,14 @@ export const Reports: React.FC = () => {
           merchantMap[mKey].revenue += tot;
         }
 
-        // Rider ranking
+        // Driver ranking
         if (o.riderId || o.riderName) {
           const rKey = o.riderId || o.riderName || 'Unknown';
-          if (!riderMap[rKey]) {
-            riderMap[rKey] = { name: o.riderName || rKey, completed: 0, earnings: 0 };
+          if (!driverMap[rKey]) {
+            driverMap[rKey] = { name: o.riderName || rKey, completed: 0, earnings: 0 };
           }
-          riderMap[rKey].completed++;
-          riderMap[rKey].earnings += Number(o.riderEarning?.net || 0);
+          driverMap[rKey].completed++;
+          driverMap[rKey].earnings += Number(o.riderEarning?.net || 0);
         }
       } else if (o.status === 'Cancelled' || o.status === 'Rejected') {
         cancelledCount++;
@@ -187,7 +234,7 @@ export const Reports: React.FC = () => {
       .sort((a, b) => b.revenue - a.revenue)
       .slice(0, 5);
 
-    const riderRankings = Object.values(riderMap)
+    const driverRankings = Object.values(driverMap)
       .sort((a, b) => b.completed - a.completed)
       .slice(0, 5);
 
@@ -230,6 +277,9 @@ export const Reports: React.FC = () => {
       });
     }
 
+    const serviceChartData = Object.values(serviceMap);
+    const taxiVehicleChartData = Object.values(taxiVehicleMap);
+
     return {
       totalOrders: filteredOrders.length,
       deliveredCount,
@@ -237,22 +287,25 @@ export const Reports: React.FC = () => {
       totalDeliveredRevenue,
       totalPlatformCommission,
       merchantRankings,
-      riderRankings,
+      driverRankings,
       cancellationChartData,
       paymentMap,
-      paymentChartData
+      paymentChartData,
+      serviceChartData,
+      taxiVehicleChartData
     };
   }, [filteredOrders]);
 
   const handleExportCsv = () => {
     const rows = filteredOrders.map((o) => ({
       OrderNumber: o.orderNumber,
-      Fulfillment: o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
+      Fulfillment: o.serviceType === 'taxi' ? 'Taxi Ride' : o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
       Service: o.serviceType,
+      VehicleType: o.vehicleType || o.riderVehicle?.vehicleType || '',
       Status: o.status,
       Customer: o.customerName,
       Merchant: o.merchantName || '',
-      Rider: o.isPickup ? 'No rider (Pick Up)' : o.riderName || '',
+      Driver: o.isPickup ? 'No driver (Pick Up)' : o.riderName || '',
       Tip: o.fees?.tip || 0,
       TotalDue: o.fees?.total || 0,
       TotalSalesExclTip: Math.max(0, (o.fees?.total || 0) - (o.fees?.tip || 0)),
@@ -264,8 +317,6 @@ export const Reports: React.FC = () => {
     exportToCsv(`delivio_report_${dateRange}_${new Date().toISOString().slice(0, 10)}`, rows);
   };
 
-  const COLORS = ['#FFC107', '#3B82F6', '#10B981', '#EC4899', '#8B5CF6'];
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -275,7 +326,7 @@ export const Reports: React.FC = () => {
             Financial & Performance Reports
           </h1>
           <p className="text-sm text-gray-500 dark:text-zinc-400 mt-0.5">
-            Aggregated revenue metrics, commission breakdown, cancellation insights, and rankings.
+            Aggregated revenue metrics, service breakdowns, taxi fleet analytics, and driver earnings.
           </p>
         </div>
 
@@ -311,7 +362,7 @@ export const Reports: React.FC = () => {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="p-5 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-xs">
           <span className="text-xs font-bold uppercase tracking-wider text-gray-400">
-            Delivered / Completed Orders
+            Delivered / Completed
           </span>
           <div className="text-2xl font-black text-gray-900 dark:text-white mt-2">
             {metrics.deliveredCount}{' '}
@@ -330,7 +381,7 @@ export const Reports: React.FC = () => {
 
         <div className="p-5 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-xs">
           <span className="text-xs font-bold uppercase tracking-wider text-gray-400">
-            Net Commission
+            Net Platform Commission
           </span>
           <div className="text-2xl font-black text-amber-600 mt-2">
             ₱{metrics.totalPlatformCommission.toLocaleString('en-US', { minimumFractionDigits: 2 })}
@@ -350,6 +401,85 @@ export const Reports: React.FC = () => {
         </div>
       </div>
 
+      {/* Service Type & Taxi Fleet Performance Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Orders & Revenue by Service Type */}
+        <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-4">
+          <div className="flex items-center justify-between pb-2 border-b border-gray-100 dark:border-zinc-800">
+            <div>
+              <h3 className="font-extrabold text-base text-gray-900 dark:text-white flex items-center gap-2">
+                <BarChart3 className="w-5 h-5 text-amber-500" />
+                Orders & Revenue by Service Type
+              </h3>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Breakdown of demand across Delivery and Taxi ride-hailing services.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {metrics.serviceChartData.map((s) => (
+              <div
+                key={s.name}
+                className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-850 flex items-center justify-between text-xs"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: s.color }} />
+                  <div>
+                    <span className="font-bold text-gray-900 dark:text-white block">{s.name}</span>
+                    <span className="text-[11px] text-gray-400">{s.orders} total order(s)</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="font-extrabold text-gray-900 dark:text-white block">
+                    ₱{s.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                  <span className="text-[10px] text-gray-400">Delivered sales</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Taxi Performance by Vehicle Type */}
+        <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-4">
+          <div className="flex items-center justify-between pb-2 border-b border-gray-100 dark:border-zinc-800">
+            <div>
+              <h3 className="font-extrabold text-base text-gray-900 dark:text-white flex items-center gap-2">
+                <Car className="w-5 h-5 text-blue-500" />
+                Taxi Service by Vehicle Type
+              </h3>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Passenger rides and revenue split by motorcycle, tricycle, and cars.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {metrics.taxiVehicleChartData.map((v) => (
+              <div
+                key={v.name}
+                className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-850 flex items-center justify-between text-xs"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: v.color }} />
+                  <div>
+                    <span className="font-bold text-gray-900 dark:text-white block">{v.name}</span>
+                    <span className="text-[11px] text-gray-400">{v.orders} taxi trip(s) booked</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="font-extrabold text-blue-600 dark:text-blue-400 block">
+                    ₱{v.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                  <span className="text-[10px] text-gray-400">Completed fares</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
       {/* Revenue by Payment Method Section */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-5">
         <div>
@@ -364,7 +494,6 @@ export const Reports: React.FC = () => {
 
         {/* 3 Metric Cards for Payment Methods */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          {/* COD */}
           <div className="p-4 rounded-2xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/50">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
@@ -385,7 +514,6 @@ export const Reports: React.FC = () => {
             </p>
           </div>
 
-          {/* Delivio Wallet */}
           <div className="p-4 rounded-2xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
@@ -406,7 +534,6 @@ export const Reports: React.FC = () => {
             </p>
           </div>
 
-          {/* Paid Online */}
           <div className="p-4 rounded-2xl bg-blue-50/60 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900/50">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold uppercase tracking-wider text-blue-800 dark:text-blue-300 flex items-center gap-1.5">
@@ -496,7 +623,7 @@ export const Reports: React.FC = () => {
         )}
       </div>
 
-      {/* Rankings: Top Merchants & Top Riders */}
+      {/* Rankings: Top Merchants & Top Drivers */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Merchant Rankings */}
         <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs">
@@ -534,20 +661,20 @@ export const Reports: React.FC = () => {
           </div>
         </div>
 
-        {/* Rider Rankings */}
+        {/* Driver Rankings */}
         <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs">
           <div className="flex items-center gap-2 mb-4">
-            <Bike className="w-5 h-5 text-emerald-500" />
+            <Car className="w-5 h-5 text-emerald-500" />
             <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
-              Top Performing Fleet Riders
+              Top Performing Fleet Drivers
             </h3>
           </div>
 
           <div className="space-y-3">
-            {metrics.riderRankings.length === 0 ? (
-              <div className="py-6 text-center text-xs text-gray-400">No rider completions recorded.</div>
+            {metrics.driverRankings.length === 0 ? (
+              <div className="py-6 text-center text-xs text-gray-400">No driver completions recorded.</div>
             ) : (
-              metrics.riderRankings.map((r, idx) => (
+              metrics.driverRankings.map((r, idx) => (
                 <div
                   key={idx}
                   className="flex items-center justify-between p-3 rounded-2xl bg-gray-50 dark:bg-zinc-850 text-xs"

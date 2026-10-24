@@ -55,6 +55,7 @@ import {
   Receipt,
   CheckCircle2,
   Bike,
+  Car,
   Link2,
   Send
 } from 'lucide-react';
@@ -1332,18 +1333,18 @@ export const Customers: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Linked Rider Card (query riders where linkedCustomerUid == uid) */}
+                  {/* Linked Driver Card (query riders where linkedCustomerUid == uid) */}
                   {linkedRider ? (
                     <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 space-y-3">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <span className="p-2 rounded-xl bg-amber-500 text-white font-bold">
-                            <Bike className="w-4 h-4" />
+                            <Car className="w-4 h-4" />
                           </span>
                           <div>
                             <div className="flex items-center gap-2">
                               <span className="text-xs uppercase font-extrabold text-amber-900 dark:text-amber-300">
-                                Linked Rider Account
+                                Linked Driver Account
                               </span>
                               <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 dark:bg-amber-800 text-amber-900 dark:text-amber-100">
                                 Shared Wallet Active
@@ -1366,11 +1367,11 @@ export const Customers: React.FC = () => {
                       </div>
                       <div className="grid grid-cols-2 gap-2 text-xs pt-1 border-t border-amber-200 dark:border-amber-900/40">
                         <div>
-                          <span className="text-gray-500 dark:text-zinc-400 text-[11px]">Rider Name:</span>
+                          <span className="text-gray-500 dark:text-zinc-400 text-[11px]">Driver Name:</span>
                           <p className="font-bold text-gray-900 dark:text-white">{linkedRider.name}</p>
                         </div>
                         <div>
-                          <span className="text-gray-500 dark:text-zinc-400 text-[11px]">Rider Code:</span>
+                          <span className="text-gray-500 dark:text-zinc-400 text-[11px]">Driver Code:</span>
                           <p className="font-bold font-mono text-gray-900 dark:text-white">{linkedRider.riderCode}</p>
                         </div>
                         <div>
@@ -1386,8 +1387,8 @@ export const Customers: React.FC = () => {
                   ) : (
                     <div className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 flex items-center justify-between text-xs text-gray-500">
                       <div className="flex items-center gap-2">
-                        <Bike className="w-4 h-4 text-gray-400" />
-                        <span>No rider account linked to this customer.</span>
+                        <Car className="w-4 h-4 text-gray-400" />
+                        <span>No driver account linked to this customer.</span>
                       </div>
                     </div>
                   )}
@@ -2140,7 +2141,7 @@ export const Customers: React.FC = () => {
         />
       )}
 
-      {/* Unlink Rider Confirmation Modal */}
+      {/* Unlink Driver Confirmation Modal */}
       {unlinkModalOpen && linkedRider && selectedCustomer && (
         <ConfirmationModal
           isOpen={unlinkModalOpen}
@@ -2148,9 +2149,9 @@ export const Customers: React.FC = () => {
           onConfirm={async (reason) => {
             await handleUnlinkRider(reason);
           }}
-          title={`Unlink Rider ${linkedRider.name}`}
-          message={`Are you sure you want to unlink rider ${linkedRider.name} from customer ${selectedCustomer.name}? The shared wallet balance will remain on the customer account (${selectedCustomer.email}). The rider's wallet balance will be separate.`}
-          confirmLabel="Unlink Rider Account"
+          title={`Unlink Driver ${linkedRider.name}`}
+          message={`Are you sure you want to unlink driver ${linkedRider.name} from customer ${selectedCustomer.name}? The shared wallet balance will remain on the customer account (${selectedCustomer.email}). The driver's wallet balance will be separate.`}
+          confirmLabel="Unlink Driver Account"
           reasonRequired={true}
           reasonPlaceholder="State mandatory reason for unlinking (e.g. driver switched phone, account split, admin audit)..."
           isDestructive={true}

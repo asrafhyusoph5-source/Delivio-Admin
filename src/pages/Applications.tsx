@@ -17,9 +17,15 @@ import { logAuditEvent } from '../utils/audit';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
 import type { MerchantApplication, RiderApplication } from '../types';
 import {
+  VEHICLE_TYPES,
+  VEHICLE_LABELS,
+  SERVICES_BY_VEHICLE,
+  type VehicleType
+} from '../constants';
+import {
   FileCheck,
   Store,
-  Bike,
+  Car,
   CheckCircle2,
   XCircle,
   HelpCircle,
@@ -32,7 +38,8 @@ import {
   X,
   Phone,
   Mail,
-  FileText
+  FileText,
+  Image as ImageIcon
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
@@ -101,23 +108,39 @@ export const Applications: React.FC = () => {
       mList.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
       setMerchantApps(mList);
 
-      // Rider Applications
+      // Driver Applications
       const rSnap = await getDocs(query(collection(db, 'riderApplications'), limit(150)));
       const rList: RiderApplication[] = [];
       rSnap.forEach((d) => {
         const dt = d.data();
+        const rawVType = (dt.vehicleType || 'motorcycle').toLowerCase();
+        const vtype: VehicleType = ['motorcycle', 'tricycle', 'car4', 'car8'].includes(rawVType)
+          ? (rawVType as VehicleType)
+          : rawVType.includes('tri')
+          ? 'tricycle'
+          : rawVType.includes('8')
+          ? 'car8'
+          : rawVType.includes('car') || rawVType.includes('4')
+          ? 'car4'
+          : 'motorcycle';
+
         rList.push({
           id: d.id,
           uid: dt.uid || d.id,
-          name: dt.name || 'Rider',
+          name: dt.name || 'Driver',
           email: dt.email || '',
           phone: dt.phone || '',
           cityId: dt.cityId || '',
-          vehicleType: dt.vehicleType || 'Motorcycle',
-          vehicleModel: dt.vehicleModel,
+          vehicleType: vtype,
+          vehicleModel: dt.vehicleModel || '',
+          vehicleColor: dt.vehicleColor || '',
+          seats: dt.seats || (vtype === 'motorcycle' ? 1 : vtype === 'tricycle' ? 3 : vtype === 'car8' ? 8 : 4),
           plate: dt.plate || '',
           selfieUrl: dt.selfieUrl,
-          documents: dt.documents || [],
+          documents: dt.documents || {
+            vehiclePhotoUrl: dt.vehiclePhotoUrl,
+            franchiseUrl: dt.franchiseUrl
+          },
           status: dt.status || 'Pending',
           reviewNote: dt.reviewNote,
           reviewedBy: dt.reviewedBy,
@@ -138,7 +161,7 @@ export const Applications: React.FC = () => {
     fetchApplications();
   }, []);
 
-  // Map preview for merchant location
+  // Map instance for merchant preview
   useEffect(() => {
     if (!selectedMerchantApp || !merchantMapRef.current) return;
 
@@ -160,11 +183,9 @@ export const Applications: React.FC = () => {
       attribution: '&copy; OpenStreetMap'
     }).addTo(map);
 
-    if (selectedMerchantApp.lat && selectedMerchantApp.lng) {
-      L.marker([lat, lng])
-        .bindTooltip(selectedMerchantApp.businessName, { permanent: true })
-        .addTo(map);
-    }
+    L.marker([lat, lng])
+      .bindTooltip(selectedMerchantApp.businessName, { permanent: true })
+      .addTo(map);
 
     mapInstanceRef.current = map;
 
@@ -190,10 +211,10 @@ export const Applications: React.FC = () => {
         {
           role: 'merchant',
           email: app.email,
-          name: app.ownerName || app.businessName,
+          name: app.ownerName,
           phone: app.phone,
           status: 'active',
-          walletBalance: 0,
+          merchantId: uid,
           createdAt: now
         },
         { merge: true }
@@ -249,13 +270,30 @@ export const Applications: React.FC = () => {
     }
   };
 
-  // Rider Approve (One Batch)
-  const handleApproveRider = async (app: RiderApplication) => {
+  // Driver Approve (One Batch)
+  // Creates riders/{uid} with allowedServices and activeServices from SERVICES_BY_VEHICLE
+  const handleApproveDriver = async (app: RiderApplication) => {
     try {
       const batch = writeBatch(db);
       const uid = app.uid || app.id;
       const now = Timestamp.now();
-      const riderCode = `DLV-R-${Math.floor(100000 + Math.random() * 900000)}`;
+      const riderCode = `DLV-D-${Math.floor(100000 + Math.random() * 900000)}`;
+
+      // Normalize vehicleType
+      const rawVType = (app.vehicleType || 'motorcycle').toLowerCase();
+      const vtype: VehicleType = ['motorcycle', 'tricycle', 'car4', 'car8'].includes(rawVType as any)
+        ? (rawVType as VehicleType)
+        : rawVType.includes('tri')
+        ? 'tricycle'
+        : rawVType.includes('8')
+        ? 'car8'
+        : rawVType.includes('car') || rawVType.includes('4')
+        ? 'car4'
+        : 'motorcycle';
+
+      const allowedServices = SERVICES_BY_VEHICLE[vtype] || SERVICES_BY_VEHICLE.motorcycle;
+      const activeServices = [...allowedServices];
+      const seats = app.seats || (vtype === 'motorcycle' ? 1 : vtype === 'tricycle' ? 3 : vtype === 'car8' ? 8 : 4);
 
       // 1. set users/{uid}
       const userRef = doc(db, 'users', uid);
@@ -283,11 +321,13 @@ export const Applications: React.FC = () => {
         riderCode,
         status: 'active',
         cityId: app.cityId,
-        vehicleType: app.vehicleType || 'Motorcycle',
+        vehicleType: vtype,
         plate: app.plate || '',
         vehicleModel: app.vehicleModel || '',
-        allowedServices: ['food', 'convenience', 'parcel', 'pabili', 'request_rider'],
-        activeServices: ['food', 'convenience', 'parcel', 'pabili', 'request_rider'],
+        vehicleColor: app.vehicleColor || '',
+        seats,
+        allowedServices,
+        activeServices,
         isOnline: false,
         coins: 0,
         walletBalance: 0,
@@ -309,13 +349,13 @@ export const Applications: React.FC = () => {
       await logAuditEvent({
         adminId: adminProfile?.uid || 'admin',
         adminName: adminProfile?.name || 'Administrator',
-        action: 'APPROVE_RIDER_APPLICATION',
+        action: 'APPROVE_DRIVER_APPLICATION',
         entityType: 'riderApplication',
         entityId: app.id,
-        details: `Approved rider application for ${app.name} (Code: ${riderCode})`
+        details: `Approved driver application for ${app.name} (${VEHICLE_LABELS[vtype]}, Code: ${riderCode})`
       });
 
-      showSuccess(`Rider ${app.name} approved with ID ${riderCode}!`);
+      showSuccess(`Driver ${app.name} approved with ID ${riderCode}!`);
       setSelectedRiderApp(null);
       fetchApplications();
     } catch (err: any) {
@@ -395,82 +435,81 @@ export const Applications: React.FC = () => {
             Partner Applications
           </h1>
           <p className="text-sm text-gray-500 dark:text-zinc-400 mt-0.5">
-            Review applicant identities, business permits, government IDs, and approve into real
-            accounts.
+            Review applicant identities, vehicle photos, franchise permits, and approve into real accounts.
           </p>
         </div>
 
-        {/* Tab switch */}
-        <div className="flex items-center p-1 rounded-xl bg-gray-200 dark:bg-zinc-800">
+        {/* Tab Switcher: Merchants vs Drivers */}
+        <div className="flex items-center p-1 rounded-2xl bg-gray-200 dark:bg-zinc-800 self-start sm:self-auto">
           <button
             onClick={() => {
               setActiveTab('merchants');
               setStatusFilter('Pending');
             }}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition-all ${
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
               activeTab === 'merchants'
-                ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-white shadow-xs'
+                ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-white shadow-xs font-extrabold'
                 : 'text-gray-500 hover:text-gray-900 dark:hover:text-white'
             }`}
           >
-            <Store className="w-4 h-4 text-amber-500" />
-            <span>Merchants</span>
+            <Store className="w-4 h-4" />
+            <span>Merchants ({merchantApps.length})</span>
           </button>
+
           <button
             onClick={() => {
               setActiveTab('riders');
               setStatusFilter('Pending');
             }}
-            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition-all ${
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
               activeTab === 'riders'
-                ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-white shadow-xs'
+                ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-white shadow-xs font-extrabold'
                 : 'text-gray-500 hover:text-gray-900 dark:hover:text-white'
             }`}
           >
-            <Bike className="w-4 h-4 text-blue-500" />
-            <span>Riders</span>
+            <Car className="w-4 h-4" />
+            <span>Driver Applications ({riderApps.length})</span>
           </button>
         </div>
       </div>
 
-      {/* Status Filter Tabs */}
-      <div className="flex gap-2 overflow-x-auto pb-1">
-        {['Pending', 'Under Review', 'Needs Info', 'Approved', 'Rejected', 'all'].map((st) => (
+      {/* Status Filter Chips */}
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          onClick={() => setStatusFilter('all')}
+          className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all ${
+            statusFilter === 'all'
+              ? 'bg-amber-400 text-black shadow-xs font-black'
+              : 'bg-white dark:bg-zinc-900 text-gray-600 dark:text-zinc-400 hover:bg-gray-100 border border-gray-200 dark:border-zinc-800'
+          }`}
+        >
+          All ({counts.all})
+        </button>
+
+        {APP_STATUSES.map((st) => (
           <button
             key={st}
             onClick={() => setStatusFilter(st)}
-            className={`px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all flex items-center gap-2 ${
+            className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
               statusFilter === st
                 ? 'bg-amber-400 text-black shadow-xs font-black'
-                : 'bg-white dark:bg-zinc-900 text-gray-600 dark:text-zinc-400 border border-gray-200 dark:border-zinc-800 hover:bg-gray-50'
+                : 'bg-white dark:bg-zinc-900 text-gray-600 dark:text-zinc-400 hover:bg-gray-100 border border-gray-200 dark:border-zinc-800'
             }`}
           >
-            <span className="capitalize">{st === 'all' ? 'All Applications' : st}</span>
-            <span
-              className={`px-1.5 py-0.2 rounded-full text-[10px] ${
-                statusFilter === st
-                  ? 'bg-black/15 text-black'
-                  : 'bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400'
-              }`}
-            >
+            <span>{st}</span>
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-gray-200 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
               {counts[st] || 0}
             </span>
           </button>
         ))}
       </div>
 
-      {/* Applications List */}
+      {/* Main Grid List */}
       {loading ? (
-        <TableSkeleton rows={6} cols={5} />
+        <TableSkeleton rows={6} />
       ) : filteredList.length === 0 ? (
-        <div className="p-12 text-center bg-white dark:bg-zinc-900 border border-dashed border-gray-200 dark:border-zinc-800 rounded-2xl">
-          <FileCheck className="w-10 h-10 text-gray-300 mx-auto mb-2" />
-          <h4 className="font-bold text-gray-900 dark:text-white text-sm">
-            No {statusFilter === 'all' ? '' : statusFilter} Applications
-          </h4>
-          <p className="text-xs text-gray-400 mt-1">
-            New submissions from the customer or partner onboarding apps will appear here.
-          </p>
+        <div className="p-12 text-center rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 text-gray-400 text-xs">
+          No applications found under &ldquo;{statusFilter}&rdquo;.
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -479,64 +518,15 @@ export const Applications: React.FC = () => {
                 <div
                   key={app.id}
                   onClick={() => setSelectedMerchantApp(app)}
-                  className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-5 shadow-xs hover:border-amber-400 dark:hover:border-amber-500 cursor-pointer transition-all flex flex-col justify-between"
+                  className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 hover:border-amber-400 dark:hover:border-amber-500 rounded-2xl p-5 shadow-xs cursor-pointer transition-all flex flex-col justify-between"
                 >
                   <div>
                     <div className="flex items-center justify-between mb-3">
-                      <span className="capitalize px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300">
+                      <span className="text-[10px] uppercase font-bold text-gray-400">
                         {app.businessType}
                       </span>
                       <span
-                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                          app.status === 'Approved'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : app.status === 'Rejected'
-                            ? 'bg-red-100 text-red-800'
-                            : 'bg-amber-100 text-amber-800'
-                        }`}
-                      >
-                        {app.status}
-                      </span>
-                    </div>
-
-                    <h4 className="font-bold text-base text-gray-900 dark:text-white mb-1">
-                      {app.businessName}
-                    </h4>
-                    <p className="text-xs text-gray-500 mb-2">Owner: {app.ownerName}</p>
-
-                    <div className="text-xs text-gray-400 space-y-1 mb-4">
-                      <div className="flex items-center gap-1.5">
-                        <Phone className="w-3.5 h-3.5" />
-                        <span>{app.phone}</span>
-                      </div>
-                      <div className="flex items-center gap-1.5 truncate">
-                        <MapPin className="w-3.5 h-3.5 shrink-0" />
-                        <span className="truncate">{app.address || 'Location on map'}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between pt-3 border-t border-gray-100 dark:border-zinc-800 text-xs">
-                    <span className="text-gray-400">{formatRelativeTime(app.createdAt)}</span>
-                    <span className="font-bold text-amber-600 flex items-center gap-1">
-                      Review Docs &rarr;
-                    </span>
-                  </div>
-                </div>
-              ))
-            : (filteredList as RiderApplication[]).map((app) => (
-                <div
-                  key={app.id}
-                  onClick={() => setSelectedRiderApp(app)}
-                  className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-5 shadow-xs hover:border-amber-400 dark:hover:border-amber-500 cursor-pointer transition-all flex flex-col justify-between"
-                >
-                  <div>
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-blue-100 dark:bg-blue-950 text-blue-800 dark:text-blue-300">
-                        {app.vehicleType}
-                      </span>
-                      <span
-                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
                           app.status === 'Approved'
                             ? 'bg-emerald-100 text-emerald-800'
                             : app.status === 'Rejected'
@@ -549,24 +539,22 @@ export const Applications: React.FC = () => {
                     </div>
 
                     <div className="flex items-center gap-3 mb-3">
-                      <div className="w-12 h-12 rounded-xl bg-amber-400 text-black font-extrabold flex items-center justify-center shrink-0 overflow-hidden">
-                        {app.selfieUrl ? (
+                      <div className="w-12 h-12 rounded-xl bg-amber-100 text-amber-800 font-extrabold flex items-center justify-center shrink-0 overflow-hidden">
+                        {app.logoUrl ? (
                           <img
-                            src={app.selfieUrl}
-                            alt={app.name}
+                            src={app.logoUrl}
+                            alt={app.businessName}
                             className="w-full h-full object-cover"
                           />
                         ) : (
-                          <span>{app.name.charAt(0)}</span>
+                          <Store className="w-6 h-6 text-amber-600" />
                         )}
                       </div>
                       <div>
                         <h4 className="font-bold text-base text-gray-900 dark:text-white">
-                          {app.name}
+                          {app.businessName}
                         </h4>
-                        <p className="text-xs text-gray-500 font-mono">
-                          Plate: {app.plate || 'Pending Plate'}
-                        </p>
+                        <p className="text-xs text-gray-500">Owner: {app.ownerName}</p>
                       </div>
                     </div>
 
@@ -589,7 +577,83 @@ export const Applications: React.FC = () => {
                     </span>
                   </div>
                 </div>
-              ))}
+              ))
+            : (filteredList as RiderApplication[]).map((app) => {
+                const vtype = (app.vehicleType as VehicleType) || 'motorcycle';
+                const vLabel = VEHICLE_LABELS[vtype] || 'Motorcycle';
+
+                return (
+                  <div
+                    key={app.id}
+                    onClick={() => setSelectedRiderApp(app)}
+                    className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 hover:border-amber-400 dark:hover:border-amber-500 rounded-2xl p-5 shadow-xs cursor-pointer transition-all flex flex-col justify-between"
+                  >
+                    <div>
+                      <div className="flex items-center justify-between mb-3">
+                        <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
+                          <Car className="w-3 h-3 text-amber-500" />
+                          {vLabel}
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            app.status === 'Approved'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : app.status === 'Rejected'
+                              ? 'bg-red-100 text-red-800'
+                              : 'bg-amber-100 text-amber-800'
+                          }`}
+                        >
+                          {app.status}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="w-12 h-12 rounded-xl bg-amber-400 text-black font-extrabold flex items-center justify-center shrink-0 overflow-hidden">
+                          {app.selfieUrl ? (
+                            <img
+                              src={app.selfieUrl}
+                              alt={app.name}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <span>{app.name.charAt(0)}</span>
+                          )}
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-base text-gray-900 dark:text-white">
+                            {app.name}
+                          </h4>
+                          <p className="text-xs text-gray-500 font-mono">
+                            Plate: {app.plate || 'Pending Plate'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="text-xs text-gray-600 dark:text-zinc-300 space-y-1 mb-4">
+                        <div className="flex justify-between text-[11px]">
+                          <span className="text-gray-400">Model:</span>
+                          <span className="font-medium">{app.vehicleModel || 'N/A'} {app.vehicleColor ? `(${app.vehicleColor})` : ''}</span>
+                        </div>
+                        <div className="flex justify-between text-[11px]">
+                          <span className="text-gray-400">Seats:</span>
+                          <span className="font-medium">{app.seats ?? (vtype === 'motorcycle' ? 1 : vtype === 'tricycle' ? 3 : vtype === 'car8' ? 8 : 4)} passengers</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-gray-400 pt-1">
+                          <Phone className="w-3 h-3" />
+                          <span>{app.phone}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-3 border-t border-gray-100 dark:border-zinc-800 text-xs">
+                      <span className="text-gray-400">{formatRelativeTime(app.createdAt)}</span>
+                      <span className="font-bold text-amber-600 flex items-center gap-1">
+                        Review Driver &rarr;
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
         </div>
       )}
 
@@ -620,7 +684,6 @@ export const Applications: React.FC = () => {
 
             {/* Body */}
             <div className="flex-1 overflow-y-auto p-5 space-y-6">
-              {/* Status Header */}
               <div className="flex items-center justify-between p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-900 text-xs">
                 <div>
                   <span className="text-gray-400 uppercase font-bold text-[10px]">
@@ -723,7 +786,7 @@ export const Applications: React.FC = () => {
                     </div>
                   )}
 
-                  {(selectedMerchantApp.documents || []).map((docItem, idx) => (
+                  {(Array.isArray(selectedMerchantApp.documents) ? selectedMerchantApp.documents : []).map((docItem, idx) => (
                     <div
                       key={idx}
                       onClick={() => setPreviewImageUrl(docItem.url)}
@@ -775,7 +838,7 @@ export const Applications: React.FC = () => {
         </div>
       )}
 
-      {/* Review Modal: Rider Application */}
+      {/* Review Modal: Driver Application */}
       {selectedRiderApp && (
         <div className="fixed inset-0 z-50 overflow-hidden flex justify-end bg-black/60 backdrop-blur-xs">
           <div
@@ -786,7 +849,7 @@ export const Applications: React.FC = () => {
             <div className="p-5 border-b border-gray-200 dark:border-zinc-800 flex items-center justify-between">
               <div>
                 <h3 className="font-extrabold text-xl text-gray-900 dark:text-white">
-                  {selectedRiderApp.name}
+                  Driver Application: {selectedRiderApp.name}
                 </h3>
                 <p className="text-xs text-gray-400">
                   Applied on {formatTimestamp(selectedRiderApp.createdAt)}
@@ -818,19 +881,30 @@ export const Applications: React.FC = () => {
                 )}
               </div>
 
-              {/* Applicant Info */}
-              <div className="p-4 rounded-xl border border-gray-200 dark:border-zinc-800 space-y-2 text-xs">
+              {/* Applicant & Vehicle Info */}
+              <div className="p-4 rounded-xl border border-gray-200 dark:border-zinc-800 space-y-2.5 text-xs">
                 <div className="flex justify-between">
                   <span className="text-gray-500">Applicant:</span>
                   <span className="font-bold text-gray-900 dark:text-white">
                     {selectedRiderApp.name}
                   </span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between items-center">
                   <span className="text-gray-500">Vehicle Type:</span>
+                  <span className="font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300">
+                    {VEHICLE_LABELS[selectedRiderApp.vehicleType as VehicleType] || 'Motorcycle'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Vehicle Model & Color:</span>
                   <span className="font-bold text-gray-900 dark:text-white">
-                    {selectedRiderApp.vehicleType}{' '}
-                    {selectedRiderApp.vehicleModel ? `(${selectedRiderApp.vehicleModel})` : ''}
+                    {selectedRiderApp.vehicleModel || 'N/A'} {selectedRiderApp.vehicleColor ? `(${selectedRiderApp.vehicleColor})` : ''}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Passenger Seats:</span>
+                  <span className="font-bold text-gray-900 dark:text-white">
+                    {selectedRiderApp.seats ?? (selectedRiderApp.vehicleType === 'motorcycle' ? 1 : selectedRiderApp.vehicleType === 'tricycle' ? 3 : selectedRiderApp.vehicleType === 'car8' ? 8 : 4)} seats
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -856,12 +930,13 @@ export const Applications: React.FC = () => {
                 </div>
               </div>
 
-              {/* Document Previews */}
+              {/* Document Previews: Selfie, Vehicle Photo, Franchise URL */}
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-2">
-                  Selfie & Driver Documents (Click to inspect)
+                  Identity & Vehicle Verification Documents
                 </label>
                 <div className="grid grid-cols-2 gap-3">
+                  {/* Selfie Photo */}
                   {selectedRiderApp.selfieUrl && (
                     <div
                       onClick={() => setPreviewImageUrl(selectedRiderApp.selfieUrl || '')}
@@ -870,34 +945,86 @@ export const Applications: React.FC = () => {
                       <div className="h-32 rounded-lg overflow-hidden mb-2 bg-gray-200">
                         <img
                           src={selectedRiderApp.selfieUrl}
-                          alt="Selfie"
+                          alt="Driver Photo"
                           className="w-full h-full object-cover"
                         />
                       </div>
                       <span className="font-bold text-gray-800 dark:text-zinc-200">
-                        Rider Photo / Selfie
+                        Driver Photo / Selfie
                       </span>
                     </div>
                   )}
 
-                  {(selectedRiderApp.documents || []).map((docItem, idx) => (
+                  {/* Vehicle Photo (documents.vehiclePhotoUrl) */}
+                  {(selectedRiderApp.documents?.vehiclePhotoUrl || (selectedRiderApp as any).vehiclePhotoUrl) && (
                     <div
-                      key={idx}
-                      onClick={() => setPreviewImageUrl(docItem.url)}
+                      onClick={() =>
+                        setPreviewImageUrl(
+                          selectedRiderApp.documents?.vehiclePhotoUrl || (selectedRiderApp as any).vehiclePhotoUrl
+                        )
+                      }
                       className="p-3 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-900 cursor-pointer hover:border-amber-400 transition-all text-xs text-center"
                     >
                       <div className="h-32 rounded-lg overflow-hidden mb-2 bg-gray-200">
                         <img
-                          src={docItem.url}
-                          alt={docItem.title}
+                          src={
+                            selectedRiderApp.documents?.vehiclePhotoUrl || (selectedRiderApp as any).vehiclePhotoUrl
+                          }
+                          alt="Vehicle Photo"
                           className="w-full h-full object-cover"
                         />
                       </div>
-                      <span className="font-bold text-gray-800 dark:text-zinc-200 truncate block">
-                        {docItem.title || `Document #${idx + 1}`}
+                      <span className="font-bold text-gray-800 dark:text-zinc-200">
+                        Vehicle Exterior Photo
                       </span>
                     </div>
-                  ))}
+                  )}
+
+                  {/* Franchise Permit (documents.franchiseUrl) */}
+                  {(selectedRiderApp.documents?.franchiseUrl || (selectedRiderApp as any).franchiseUrl) && (
+                    <div
+                      onClick={() =>
+                        setPreviewImageUrl(
+                          selectedRiderApp.documents?.franchiseUrl || (selectedRiderApp as any).franchiseUrl
+                        )
+                      }
+                      className="p-3 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-900 cursor-pointer hover:border-amber-400 transition-all text-xs text-center"
+                    >
+                      <div className="h-32 rounded-lg overflow-hidden mb-2 bg-gray-200">
+                        <img
+                          src={
+                            selectedRiderApp.documents?.franchiseUrl || (selectedRiderApp as any).franchiseUrl
+                          }
+                          alt="Franchise Permit"
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                      <span className="font-bold text-gray-800 dark:text-zinc-200">
+                        Franchise / LTFRB Permit
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Extra Documents array if any */}
+                  {Array.isArray(selectedRiderApp.documents) &&
+                    selectedRiderApp.documents.map((docItem, idx) => (
+                      <div
+                        key={idx}
+                        onClick={() => setPreviewImageUrl(docItem.url)}
+                        className="p-3 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-900 cursor-pointer hover:border-amber-400 transition-all text-xs text-center"
+                      >
+                        <div className="h-32 rounded-lg overflow-hidden mb-2 bg-gray-200">
+                          <img
+                            src={docItem.url}
+                            alt={docItem.title}
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                        <span className="font-bold text-gray-800 dark:text-zinc-200 truncate block">
+                          {docItem.title || `Document #${idx + 1}`}
+                        </span>
+                      </div>
+                    ))}
                 </div>
               </div>
             </div>
@@ -921,10 +1048,10 @@ export const Applications: React.FC = () => {
                 </div>
 
                 <button
-                  onClick={() => handleApproveRider(selectedRiderApp)}
+                  onClick={() => handleApproveDriver(selectedRiderApp)}
                   className="delivio-btn-yellow px-6 py-2.5 rounded-xl text-xs font-black shadow-md shadow-amber-400/20"
                 >
-                  Approve Application
+                  Approve Driver Application
                 </button>
               </div>
             )}

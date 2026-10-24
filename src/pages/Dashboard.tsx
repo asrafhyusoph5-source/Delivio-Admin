@@ -12,13 +12,14 @@ import {
 import { useCity } from '../context/CityContext';
 import { useBadgeCounts } from '../context/BadgeCountsContext';
 import type { Order, Merchant, UserProfile } from '../types';
+import { VEHICLE_TYPES, VEHICLE_LABELS, type VehicleType } from '../constants';
 import {
   ShoppingBag,
   DollarSign,
   Percent,
   Users,
   Store,
-  Bike,
+  Car,
   Clock,
   AlertTriangle,
   ArrowUpRight,
@@ -26,7 +27,8 @@ import {
   ShieldAlert,
   Award,
   FileCheck,
-  RefreshCw
+  RefreshCw,
+  Layers
 } from 'lucide-react';
 import {
   AreaChart,
@@ -73,12 +75,14 @@ export const Dashboard: React.FC = () => {
           id: docSnap.id,
           orderNumber: d.orderNumber || docSnap.id.substring(0, 8).toUpperCase(),
           serviceType: d.serviceType || 'food',
+          vehicleType: d.vehicleType,
           customerId: d.customerId || '',
           customerName: d.customerName || 'Customer',
           merchantId: d.merchantId,
           merchantName: d.merchantName,
           riderId: d.riderId,
           riderName: d.riderName,
+          riderVehicle: d.riderVehicle,
           status: d.status || 'Placed Order',
           statusHistory: d.statusHistory || [],
           items: d.items || [],
@@ -149,59 +153,48 @@ export const Dashboard: React.FC = () => {
     fetchDashboardData();
   }, []);
 
-  // 2. Real-time active orders & online riders (as requested: onSnapshot for live screens)
+  // 2. Real-time Listeners (Online drivers, Active orders, Safety Alerts)
   useEffect(() => {
-    // Listen to online riders
     const qRiders = query(collection(db, 'riders'), where('isOnline', '==', true));
     const unsubRiders = onSnapshot(qRiders, (snap) => {
-      let filtered = snap.docs.map((d) => d.data());
-      if (selectedCityId !== 'all') {
-        filtered = filtered.filter((r) => r.cityId === selectedCityId);
-      }
-      setOnlineRidersCount(filtered.length);
+      let count = 0;
+      snap.forEach((d) => {
+        const data = d.data();
+        if (selectedCityId === 'all' || data.cityId === selectedCityId) {
+          count++;
+        }
+      });
+      setOnlineRidersCount(count);
     });
 
-    // Listen to active orders
-    const qOrders = query(collection(db, 'orders'), limit(150));
+    const qOrders = query(collection(db, 'orders'));
     const unsubOrders = onSnapshot(qOrders, (snap) => {
       const active: Order[] = [];
       snap.forEach((d) => {
         const data = d.data();
         const st = data.status;
-        const isFinished = st === 'Delivered' || st === 'Completed' || st === 'Rejected' || st === 'Cancelled';
-        if (!isFinished) {
+        if (st !== 'Delivered' && st !== 'Completed' && st !== 'Rejected' && st !== 'Cancelled') {
           active.push({
             id: d.id,
-            orderNumber: data.orderNumber || d.id.substring(0, 8).toUpperCase(),
+            orderNumber: data.orderNumber || d.id.substring(0, 8),
             serviceType: data.serviceType || 'food',
-            customerId: data.customerId || '',
-            customerName: data.customerName || 'Customer',
-            merchantName: data.merchantName,
+            vehicleType: data.vehicleType,
             riderId: data.riderId,
             riderName: data.riderName,
-            status: data.status || 'Placed Order',
-            statusHistory: data.statusHistory || [],
-            fees: {
-              subtotal: data.fees?.subtotal || 0,
-              deliveryFee: data.fees?.deliveryFee || 0,
-              serviceFee: data.fees?.serviceFee || 0,
-              discount: data.fees?.discount || 0,
-              tip: data.fees?.tip || 0,
-              total: data.fees?.total || 0
-            },
+            status: data.status,
+            createdAt: data.createdAt,
+            cityId: data.cityId || '',
+            fees: data.fees,
             isPickup: Boolean(data.isPickup || data.fulfillmentType === 'pickup' || data.serviceType === 'pickup'),
             fulfillmentType: data.fulfillmentType,
-            scheduledFor: data.scheduledFor,
-            paymentMethod: data.paymentMethod || 'cod',
-            cityId: data.cityId || '',
-            createdAt: data.createdAt
-          });
+            customerName: data.customerName || 'Customer',
+            merchantName: data.merchantName
+          } as Order);
         }
       });
       setActiveOrders(active);
     });
 
-    // Listen to adminNotifications for SOS & Incidents
     const qNotifs = query(collection(db, 'adminNotifications'), limit(20));
     const unsubNotifs = onSnapshot(qNotifs, (snap) => {
       const inc: any[] = [];
@@ -261,7 +254,6 @@ export const Dashboard: React.FC = () => {
         const sFee = Number(o.fees?.serviceFee) || 0;
         const sub = Number(o.fees?.subtotal) || 0;
         deliveredRevenue += tot;
-        // Estimated commission: platform serviceFee + 15% merchant commission (excluding tip)
         platformCommission += sFee + sub * 0.15;
         deliveredCount++;
 
@@ -325,14 +317,15 @@ export const Dashboard: React.FC = () => {
     return Object.values(daysMap);
   }, [filteredOrders]);
 
-  // Orders by service type
+  // Orders by service type including taxi
   const serviceTypeData = useMemo(() => {
     const counts: Record<string, number> = {
       food: 0,
       convenience: 0,
       parcel: 0,
       pabili: 0,
-      request_rider: 0
+      request_rider: 0,
+      taxi: 0
     };
     filteredOrders.forEach((o) => {
       const t = o.serviceType || 'food';
@@ -344,8 +337,41 @@ export const Dashboard: React.FC = () => {
       { name: 'Convenience', value: counts.convenience, color: '#3B82F6' },
       { name: 'Parcel', value: counts.parcel, color: '#10B981' },
       { name: 'Pabili', value: counts.pabili, color: '#EC4899' },
-      { name: 'Request Rider', value: counts.request_rider, color: '#8B5CF6' }
+      { name: 'Request Driver', value: counts.request_rider, color: '#8B5CF6' },
+      { name: 'Taxi Service', value: counts.taxi, color: '#0EA5E9' }
     ];
+  }, [filteredOrders]);
+
+  // Taxi breakdown by vehicle type
+  const taxiVehicleData = useMemo(() => {
+    const vCounts: Record<VehicleType, { orders: number; revenue: number }> = {
+      motorcycle: { orders: 0, revenue: 0 },
+      tricycle: { orders: 0, revenue: 0 },
+      car4: { orders: 0, revenue: 0 },
+      car8: { orders: 0, revenue: 0 }
+    };
+
+    filteredOrders.forEach((o) => {
+      if (o.serviceType === 'taxi') {
+        const vtype = (o.vehicleType || o.riderVehicle?.vehicleType || 'motorcycle') as VehicleType;
+        const validVType: VehicleType = ['motorcycle', 'tricycle', 'car4', 'car8'].includes(vtype)
+          ? vtype
+          : 'motorcycle';
+
+        vCounts[validVType].orders++;
+        if (o.status === 'Delivered' || o.status === 'Completed') {
+          vCounts[validVType].revenue += Number(o.fees?.total || 0);
+        }
+      }
+    });
+
+    return VEHICLE_TYPES.map((v) => ({
+      id: v.id,
+      name: v.name,
+      orders: vCounts[v.id].orders,
+      revenue: vCounts[v.id].revenue,
+      badgeColor: v.badgeColor
+    }));
   }, [filteredOrders]);
 
   // Orders by city data
@@ -362,15 +388,15 @@ export const Dashboard: React.FC = () => {
       .slice(0, 6);
   }, [orders, cities]);
 
-  // Orders waiting for rider over 5 minutes (ignoring pick-up orders)
+  // Orders waiting for driver over 5 minutes
   const waitingOrdersOver5Min = useMemo(() => {
     const nowSec = Math.floor(Date.now() / 1000);
     return filteredActiveOrders.filter((o) => {
       const isPick = Boolean(o.isPickup || o.fulfillmentType === 'pickup' || (o.serviceType as any) === 'pickup');
       if (isPick) return false;
-      const noRider = !o.riderId;
+      const noDriver = !o.riderId;
       const isPending = o.status === 'Placed Order' || o.status === 'Preparing';
-      if (noRider && isPending && o.createdAt?.seconds) {
+      if (noDriver && isPending && o.createdAt?.seconds) {
         return nowSec - o.createdAt.seconds > 300; // > 5 minutes
       }
       return false;
@@ -386,7 +412,7 @@ export const Dashboard: React.FC = () => {
             Dashboard Overview
           </h1>
           <p className="text-sm text-gray-500 dark:text-zinc-400 mt-1">
-            Realtime operations monitoring and platform performance metrics.
+            Realtime operations monitoring, driver dispatch, and platform performance metrics.
           </p>
         </div>
 
@@ -429,7 +455,7 @@ export const Dashboard: React.FC = () => {
             <div className="bg-white dark:bg-zinc-900 border border-gray-200/80 dark:border-zinc-800 rounded-2xl p-5 shadow-xs">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400">
-                  Gross Delivered
+                  Gross Completed Sales
                 </span>
                 <div className="p-2 rounded-xl bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400">
                   <DollarSign className="w-5 h-5" />
@@ -439,7 +465,7 @@ export const Dashboard: React.FC = () => {
                 ₱{kpis.deliveredRevenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </div>
               <div className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
-                Total delivered sales
+                Total completed sales
               </div>
             </div>
 
@@ -449,52 +475,34 @@ export const Dashboard: React.FC = () => {
                 <span className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400">
                   Platform Comm.
                 </span>
-                <div className="p-2 rounded-xl bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-300">
+                <div className="p-2 rounded-xl bg-purple-100 text-purple-800 dark:bg-purple-950/60 dark:text-purple-400">
                   <Percent className="w-5 h-5" />
                 </div>
               </div>
-              <div className="text-2xl font-black text-amber-600 dark:text-amber-400 mt-3">
+              <div className="text-2xl font-black text-gray-900 dark:text-white mt-3">
                 ₱{kpis.platformCommission.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </div>
               <div className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
-                Estimated platform fees
+                Net margin
               </div>
             </div>
 
-            {/* Online Riders */}
+            {/* Active Online Drivers */}
             <div className="bg-white dark:bg-zinc-900 border border-gray-200/80 dark:border-zinc-800 rounded-2xl p-5 shadow-xs">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400">
-                  Riders Online
+                  Online Drivers
                 </span>
                 <div className="p-2 rounded-xl bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-400">
-                  <Bike className="w-5 h-5" />
+                  <Car className="w-5 h-5" />
                 </div>
               </div>
               <div className="text-2xl font-black text-gray-900 dark:text-white mt-3">
                 {kpis.onlineRidersCount}
               </div>
-              <div className="flex items-center gap-1.5 text-xs text-blue-600 dark:text-blue-400 font-semibold mt-1">
-                <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                <span>Live fleet on road</span>
-              </div>
-            </div>
-
-            {/* Merchants Open */}
-            <div className="bg-white dark:bg-zinc-900 border border-gray-200/80 dark:border-zinc-800 rounded-2xl p-5 shadow-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400">
-                  Merchants Open
-                </span>
-                <div className="p-2 rounded-xl bg-purple-100 text-purple-800 dark:bg-purple-950/60 dark:text-purple-400">
-                  <Store className="w-5 h-5" />
-                </div>
-              </div>
-              <div className="text-2xl font-black text-gray-900 dark:text-white mt-3">
-                {kpis.openMerchantsCount} <span className="text-sm font-medium text-gray-400">/ {filteredMerchants.length}</span>
-              </div>
-              <div className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
-                Accepting customer orders
+              <div className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400 font-semibold mt-1">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span>Live fleet broadcast</span>
               </div>
             </div>
 
@@ -516,11 +524,29 @@ export const Dashboard: React.FC = () => {
               </div>
             </div>
 
+            {/* Open Merchants */}
+            <div className="bg-white dark:bg-zinc-900 border border-gray-200/80 dark:border-zinc-800 rounded-2xl p-5 shadow-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400">
+                  Open Stores
+                </span>
+                <div className="p-2 rounded-xl bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-400">
+                  <Store className="w-5 h-5" />
+                </div>
+              </div>
+              <div className="text-2xl font-black text-gray-900 dark:text-white mt-3">
+                {kpis.openMerchantsCount}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
+                Stores currently accepting orders
+              </div>
+            </div>
+
             {/* Average Delivery Time */}
             <div className="bg-white dark:bg-zinc-900 border border-gray-200/80 dark:border-zinc-800 rounded-2xl p-5 shadow-xs">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400">
-                  Avg Delivery Time
+                  Avg Trip / Delivery
                 </span>
                 <div className="p-2 rounded-xl bg-teal-100 text-teal-800 dark:bg-teal-950/60 dark:text-teal-400">
                   <Clock className="w-5 h-5" />
@@ -530,7 +556,7 @@ export const Dashboard: React.FC = () => {
                 {kpis.avgDeliveryTime} <span className="text-sm font-semibold text-gray-500">mins</span>
               </div>
               <div className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
-                Order creation to drop-off
+                Order creation to completion
               </div>
             </div>
 
@@ -557,13 +583,13 @@ export const Dashboard: React.FC = () => {
 
       {/* Live Alerts & Action Panels */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Waiting for rider > 5 mins */}
+        {/* Waiting for driver > 5 mins */}
         <div className="bg-white dark:bg-zinc-900 border border-amber-300 dark:border-amber-900/60 rounded-2xl p-5 shadow-sm">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
               <div className="w-3 h-3 rounded-full bg-red-500 animate-ping" />
               <h3 className="font-bold text-gray-900 dark:text-white text-sm">
-                Orders Waiting For Rider (&gt;5m)
+                Orders Waiting For Driver (&gt;5m)
               </h3>
             </div>
             <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300">
@@ -578,7 +604,7 @@ export const Dashboard: React.FC = () => {
           <div className="space-y-2 max-h-48 overflow-y-auto">
             {waitingOrdersOver5Min.length === 0 ? (
               <div className="text-center py-6 text-xs text-gray-400">
-                All active orders currently matched with riders.
+                All active orders currently matched with drivers.
               </div>
             ) : (
               waitingOrdersOver5Min.map((ord) => (
@@ -617,7 +643,7 @@ export const Dashboard: React.FC = () => {
           </div>
 
           <p className="text-xs text-gray-500 dark:text-zinc-400 mb-4">
-            Partner and rider submissions waiting for compliance review.
+            Partner and driver submissions waiting for compliance review.
           </p>
 
           <div className="space-y-2">
@@ -628,7 +654,7 @@ export const Dashboard: React.FC = () => {
               <div className="flex items-center gap-3">
                 <Store className="w-4 h-4 text-amber-500" />
                 <span className="text-xs font-semibold text-gray-800 dark:text-zinc-200">
-                  Merchant & Rider Applications
+                  Merchant & Driver Applications
                 </span>
               </div>
               <span className="text-xs font-bold text-amber-600">
@@ -694,7 +720,7 @@ export const Dashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* Charts Section */}
+      {/* Charts Section: 14-Day Orders, Orders by Service Type */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* 14-Day Orders Area Chart */}
         <div className="lg:col-span-2 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-5 shadow-xs">
@@ -749,19 +775,19 @@ export const Dashboard: React.FC = () => {
             Orders by Service
           </h3>
           <p className="text-xs text-gray-500 dark:text-zinc-400 mb-4">
-            Distribution across Delivio services
+            Distribution across Delivery and Taxi services
           </p>
 
-          <div className="h-52 w-full flex items-center justify-center">
+          <div className="h-48 w-full flex items-center justify-center">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
                   data={serviceTypeData}
                   cx="50%"
                   cy="50%"
-                  innerRadius={50}
-                  outerRadius={75}
-                  paddingAngle={4}
+                  innerRadius={45}
+                  outerRadius={70}
+                  paddingAngle={3}
                   dataKey="value"
                 >
                   {serviceTypeData.map((entry, index) => (
@@ -784,12 +810,51 @@ export const Dashboard: React.FC = () => {
           <div className="grid grid-cols-2 gap-2 mt-2">
             {serviceTypeData.map((item) => (
               <div key={item.name} className="flex items-center gap-2 text-xs">
-                <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: item.color }} />
-                <span className="text-gray-600 dark:text-zinc-400">{item.name}:</span>
+                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: item.color }} />
+                <span className="text-gray-600 dark:text-zinc-400 truncate">{item.name}:</span>
                 <span className="font-bold text-gray-900 dark:text-white">{item.value}</span>
               </div>
             ))}
           </div>
+        </div>
+      </div>
+
+      {/* Taxi Fleet by Vehicle Type Breakdown */}
+      <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-5 shadow-xs space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="font-bold text-gray-900 dark:text-white text-base flex items-center gap-2">
+              <Car className="w-5 h-5 text-amber-500" />
+              Taxi Service by Vehicle Type
+            </h3>
+            <p className="text-xs text-gray-500 dark:text-zinc-400">
+              Trip volume and gross passenger ride revenue by vehicle class
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+          {taxiVehicleData.map((v) => (
+            <div
+              key={v.id}
+              className="p-4 rounded-xl border border-gray-100 dark:border-zinc-800 bg-gray-50/70 dark:bg-zinc-850 space-y-2"
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-extrabold text-xs text-gray-900 dark:text-white">
+                  {v.name}
+                </span>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${v.badgeColor}`}>
+                  {v.orders} trips
+                </span>
+              </div>
+              <div className="text-xl font-black text-gray-900 dark:text-white">
+                ₱{v.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span className="text-[11px] text-gray-500 block">
+                Total passenger fares
+              </span>
+            </div>
+          ))}
         </div>
       </div>
 

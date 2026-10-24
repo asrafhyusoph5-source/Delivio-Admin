@@ -14,23 +14,60 @@ import { useCity } from '../context/CityContext';
 import { useToast } from '../context/ToastContext';
 import type { Rider, Merchant, UserProfile, Order } from '../types';
 import {
-  Bike,
+  VEHICLE_TYPES,
+  VEHICLE_LABELS,
+  type VehicleType
+} from '../constants';
+import {
+  Car,
   Store,
   User,
   Route,
   Phone,
   ExternalLink,
-  ShieldAlert,
   Mail,
   X,
   Star,
-  MapPin,
   Clock,
-  DollarSign,
-  CheckCircle2,
-  AlertTriangle
+  Layers,
+  Info
 } from 'lucide-react';
 import { formatRelativeTime } from '../utils/date';
+
+// Visual configuration for each vehicle type marker
+const VEHICLE_MARKER_STYLES: Record<
+  VehicleType,
+  { bg: string; border: string; label: string; svgPath: string }
+> = {
+  motorcycle: {
+    bg: '#10b981', // emerald-500
+    border: '#059669',
+    label: 'Motorcycle',
+    // Bike / motorcycle icon SVG
+    svgPath: 'M5.5 17.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm13 0a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-10-3.5h7l2-4.5H12L9.5 12'
+  },
+  tricycle: {
+    bg: '#f59e0b', // amber-500
+    border: '#d97706',
+    label: 'Tricycle',
+    // Rickshaw / tricycle 3-wheel style
+    svgPath: 'M3 17a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm16.5 0a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM6 14h5l3-6H8L5 12'
+  },
+  car4: {
+    bg: '#3b82f6', // blue-500
+    border: '#2563eb',
+    label: '4-Seater Car',
+    // Compact car icon
+    svgPath: 'M5 16h14a2 2 0 0 0 2-2v-3.5L18 6H6L3 10.5V14a2 2 0 0 0 2 2Zm2 2a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm10 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z'
+  },
+  car8: {
+    bg: '#8b5cf6', // purple-500
+    border: '#7c3aed',
+    label: '8-Seater Car',
+    // Larger van/bus icon
+    svgPath: 'M4 17h16a1 1 0 0 0 1-1V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a1 1 0 0 0 1 1Zm3 2a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm10 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM4 8h16M4 12h16'
+  }
+};
 
 export const LiveMap: React.FC = () => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -45,10 +82,10 @@ export const LiveMap: React.FC = () => {
     riders: L.layerGroup(),
     merchants: L.layerGroup(),
     customers: L.layerGroup(),
-    routes: L.layerGroup(),
+    routes: L.layerGroup()
   });
 
-  const { selectedCity, selectedCityId, cities } = useCity();
+  const { selectedCity, selectedCityId } = useCity();
   const { showSuccess, showError } = useToast();
   const navigate = useNavigate();
 
@@ -57,6 +94,9 @@ export const LiveMap: React.FC = () => {
   const [showMerchants, setShowMerchants] = useState(true);
   const [showCustomers, setShowCustomers] = useState(true);
   const [showRoutes, setShowRoutes] = useState(true);
+
+  // Vehicle Type Filter for Drivers on Map
+  const [selectedVehicleType, setSelectedVehicleType] = useState<'all' | VehicleType>('all');
 
   // Live Data States
   const [riders, setRiders] = useState<Rider[]>([]);
@@ -74,7 +114,6 @@ export const LiveMap: React.FC = () => {
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
-    // Center coordinates: Default Puerto Princesa (9.7392, 118.7353) or Philippines
     const defaultCenter: L.LatLngExpression = [9.7392, 118.7353];
     const map = L.map(mapContainerRef.current, {
       center: defaultCenter,
@@ -105,7 +144,7 @@ export const LiveMap: React.FC = () => {
 
   // 2. Real-time Listeners with onSnapshot
   useEffect(() => {
-    // A. Online riders
+    // A. Online drivers
     const qRiders = query(collection(db, 'riders'), where('isOnline', '==', true));
     const unsubRiders = onSnapshot(
       qRiders,
@@ -115,16 +154,18 @@ export const LiveMap: React.FC = () => {
           const dt = d.data();
           list.push({
             id: d.id,
-            name: dt.name || 'Rider',
+            name: dt.name || 'Driver',
             email: dt.email || '',
             phone: dt.phone || '',
             photoUrl: dt.photoUrl,
             riderCode: dt.riderCode || d.id.substring(0, 8),
             status: dt.status || 'active',
             cityId: dt.cityId,
-            vehicleType: dt.vehicleType,
-            vehicleModel: dt.vehicleModel,
-            plate: dt.plate,
+            vehicleType: (dt.vehicleType as VehicleType) || 'motorcycle',
+            vehicleModel: dt.vehicleModel || '',
+            vehicleColor: dt.vehicleColor || '',
+            seats: dt.seats || (dt.vehicleType === 'motorcycle' ? 1 : dt.vehicleType === 'tricycle' ? 3 : dt.vehicleType === 'car8' ? 8 : 4),
+            plate: dt.plate || '',
             allowedServices: dt.allowedServices || [],
             activeServices: dt.activeServices || [],
             isOnline: Boolean(dt.isOnline),
@@ -139,7 +180,7 @@ export const LiveMap: React.FC = () => {
         });
         setRiders(list);
       },
-      (err) => console.error('Map riders listener error:', err)
+      (err) => console.error('Map drivers listener error:', err)
     );
 
     // B. Merchants
@@ -210,11 +251,12 @@ export const LiveMap: React.FC = () => {
         snap.forEach((d) => {
           const dt = d.data();
           const st = dt.status;
-          if (st !== 'Delivered' && st !== 'Rejected' && st !== 'Cancelled') {
+          if (st !== 'Delivered' && st !== 'Completed' && st !== 'Rejected' && st !== 'Cancelled') {
             list.push({
               id: d.id,
               orderNumber: dt.orderNumber || d.id.substring(0, 8).toUpperCase(),
               serviceType: dt.serviceType || 'food',
+              vehicleType: dt.vehicleType,
               customerId: dt.customerId,
               customerName: dt.customerName || 'Customer',
               customerPhone: dt.customerPhone,
@@ -230,6 +272,7 @@ export const LiveMap: React.FC = () => {
               paymentMethod: dt.paymentMethod || 'cod',
               pickup: dt.pickup,
               dropoff: dt.dropoff,
+              stops: dt.stops,
               cityId: dt.cityId,
               createdAt: dt.createdAt
             });
@@ -249,10 +292,38 @@ export const LiveMap: React.FC = () => {
   }, []);
 
   // 3. Filter by City
-  const filteredRiders = useMemo(() => {
+  const filteredRidersByCity = useMemo(() => {
     if (selectedCityId === 'all') return riders;
     return riders.filter((r) => r.cityId === selectedCityId);
   }, [riders, selectedCityId]);
+
+  // Online counts per vehicle type
+  const onlineCountsPerVehicle = useMemo(() => {
+    const counts: Record<VehicleType, number> = {
+      motorcycle: 0,
+      tricycle: 0,
+      car4: 0,
+      car8: 0
+    };
+    filteredRidersByCity.forEach((r) => {
+      const vtype = (r.vehicleType as VehicleType) || 'motorcycle';
+      if (counts[vtype] !== undefined) {
+        counts[vtype]++;
+      } else {
+        counts.motorcycle++;
+      }
+    });
+    return counts;
+  }, [filteredRidersByCity]);
+
+  // Filtered riders after vehicle type selection
+  const filteredRiders = useMemo(() => {
+    if (selectedVehicleType === 'all') return filteredRidersByCity;
+    return filteredRidersByCity.filter((r) => {
+      const vtype = (r.vehicleType as VehicleType) || 'motorcycle';
+      return vtype === selectedVehicleType;
+    });
+  }, [filteredRidersByCity, selectedVehicleType]);
 
   const filteredMerchants = useMemo(() => {
     if (selectedCityId === 'all') return merchants;
@@ -310,28 +381,28 @@ export const LiveMap: React.FC = () => {
     layerGroupsRef.current.customers.clearLayers();
     layerGroupsRef.current.routes.clearLayers();
 
-    // A. Riders
+    // A. Drivers per vehicle type
     if (showRiders) {
       filteredRiders.forEach((rider) => {
         if (!rider.location?.lat || !rider.location?.lng) return;
         const isBusy = Boolean(rider.currentOrderId);
+        const vtype = (rider.vehicleType as VehicleType) || 'motorcycle';
+        const vStyle = VEHICLE_MARKER_STYLES[vtype] || VEHICLE_MARKER_STYLES.motorcycle;
 
         const iconHtml = `
-          <div class="relative flex items-center justify-center w-9 h-9 rounded-full ${
-            isBusy ? 'bg-amber-500' : 'bg-emerald-500'
-          } border-2 border-white shadow-lg text-white font-bold cursor-pointer transform hover:scale-110 transition-transform">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+          <div class="relative flex items-center justify-center w-9 h-9 rounded-full border-2 border-white shadow-lg text-white font-bold cursor-pointer transform hover:scale-110 transition-transform" style="background-color: ${vStyle.bg};">
+            <svg class="w-5 h-5 fill-none stroke-current" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+              <path d="${vStyle.svgPath}" />
             </svg>
-            <span class="absolute -top-1 -right-1 w-3 h-3 rounded-full ${
-              isBusy ? 'bg-amber-300' : 'bg-emerald-300'
-            } border border-white"></span>
+            <span class="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full border-2 border-white ${
+              isBusy ? 'bg-amber-400' : 'bg-emerald-300'
+            }" title="${isBusy ? 'On Trip / Busy' : 'Online & Available'}"></span>
           </div>
         `;
 
         const divIcon = L.divIcon({
           html: iconHtml,
-          className: 'delivio-rider-marker',
+          className: 'delivio-driver-marker',
           iconSize: [36, 36],
           iconAnchor: [18, 18]
         });
@@ -399,7 +470,7 @@ export const LiveMap: React.FC = () => {
       });
     }
 
-    // D. Active Order Routes (Pickup -> Dropoff line + Rider position)
+    // D. Active Order Routes
     if (showRoutes) {
       filteredActiveOrders.forEach((o) => {
         if (o.pickup?.lat && o.pickup?.lng && o.dropoff?.lat && o.dropoff?.lng) {
@@ -408,12 +479,15 @@ export const LiveMap: React.FC = () => {
             [o.dropoff.lat, o.dropoff.lng]
           ];
           const polyline = L.polyline(latlngs, {
-            color: '#FFB300',
+            color: o.serviceType === 'taxi' ? '#3b82f6' : '#FFB300',
             weight: 3,
             dashArray: '6, 8',
-            opacity: 0.8
+            opacity: 0.85
           });
-          polyline.bindTooltip(`Order #${o.orderNumber}: ${o.customerName}`, { sticky: true });
+          polyline.bindTooltip(
+            `Order #${o.orderNumber}: ${o.customerName} (${o.serviceType === 'taxi' ? 'Taxi' : 'Delivery'})`,
+            { sticky: true }
+          );
           polyline.addTo(layerGroupsRef.current.routes);
         }
       });
@@ -429,7 +503,7 @@ export const LiveMap: React.FC = () => {
     showRoutes
   ]);
 
-  // Quick Action: Suspend Rider
+  // Quick Action: Suspend / Unsuspend Driver
   const handleToggleRiderSuspend = async (rider: Rider) => {
     try {
       const isCurrentlySuspended = rider.status === 'suspended';
@@ -444,7 +518,7 @@ export const LiveMap: React.FC = () => {
         status: newStatus
       });
 
-      showSuccess(`Rider ${rider.name} marked as ${newStatus}`);
+      showSuccess(`Driver ${rider.name} marked as ${newStatus}`);
       setSelectedEntity((prev) =>
         prev && prev.data.id === rider.id
           ? { ...prev, data: { ...prev.data, status: newStatus } }
@@ -457,59 +531,146 @@ export const LiveMap: React.FC = () => {
 
   return (
     <div className="relative h-[calc(100vh-6.5rem)] w-full rounded-2xl overflow-hidden border border-gray-200 dark:border-zinc-800 shadow-sm flex">
-      {/* Layer Toggles Toolbar floating on top-left of the map */}
-      <div className="absolute top-4 left-4 z-20 flex flex-wrap gap-2 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md p-2 rounded-2xl border border-gray-200 dark:border-zinc-800 shadow-xl text-xs font-semibold">
-        {/* Riders toggle */}
-        <button
-          onClick={() => setShowRiders(!showRiders)}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-all ${
-            showRiders
-              ? 'bg-emerald-500 text-white shadow-xs'
-              : 'bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400'
-          }`}
-        >
-          <Bike className="w-3.5 h-3.5" />
-          <span>Riders ({filteredRiders.length})</span>
-        </button>
+      {/* Top Floating Controls */}
+      <div className="absolute top-4 left-4 right-4 sm:right-auto z-20 flex flex-col gap-2 max-w-full">
+        {/* Main Layer Toggles Toolbar */}
+        <div className="flex flex-wrap items-center gap-2 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md p-2 rounded-2xl border border-gray-200 dark:border-zinc-800 shadow-xl text-xs font-semibold">
+          {/* Drivers toggle */}
+          <button
+            onClick={() => setShowRiders(!showRiders)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-all ${
+              showRiders
+                ? 'bg-emerald-600 text-white shadow-xs'
+                : 'bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400'
+            }`}
+          >
+            <Car className="w-3.5 h-3.5" />
+            <span>Drivers ({filteredRidersByCity.length})</span>
+          </button>
 
-        {/* Merchants toggle */}
-        <button
-          onClick={() => setShowMerchants(!showMerchants)}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-all ${
-            showMerchants
-              ? 'bg-amber-500 text-black shadow-xs'
-              : 'bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400'
-          }`}
-        >
-          <Store className="w-3.5 h-3.5" />
-          <span>Merchants ({filteredMerchants.length})</span>
-        </button>
+          {/* Merchants toggle */}
+          <button
+            onClick={() => setShowMerchants(!showMerchants)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-all ${
+              showMerchants
+                ? 'bg-amber-500 text-black shadow-xs'
+                : 'bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400'
+            }`}
+          >
+            <Store className="w-3.5 h-3.5" />
+            <span>Merchants ({filteredMerchants.length})</span>
+          </button>
 
-        {/* Customers toggle */}
-        <button
-          onClick={() => setShowCustomers(!showCustomers)}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-all ${
-            showCustomers
-              ? 'bg-blue-500 text-white shadow-xs'
-              : 'bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400'
-          }`}
-        >
-          <User className="w-3.5 h-3.5" />
-          <span>Customers ({filteredCustomers.length})</span>
-        </button>
+          {/* Customers toggle */}
+          <button
+            onClick={() => setShowCustomers(!showCustomers)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-all ${
+              showCustomers
+                ? 'bg-blue-500 text-white shadow-xs'
+                : 'bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400'
+            }`}
+          >
+            <User className="w-3.5 h-3.5" />
+            <span>Customers ({filteredCustomers.length})</span>
+          </button>
 
-        {/* Routes toggle */}
-        <button
-          onClick={() => setShowRoutes(!showRoutes)}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-all ${
-            showRoutes
-              ? 'bg-purple-500 text-white shadow-xs'
-              : 'bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400'
-          }`}
-        >
-          <Route className="w-3.5 h-3.5" />
-          <span>Routes ({filteredActiveOrders.length})</span>
-        </button>
+          {/* Routes toggle */}
+          <button
+            onClick={() => setShowRoutes(!showRoutes)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-all ${
+              showRoutes
+                ? 'bg-purple-500 text-white shadow-xs'
+                : 'bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400'
+            }`}
+          >
+            <Route className="w-3.5 h-3.5" />
+            <span>Routes ({filteredActiveOrders.length})</span>
+          </button>
+        </div>
+
+        {/* Vehicle-Type Filter Chips (Only shown when Drivers layer is enabled) */}
+        {showRiders && (
+          <div className="flex flex-wrap items-center gap-1.5 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md px-3 py-1.5 rounded-2xl border border-gray-200 dark:border-zinc-800 shadow-md text-xs">
+            <span className="text-[11px] font-bold text-gray-500 dark:text-zinc-400 mr-1 flex items-center gap-1">
+              <Layers className="w-3 h-3" /> Vehicle:
+            </span>
+
+            <button
+              onClick={() => setSelectedVehicleType('all')}
+              className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                selectedVehicleType === 'all'
+                  ? 'bg-zinc-800 text-white dark:bg-zinc-200 dark:text-zinc-900 shadow-xs'
+                  : 'bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 hover:bg-gray-200 dark:hover:bg-zinc-700'
+              }`}
+            >
+              All ({filteredRidersByCity.length})
+            </button>
+
+            {VEHICLE_TYPES.map((v) => {
+              const count = onlineCountsPerVehicle[v.id] || 0;
+              const isSelected = selectedVehicleType === v.id;
+              const vStyle = VEHICLE_MARKER_STYLES[v.id];
+
+              return (
+                <button
+                  key={v.id}
+                  onClick={() => setSelectedVehicleType(v.id)}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all border ${
+                    isSelected
+                      ? 'bg-white dark:bg-zinc-800 text-gray-900 dark:text-white shadow-xs'
+                      : 'bg-gray-50 dark:bg-zinc-850/80 text-gray-600 dark:text-zinc-400 hover:bg-gray-100 border-transparent'
+                  }`}
+                  style={{
+                    borderColor: isSelected ? vStyle.bg : 'transparent'
+                  }}
+                >
+                  <span
+                    className="w-2.5 h-2.5 rounded-full inline-block"
+                    style={{ backgroundColor: vStyle.bg }}
+                  />
+                  <span>{v.shortLabel}</span>
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300">
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Map Legend (Bottom-Left) */}
+      <div className="absolute bottom-4 left-4 z-20 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md p-3 rounded-2xl border border-gray-200 dark:border-zinc-800 shadow-xl text-xs max-w-xs">
+        <div className="flex items-center gap-1 font-bold text-gray-700 dark:text-zinc-200 text-[11px] mb-2 uppercase tracking-wider">
+          <Info className="w-3.5 h-3.5 text-amber-500" />
+          <span>Map Legend</span>
+        </div>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
+          <div className="flex items-center gap-1.5 text-gray-600 dark:text-zinc-400">
+            <span className="w-3 h-3 rounded-full bg-emerald-500 border border-white shrink-0" />
+            <span>Motorcycle</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-gray-600 dark:text-zinc-400">
+            <span className="w-3 h-3 rounded-full bg-amber-500 border border-white shrink-0" />
+            <span>Tricycle</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-gray-600 dark:text-zinc-400">
+            <span className="w-3 h-3 rounded-full bg-blue-500 border border-white shrink-0" />
+            <span>4-Seater Car</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-gray-600 dark:text-zinc-400">
+            <span className="w-3 h-3 rounded-full bg-purple-500 border border-white shrink-0" />
+            <span>8-Seater Car</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-gray-600 dark:text-zinc-400">
+            <span className="w-3 h-3 rounded-md bg-emerald-600 border border-white shrink-0" />
+            <span>Merchant</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-gray-600 dark:text-zinc-400">
+            <span className="w-3 h-3 rounded-full bg-blue-500 border border-white shrink-0" />
+            <span>Customer</span>
+          </div>
+        </div>
       </div>
 
       {/* Map Element */}
@@ -522,7 +683,7 @@ export const LiveMap: React.FC = () => {
           <div className="p-4 border-b border-gray-100 dark:border-zinc-850 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="text-xs uppercase font-extrabold tracking-wider px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-300">
-                {selectedEntity.type}
+                {selectedEntity.type === 'rider' ? 'Driver' : selectedEntity.type}
               </span>
               <span className="text-xs text-gray-400">Live Telemetry</span>
             </div>
@@ -536,10 +697,13 @@ export const LiveMap: React.FC = () => {
 
           {/* Panel Content based on Entity */}
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
-            {/* RIDER DETAILS */}
+            {/* DRIVER DETAILS */}
             {selectedEntity.type === 'rider' && (() => {
               const r: Rider = selectedEntity.data;
               const activeOrder = activeOrders.find((o) => o.riderId === r.id);
+              const vtype = (r.vehicleType as VehicleType) || 'motorcycle';
+              const vStyle = VEHICLE_MARKER_STYLES[vtype] || VEHICLE_MARKER_STYLES.motorcycle;
+              const vehicleLabel = VEHICLE_LABELS[vtype] || 'Motorcycle';
 
               return (
                 <>
@@ -578,10 +742,25 @@ export const LiveMap: React.FC = () => {
 
                   {/* Vehicle & Contact Info */}
                   <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800 space-y-2 text-xs">
+                    <div className="flex justify-between items-center">
+                      <span className="text-gray-500">Vehicle Type:</span>
+                      <span
+                        className="font-bold px-2 py-0.5 rounded text-white text-[11px]"
+                        style={{ backgroundColor: vStyle.bg }}
+                      >
+                        {vehicleLabel}
+                      </span>
+                    </div>
                     <div className="flex justify-between">
-                      <span className="text-gray-500">Vehicle:</span>
+                      <span className="text-gray-500">Vehicle Model:</span>
                       <span className="font-bold text-gray-900 dark:text-white">
-                        {r.vehicleType || 'Motorcycle'} {r.vehicleModel ? `(${r.vehicleModel})` : ''}
+                        {r.vehicleModel || 'N/A'} {r.vehicleColor ? `(${r.vehicleColor})` : ''}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">Seats:</span>
+                      <span className="font-bold text-gray-900 dark:text-white">
+                        {r.seats ?? (vtype === 'motorcycle' ? 1 : vtype === 'tricycle' ? 3 : vtype === 'car8' ? 8 : 4)} passengers
                       </span>
                     </div>
                     <div className="flex justify-between">
@@ -611,7 +790,7 @@ export const LiveMap: React.FC = () => {
                   {/* Enabled Services Badges */}
                   <div>
                     <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
-                      Enabled Services
+                      Allowed Services
                     </label>
                     <div className="flex flex-wrap gap-1.5">
                       {(r.allowedServices || []).map((s) => (
@@ -641,7 +820,9 @@ export const LiveMap: React.FC = () => {
                           </span>
                         </div>
                         <p className="text-xs text-gray-600 dark:text-zinc-300">
-                          {activeOrder.merchantName} &rarr; {activeOrder.customerName}
+                          {activeOrder.serviceType === 'taxi'
+                            ? `Taxi: ${activeOrder.pickup?.address || 'Pickup'} → ${activeOrder.dropoff?.address || 'Drop-off'}`
+                            : `${activeOrder.merchantName} → ${activeOrder.customerName}`}
                         </p>
                         <button
                           onClick={() => navigate(`/orders?search=${activeOrder.orderNumber}`)}
@@ -652,7 +833,7 @@ export const LiveMap: React.FC = () => {
                       </div>
                     ) : (
                       <div className="p-3 rounded-xl bg-gray-50 dark:bg-zinc-900 text-xs text-gray-400 text-center">
-                        Rider is currently waiting for assignment (Available).
+                        Driver is currently waiting for assignment (Available).
                       </div>
                     )}
                   </div>
@@ -687,7 +868,7 @@ export const LiveMap: React.FC = () => {
                           : 'bg-red-50 hover:bg-red-100 dark:bg-red-950/40 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-900'
                       }`}
                     >
-                      {r.status === 'suspended' ? 'Unsuspend Rider' : 'Suspend Rider Account'}
+                      {r.status === 'suspended' ? 'Unsuspend Driver' : 'Suspend Driver Account'}
                     </button>
 
                     <div className="flex gap-2">

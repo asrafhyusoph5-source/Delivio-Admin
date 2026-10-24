@@ -34,13 +34,16 @@ export interface UserAddress {
   isDefault?: boolean;
 }
 
-export type OrderServiceType = 'food' | 'convenience' | 'parcel' | 'pabili' | 'request_rider';
+export type OrderServiceType = 'food' | 'convenience' | 'parcel' | 'pabili' | 'request_rider' | 'taxi';
 
 export type OrderStatus =
   | 'Placed Order'
   | 'Preparing'
   | 'Ready'
   | 'Rider is on the way'
+  | 'Driver is on the way'
+  | 'Driver arrived'
+  | 'On trip'
   | 'Delivered'
   | 'Completed'
   | 'Rejected'
@@ -104,6 +107,16 @@ export interface Order {
   riderPhotoUrl?: string | null;
   riderLocation?: UserLocation | null;
   riderStep?: string | null;
+  riderVehicle?: {
+    type?: string;
+    vehicleType?: string;
+    model?: string;
+    color?: string;
+    plate?: string;
+    seats?: number;
+  } | null;
+  vehicleType?: string;
+  stops?: OrderLocationPoint[];
   riderRequest?: {
     status?: string;
     acceptedAt?: any;
@@ -255,7 +268,14 @@ export interface Rider {
   cityId?: string;
   vehicleType?: string;
   vehicleModel?: string;
+  vehicleColor?: string;
+  seats?: number;
   plate?: string;
+  documents?: {
+    vehiclePhotoUrl?: string;
+    franchiseUrl?: string;
+    [key: string]: any;
+  } | ApplicationDocument[] | any;
   allowedServices: OrderServiceType[];
   activeServices: OrderServiceType[];
   isOnline: boolean;
@@ -295,6 +315,21 @@ export interface ServiceRates {
   serviceFee: number;
 }
 
+export interface TaxiVehicleFareConfig {
+  enabled: boolean;
+  baseFare: number;
+  includedKm: number;
+  perKm: number;
+  minFare: number;
+  perStopFee: number;
+  serviceFee: number;
+  commissionPercent: number;
+}
+
+export type TaxiVehicleRates = TaxiVehicleFareConfig;
+
+export type DeliveryServiceType = 'food' | 'convenience' | 'parcel' | 'pabili' | 'request_rider';
+
 export interface DeliveryRatesConfig {
   id: string; // cityId
   food: ServiceRates;
@@ -302,6 +337,7 @@ export interface DeliveryRatesConfig {
   parcel: ServiceRates;
   pabili: ServiceRates;
   request_rider: ServiceRates;
+  rideRates?: Record<string, TaxiVehicleFareConfig>;
   riderCommissionPercent: number;
   surcharges: {
     peak: {
@@ -352,9 +388,15 @@ export interface RiderApplication {
   cityId: string;
   vehicleType: string;
   vehicleModel?: string;
+  vehicleColor?: string;
+  seats?: number;
   plate: string;
   selfieUrl?: string;
-  documents?: ApplicationDocument[];
+  documents?: {
+    vehiclePhotoUrl?: string;
+    franchiseUrl?: string;
+    [key: string]: any;
+  } | ApplicationDocument[] | any;
   status: 'Pending' | 'Under Review' | 'Needs Info' | 'Approved' | 'Rejected';
   reviewNote?: string;
   reviewedBy?: string;
@@ -475,5 +517,7 @@ export interface PlatformSettings {
   supportEmail: string;
   maintenance: boolean;
   defaultCommissionRate?: number;
+  services?: Record<string, boolean>;
+  taxiVehicles?: Record<string, boolean>;
   updatedAt?: any;
 }

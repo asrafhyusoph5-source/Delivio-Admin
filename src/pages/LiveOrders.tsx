@@ -23,6 +23,11 @@ import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
 import type { Order, OrderStatus, OrderServiceType } from '../types';
 import {
+  VEHICLE_TYPES,
+  VEHICLE_LABELS,
+  type VehicleType
+} from '../constants';
+import {
   Search,
   Filter,
   Download,
@@ -32,7 +37,7 @@ import {
   Phone,
   User,
   Store,
-  Bike,
+  Car,
   AlertTriangle,
   RotateCcw,
   Ban,
@@ -47,11 +52,21 @@ import {
   Banknote,
   Truck,
   ChevronDown,
-  Calendar
+  Calendar,
+  Navigation
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
 export const FulfillmentChip: React.FC<{ order: Order }> = ({ order }) => {
+  if (order.serviceType === 'taxi') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700 whitespace-nowrap">
+        <Car className="w-3 h-3 text-amber-600 shrink-0" />
+        <span>Ride Hailing</span>
+      </span>
+    );
+  }
+
   const isScheduled = Boolean(order.scheduledFor || (order as any).isScheduled || order.fulfillmentType === 'scheduled');
   const isPickup = Boolean(order.isPickup || order.fulfillmentType === 'pickup' || (order.serviceType as any) === 'pickup');
 
@@ -75,8 +90,33 @@ export const FulfillmentChip: React.FC<{ order: Order }> = ({ order }) => {
 
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200 dark:border-blue-800 whitespace-nowrap">
-      <Bike className="w-3 h-3 text-blue-600 shrink-0" />
+      <Car className="w-3 h-3 text-blue-600 shrink-0" />
       <span>Delivery</span>
+    </span>
+  );
+};
+
+export const ServiceChips: React.FC<{ order: Order }> = ({ order }) => {
+  if (order.serviceType === 'taxi') {
+    const vType = (order.vehicleType || order.riderVehicle?.vehicleType || 'motorcycle') as VehicleType;
+    const vConfig = VEHICLE_TYPES.find((v) => v.id === vType);
+
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-extrabold bg-blue-600 text-white shadow-xs">
+          <Car className="w-3 h-3" />
+          <span>Taxi</span>
+        </span>
+        <span className={`inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-bold border ${vConfig?.badgeColor || 'bg-gray-100 text-gray-800'}`}>
+          {vConfig?.shortLabel || VEHICLE_LABELS[vType] || vType}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <span className="capitalize px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
+      {order.serviceType.replace('_', ' ')}
     </span>
   );
 };
@@ -124,7 +164,6 @@ export const PaymentChip: React.FC<{ order: Order }> = ({ order }) => {
     );
   }
 
-  // COD default
   return (
     <div className="inline-flex flex-col gap-0.5 items-start">
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
@@ -142,6 +181,9 @@ const EXACT_STATUSES: OrderStatus[] = [
   'Placed Order',
   'Preparing',
   'Ready',
+  'Driver is on the way',
+  'Driver arrived',
+  'On trip',
   'Rider is on the way',
   'Rider is on the way to sender',
   'Arrived at sender',
@@ -208,6 +250,7 @@ export const LiveOrders: React.FC = () => {
             id: d.id,
             orderNumber: data.orderNumber || d.id.substring(0, 8).toUpperCase(),
             serviceType: data.serviceType || 'food',
+            vehicleType: data.vehicleType,
             customerId: data.customerId || '',
             customerName: data.customerName || 'Customer',
             customerPhone: data.customerPhone,
@@ -223,11 +266,13 @@ export const LiveOrders: React.FC = () => {
             riderStep: data.riderStep,
             riderRequest: data.riderRequest,
             riderEarning: data.riderEarning,
+            riderVehicle: data.riderVehicle,
             status: data.status || 'Placed Order',
             statusHistory: data.statusHistory || [],
             items: data.items || [],
             pickup: data.pickup,
             dropoff: data.dropoff,
+            stops: data.stops,
             parcel: data.parcel,
             pabili: data.pabili,
             finalReceiptTotal: data.finalReceiptTotal,
@@ -296,7 +341,7 @@ export const LiveOrders: React.FC = () => {
 
   const [fulfillmentFilter, setFulfillmentFilter] = useState<'all' | 'delivery' | 'pickup' | 'scheduled'>('all');
 
-  // Upcoming scheduled orders (not finished/cancelled)
+  // Upcoming scheduled orders
   const upcomingScheduledOrders = useMemo(() => {
     return orders
       .filter((o) => {
@@ -329,7 +374,6 @@ export const LiveOrders: React.FC = () => {
       // 3. Status Filter
       if (statusFilter !== 'all') {
         if (statusFilter === 'Completed' || statusFilter === 'Delivered') {
-          // Treat Delivered and Completed equivalently if selected or check exact
           if (order.status !== 'Completed' && order.status !== 'Delivered') {
             return false;
           }
@@ -404,7 +448,7 @@ export const LiveOrders: React.FC = () => {
 
     const map = L.map(miniMapContainerRef.current, {
       center: [centerLat, centerLng],
-      zoom: 14,
+      zoom: 13,
       zoomControl: false
     });
 
@@ -414,36 +458,96 @@ export const LiveOrders: React.FC = () => {
 
     const bounds: L.LatLngExpression[] = [];
 
+    // Stop 1: Pickup pin in GREEN
     if (pickupLat && pickupLng) {
       bounds.push([pickupLat, pickupLng]);
-      L.marker([pickupLat, pickupLng])
-        .bindTooltip(`Pickup: ${selectedOrder.pickup?.address || 'Store'}`, { permanent: false })
+
+      const greenPickupIcon = L.divIcon({
+        html: `
+          <div class="flex items-center justify-center w-7 h-7 rounded-full bg-emerald-600 text-white font-black text-xs border-2 border-white shadow-lg cursor-pointer">
+            1
+          </div>
+        `,
+        className: 'delivio-pickup-pin',
+        iconSize: [28, 28],
+        iconAnchor: [14, 14]
+      });
+
+      L.marker([pickupLat, pickupLng], { icon: greenPickupIcon })
+        .bindTooltip(`Pickup (Stop 1): ${selectedOrder.pickup?.address || 'Pickup Point'}`, { permanent: false })
         .addTo(map);
     }
 
-    if (dropoffLat && dropoffLng) {
+    // Stop 2+: Red pins numbered 2, 3, 4...
+    if (selectedOrder.stops && selectedOrder.stops.length > 0) {
+      selectedOrder.stops.forEach((st, idx) => {
+        if (st.lat && st.lng) {
+          bounds.push([st.lat, st.lng]);
+          const stopNum = idx + 2;
+          const redStopIcon = L.divIcon({
+            html: `
+              <div class="flex items-center justify-center w-7 h-7 rounded-full bg-red-600 text-white font-black text-xs border-2 border-white shadow-lg cursor-pointer">
+                ${stopNum}
+              </div>
+            `,
+            className: `delivio-stop-pin-${stopNum}`,
+            iconSize: [28, 28],
+            iconAnchor: [14, 14]
+          });
+
+          L.marker([st.lat, st.lng], { icon: redStopIcon })
+            .bindTooltip(`Stop ${stopNum}: ${st.address || 'Stop Location'}`, { permanent: false })
+            .addTo(map);
+        }
+      });
+    } else if (dropoffLat && dropoffLng) {
+      // Default single dropoff is Stop 2
       bounds.push([dropoffLat, dropoffLng]);
-      L.marker([dropoffLat, dropoffLng])
-        .bindTooltip(`Drop-off: ${selectedOrder.dropoff?.address || 'Customer'}`, { permanent: false })
+      const redDropoffIcon = L.divIcon({
+        html: `
+          <div class="flex items-center justify-center w-7 h-7 rounded-full bg-red-600 text-white font-black text-xs border-2 border-white shadow-lg cursor-pointer">
+            2
+          </div>
+        `,
+        className: 'delivio-dropoff-pin',
+        iconSize: [28, 28],
+        iconAnchor: [14, 14]
+      });
+
+      L.marker([dropoffLat, dropoffLng], { icon: redDropoffIcon })
+        .bindTooltip(`Drop-off (Stop 2): ${selectedOrder.dropoff?.address || 'Destination'}`, { permanent: false })
         .addTo(map);
     }
 
+    // Driver location if online & assigned
     if (selectedOrder.riderLocation?.lat && selectedOrder.riderLocation?.lng) {
       bounds.push([selectedOrder.riderLocation.lat, selectedOrder.riderLocation.lng]);
-      L.circleMarker([selectedOrder.riderLocation.lat, selectedOrder.riderLocation.lng], {
-        radius: 8,
-        fillColor: '#10B981',
-        color: '#ffffff',
-        weight: 2,
-        fillOpacity: 1
-      })
-        .bindTooltip(`Rider: ${selectedOrder.riderName || 'Assigned'}`, { permanent: true })
+      const driverMarkerHtml = `
+        <div class="flex items-center justify-center w-8 h-8 rounded-full bg-amber-500 text-black font-extrabold border-2 border-white shadow-lg">
+          <svg class="w-4 h-4 fill-none stroke-current" stroke-width="2.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 18.75a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m3 0h6m-9 0H3.375a1.125 1.125 0 0 1-1.125-1.125V14.25m17.25 4.5a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m3 0h1.125c.621 0 1.129-.504 1.09-1.124a17.902 17.902 0 0 0-3.213-9.193 2.056 2.056 0 0 0-1.58-.86H14.25M16.5 18.75h-2.25m0-11.25H4.125c-.621 0-1.125.504-1.125 1.125v7.5c0 .621.504 1.125 1.125 1.125h1.125m9.75-9.75h-7.5" />
+          </svg>
+        </div>
+      `;
+      const driverDivIcon = L.divIcon({
+        html: driverMarkerHtml,
+        className: 'delivio-driver-live-pin',
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
+      });
+
+      L.marker([selectedOrder.riderLocation.lat, selectedOrder.riderLocation.lng], { icon: driverDivIcon })
+        .bindTooltip(`Driver: ${selectedOrder.riderName || 'Assigned Driver'}`, { permanent: true })
         .addTo(map);
     }
 
     if (bounds.length > 1) {
-      map.fitBounds(L.latLngBounds(bounds), { padding: [25, 25] });
-      L.polyline(bounds, { color: '#FFC107', weight: 3, dashArray: '4, 6' }).addTo(map);
+      map.fitBounds(L.latLngBounds(bounds), { padding: [30, 30] });
+      L.polyline(bounds, {
+        color: selectedOrder.serviceType === 'taxi' ? '#3b82f6' : '#FFC107',
+        weight: 3.5,
+        dashArray: '5, 8'
+      }).addTo(map);
     }
 
     miniMapInstanceRef.current = map;
@@ -456,48 +560,38 @@ export const LiveOrders: React.FC = () => {
     };
   }, [selectedOrder]);
 
-  // Action 1: Cancel Order (Atomic Transaction for Wallet Refund)
+  // Action 1: Cancel Order (supports taxi and all services)
   const handleCancelOrder = async () => {
     if (!selectedOrder) return;
     try {
       setCancelling(true);
+      const fullReason = cancelNote.trim()
+        ? `${cancelReasonPicker}: ${cancelNote.trim()}`
+        : cancelReasonPicker;
+
+      const willRefund =
+        refundToWallet &&
+        (selectedOrder.paymentMethod || selectedOrder.payment?.method || '').toLowerCase() === 'wallet' &&
+        !selectedOrder.walletRefunded;
+
       const orderRef = doc(db, 'orders', selectedOrder.id);
+      const customerId = selectedOrder.customerId;
+      const userRef = doc(db, 'users', customerId);
       const now = Timestamp.now();
-      const fullReason = `${cancelReasonPicker}${cancelNote ? ': ' + cancelNote : ''}`;
-      const isWalletPaid =
-        (selectedOrder.paymentMethod || selectedOrder.payment?.method || '').toLowerCase() ===
-        'wallet';
-      const willRefund = isWalletPaid && refundToWallet;
 
       await runTransaction(db, async (transaction) => {
         const orderSnap = await transaction.get(orderRef);
         if (!orderSnap.exists()) {
-          throw new Error('Order not found in database.');
+          throw new Error('Order not found');
         }
         const orderData = orderSnap.data();
 
-        if (orderData.status === 'Cancelled') {
-          throw new Error('This order is already cancelled.');
-        }
-
         if (willRefund) {
-          // Continue only if walletRefunded is not true
-          if (orderData.walletRefunded === true) {
-            throw new Error('This order has already been refunded to the customer wallet.');
-          }
-
-          const customerId = orderData.customerId || selectedOrder.customerId;
-          if (!customerId) {
-            throw new Error('Customer ID missing on order. Cannot refund to wallet.');
-          }
-
-          const userRef = doc(db, 'users', customerId);
           const userSnap = await transaction.get(userRef);
-          const currentBal = userSnap.exists() ? Number(userSnap.data()?.walletBalance || 0) : 0;
-          const refundAmount = Number(orderData.fees?.total ?? selectedOrder.fees?.total ?? 0);
+          const currentBal = userSnap.exists() ? userSnap.data().walletBalance || 0 : 0;
+          const refundAmount = Number(orderData.fees?.total || selectedOrder.fees?.total || 0);
           const newBal = currentBal + refundAmount;
 
-          // 1. Update order: set walletRefunded true and Cancelled status
           transaction.update(orderRef, {
             status: 'Cancelled',
             cancelReason: fullReason,
@@ -513,7 +607,6 @@ export const LiveOrders: React.FC = () => {
             updatedAt: now
           });
 
-          // 2. Increment users.walletBalance by fees.total
           if (userSnap.exists()) {
             transaction.update(userRef, {
               walletBalance: increment(refundAmount),
@@ -530,7 +623,6 @@ export const LiveOrders: React.FC = () => {
             );
           }
 
-          // 3. Create walletTransactions entry type "refund"
           const txnRef = doc(collection(db, 'walletTransactions'));
           transaction.set(txnRef, {
             customerId,
@@ -546,7 +638,6 @@ export const LiveOrders: React.FC = () => {
             createdAt: now
           });
         } else {
-          // Standard cancellation without wallet refund
           transaction.update(orderRef, {
             status: 'Cancelled',
             cancelReason: fullReason,
@@ -562,7 +653,6 @@ export const LiveOrders: React.FC = () => {
         }
       });
 
-      // Write Audit Log
       await logAuditEvent({
         adminId: adminProfile?.uid || 'admin',
         adminName: adminProfile?.name || 'Administrator',
@@ -605,8 +695,8 @@ export const LiveOrders: React.FC = () => {
     }
   };
 
-  // Action 2: Reassign Rider
-  const handleReassignRider = async () => {
+  // Action 2: Reassign Driver: Clears riderId, riderName, riderPhone, riderPhotoUrl, riderStep, and riderVehicle and sets status to "Placed Order"
+  const handleReassignDriver = async () => {
     if (!selectedOrder) return;
     try {
       setReassigning(true);
@@ -619,17 +709,15 @@ export const LiveOrders: React.FC = () => {
         riderPhone: null,
         riderPhotoUrl: null,
         riderStep: null,
+        riderVehicle: null,
+        status: 'Placed Order',
         statusHistory: arrayUnion({
-          status: 'Rider Unassigned',
+          status: 'Placed Order',
           at: now,
-          note: `Rider reassigned by Admin (${adminProfile?.name}): ${reassignReason || 'Manual dispatch unassignment'}`
+          note: `Driver unassigned & order reset to Placed Order by Admin (${adminProfile?.name || 'Operations'}): ${reassignReason || 'Manual dispatch unassignment'}`
         }),
         updatedAt: now
       };
-
-      if (selectedOrder.serviceType === 'parcel' || selectedOrder.serviceType === 'pabili') {
-        updatePayload.status = 'Placed Order';
-      }
 
       if (selectedOrder.serviceType === 'request_rider') {
         updatePayload['riderRequest.status'] = 'Searching';
@@ -637,20 +725,19 @@ export const LiveOrders: React.FC = () => {
 
       await updateDoc(orderRef, updatePayload);
 
-      // Write Audit Log
       await logAuditEvent({
         adminId: adminProfile?.uid || 'admin',
         adminName: adminProfile?.name || 'Administrator',
         adminEmail: adminProfile?.email,
-        action: 'REASSIGN_RIDER',
+        action: 'REASSIGN_DRIVER',
         entityType: 'order',
         entityId: selectedOrder.id,
-        details: `Reassigned rider for order #${selectedOrder.orderNumber}. Previous rider: ${selectedOrder.riderName || 'None'}. Reason: ${reassignReason}`,
+        details: `Reassigned driver for order #${selectedOrder.orderNumber}. Previous driver: ${selectedOrder.riderName || 'None'}. Reason: ${reassignReason}`,
         oldValue: { riderId: selectedOrder.riderId, riderName: selectedOrder.riderName },
-        newValue: { riderId: null }
+        newValue: { riderId: null, status: 'Placed Order' }
       });
 
-      showSuccess(`Rider removed from Order #${selectedOrder.orderNumber}. Order reset to searching.`);
+      showSuccess(`Driver removed from Order #${selectedOrder.orderNumber}. Order reset to Placed Order.`);
       setReassignModalOpen(false);
     } catch (err: any) {
       showError(err);
@@ -699,18 +786,20 @@ export const LiveOrders: React.FC = () => {
   const handleExportCsv = () => {
     const rows = filteredOrders.map((o) => ({
       OrderNumber: o.orderNumber,
-      Fulfillment: o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
+      Fulfillment: o.serviceType === 'taxi' ? 'Taxi Ride' : o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
       ScheduledFor: o.scheduledFor ? formatTimestamp(o.scheduledFor) : '',
       Service: o.serviceType,
+      VehicleType: o.vehicleType || o.riderVehicle?.vehicleType || '',
       Status: o.status,
       Customer: o.customerName,
       CustomerPhone: o.customerPhone || '',
       Merchant: o.merchantName || '',
-      Rider: o.isPickup ? 'No rider (Pick Up)' : o.riderName || 'Unassigned',
+      Driver: o.isPickup ? 'No driver (Pick Up)' : o.riderName || 'Unassigned',
+      DriverPhone: o.riderPhone || '',
       Tip: o.fees?.tip || 0,
       TotalFee: o.fees?.total || 0,
       Subtotal: o.fees?.subtotal || 0,
-      DeliveryFee: o.fees?.deliveryFee || 0,
+      DeliveryOrRideFee: o.fees?.deliveryFee || 0,
       PaymentMethod: o.paymentMethod || 'cod',
       PaymentStatus:
         o.paymentStatus ||
@@ -742,6 +831,13 @@ export const LiveOrders: React.FC = () => {
       case 'Preparing':
       case 'Ready':
         return 'bg-purple-100 text-purple-800 dark:bg-purple-950/60 dark:text-purple-300 border-purple-300';
+      case 'On trip':
+        return 'bg-cyan-100 text-cyan-800 dark:bg-cyan-950/60 dark:text-cyan-300 border-cyan-300';
+      case 'Driver arrived':
+      case 'Arrived at sender':
+      case 'Arrived at vendor':
+      case 'Arrived at recipient':
+        return 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border-amber-300';
       default:
         return 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border-amber-300';
     }
@@ -756,7 +852,7 @@ export const LiveOrders: React.FC = () => {
             Live Orders Management
           </h1>
           <p className="text-sm text-gray-500 dark:text-zinc-400 mt-0.5">
-            Realtime monitoring, customer/rider coordination, and exception handling.
+            Realtime monitoring, customer/driver dispatch coordination, Taxi rides, and exception handling.
           </p>
         </div>
 
@@ -860,7 +956,7 @@ export const LiveOrders: React.FC = () => {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search order #, customer, merchant, phone..."
+              placeholder="Search order #, customer, merchant/stop, phone..."
               className="w-full pl-9 pr-4 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
             />
           </div>
@@ -884,14 +980,15 @@ export const LiveOrders: React.FC = () => {
             <select
               value={serviceFilter}
               onChange={(e) => setServiceFilter(e.target.value)}
-              className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+              className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400 font-semibold"
             >
               <option value="all">All Services</option>
+              <option value="taxi">Taxi Service</option>
               <option value="food">Food Delivery</option>
               <option value="convenience">Convenience / Mart</option>
               <option value="parcel">Parcel Express</option>
               <option value="pabili">Pabili Service</option>
-              <option value="request_rider">Request Rider</option>
+              <option value="request_rider">Request Driver</option>
             </select>
           </div>
 
@@ -952,8 +1049,8 @@ export const LiveOrders: React.FC = () => {
                   <th className="px-4 py-3.5">Service</th>
                   <th className="px-4 py-3.5">Status</th>
                   <th className="px-4 py-3.5">Customer</th>
-                  <th className="px-4 py-3.5">Merchant / Pickup</th>
-                  <th className="px-4 py-3.5">Rider</th>
+                  <th className="px-4 py-3.5">Pickup / Start</th>
+                  <th className="px-4 py-3.5">Driver</th>
                   <th className="px-4 py-3.5">Payment</th>
                   <th className="px-4 py-3.5">Tip</th>
                   <th className="px-4 py-3.5">Total Amount</th>
@@ -982,9 +1079,7 @@ export const LiveOrders: React.FC = () => {
                         <FulfillmentChip order={order} />
                       </td>
                       <td className="px-4 py-3">
-                        <span className="capitalize px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
-                          {order.serviceType}
-                        </span>
+                        <ServiceChips order={order} />
                       </td>
                       <td className="px-4 py-3">
                         <span
@@ -1005,7 +1100,9 @@ export const LiveOrders: React.FC = () => {
                       </td>
                       <td className="px-4 py-3">
                         <div className="font-semibold text-gray-900 dark:text-white">
-                          {order.merchantName || order.pickup?.label || 'Direct Pickup'}
+                          {order.serviceType === 'taxi'
+                            ? (order.pickup?.address || 'Pickup Pin')
+                            : (order.merchantName || order.pickup?.label || 'Direct Pickup')}
                         </div>
                         <div className="text-[10px] text-gray-400 truncate max-w-[150px]">
                           {order.pickup?.address || '—'}
@@ -1014,11 +1111,11 @@ export const LiveOrders: React.FC = () => {
                       <td className="px-4 py-3">
                         {order.isPickup || order.fulfillmentType === 'pickup' ? (
                           <span className="text-gray-400 dark:text-zinc-500 text-[11px] font-medium italic">
-                            No rider (Pick Up)
+                            No driver (Pick Up)
                           </span>
                         ) : order.riderName ? (
                           <div className="flex items-center gap-1.5 font-semibold text-gray-900 dark:text-white">
-                            <Bike className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                            <Car className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                             <span>{order.riderName}</span>
                           </div>
                         ) : (
@@ -1066,14 +1163,17 @@ export const LiveOrders: React.FC = () => {
       ) : (
         /* Kanban View */
         <div className="flex gap-4 overflow-x-auto pb-4 pt-1">
-          {['Placed Order', 'Preparing', 'Ready', 'Rider is on the way', 'Delivered / Completed', 'Cancelled'].map(
+          {['Placed Order', 'Preparing', 'Ready', 'Driver is on the way / Trip', 'Delivered / Completed', 'Cancelled'].map(
             (colStatus) => {
               const colOrders = filteredOrders.filter((o) => {
                 if (colStatus === 'Delivered / Completed') {
                   return o.status === 'Delivered' || o.status === 'Completed';
                 }
-                if (colStatus === 'Rider is on the way') {
+                if (colStatus === 'Driver is on the way / Trip') {
                   return (
+                    o.status === 'Driver is on the way' ||
+                    o.status === 'Driver arrived' ||
+                    o.status === 'On trip' ||
                     o.status === 'Rider is on the way' ||
                     o.status.startsWith('Rider is on the way') ||
                     o.status.startsWith('Arrived')
@@ -1107,10 +1207,10 @@ export const LiveOrders: React.FC = () => {
                           <span className="font-mono font-bold text-xs text-gray-900 dark:text-white">
                             #{ord.orderNumber}
                           </span>
-                          <FulfillmentChip order={ord} />
+                          <ServiceChips order={ord} />
                         </div>
                         <p className="text-xs font-semibold text-gray-900 dark:text-zinc-100">
-                          {ord.merchantName || ord.serviceType}
+                          {ord.serviceType === 'taxi' ? `Taxi: ${ord.pickup?.address || 'Pickup'}` : ord.merchantName || ord.serviceType}
                         </p>
                         <p className="text-[11px] text-gray-500 dark:text-zinc-400 mb-2">
                           Customer: {ord.customerName}
@@ -1130,10 +1230,10 @@ export const LiveOrders: React.FC = () => {
                             </div>
                           </div>
                           <div className="text-[10px] text-gray-500 flex justify-between">
-                            <span>Rider:</span>
+                            <span>Driver:</span>
                             <span className="font-semibold text-gray-700 dark:text-zinc-300 truncate max-w-[120px]">
                               {ord.isPickup || ord.fulfillmentType === 'pickup'
-                                ? 'No rider (Pick Up)'
+                                ? 'No driver (Pick Up)'
                                 : ord.riderName || 'Unassigned'}
                             </span>
                           </div>
@@ -1148,55 +1248,48 @@ export const LiveOrders: React.FC = () => {
         </div>
       )}
 
-      {/* Order Detail Modal / Drawer */}
+      {/* Selected Order Detail Modal / Drawer */}
       {selectedOrder && (
-        <div className="fixed inset-0 z-50 overflow-hidden flex justify-end bg-black/60 backdrop-blur-xs">
-          <div
-            className="w-full max-w-2xl bg-white dark:bg-zinc-950 border-l border-gray-200 dark:border-zinc-800 shadow-2xl flex flex-col h-full animate-in slide-in-from-right duration-200"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Drawer Header */}
-            <div className="p-5 border-b border-gray-200 dark:border-zinc-800 flex items-center justify-between">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="font-mono font-black text-xl text-gray-900 dark:text-white">
-                    Order #{selectedOrder.orderNumber}
-                  </h3>
-                  <span className="capitalize px-2 py-0.5 rounded-md text-xs font-bold bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300">
-                    {selectedOrder.serviceType}
-                  </span>
-                  <FulfillmentChip order={selectedOrder} />
-                </div>
-                <p className="text-xs text-gray-400 mt-0.5">
-                  Placed on {formatTimestamp(selectedOrder.createdAt)}
-                </p>
+        <div className="fixed inset-0 z-50 flex items-center justify-end bg-black/60 backdrop-blur-xs">
+          <div className="h-full w-full max-w-2xl bg-white dark:bg-zinc-950 border-l border-gray-200 dark:border-zinc-800 shadow-2xl flex flex-col animate-in slide-in-from-right duration-200 overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-4 sm:p-5 border-b border-gray-200 dark:border-zinc-800 flex items-center justify-between bg-white dark:bg-zinc-950">
+              <div className="flex items-center gap-3">
+                <span className="font-mono font-black text-lg text-gray-900 dark:text-white">
+                  #{selectedOrder.orderNumber}
+                </span>
+                <ServiceChips order={selectedOrder} />
+                <span
+                  className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold border ${getStatusBadge(
+                    selectedOrder.status
+                  )}`}
+                >
+                  {selectedOrder.status}
+                </span>
               </div>
 
               <button
                 onClick={() => setSelectedOrder(null)}
-                className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 rounded-xl"
+                className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 rounded-lg"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Drawer Body */}
-            <div className="flex-1 overflow-y-auto p-5 space-y-6">
-              {/* Status Banner */}
-              <div
-                className={`p-4 rounded-2xl border flex items-center justify-between ${getStatusBadge(
-                  selectedOrder.status
-                )}`}
-              >
+            {/* Modal Scrollable Body */}
+            <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-6">
+              {/* Order Status & Actions Bar */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/80 dark:border-amber-900/50">
                 <div>
-                  <span className="text-xs uppercase font-extrabold tracking-wider">
-                    Current Status
+                  <span className="text-[10px] uppercase font-bold text-amber-700 dark:text-amber-400">
+                    Current Dispatch Status
                   </span>
-                  <div className="text-lg font-black">{selectedOrder.status}</div>
+                  <div className="font-bold text-sm text-gray-900 dark:text-white">
+                    {selectedOrder.status}
+                  </div>
                   {selectedOrder.cancelReason && (
-                    <p className="text-xs mt-1 text-red-700 dark:text-red-300">
-                      <strong>Reason:</strong> {selectedOrder.cancelReason} (Fault:{' '}
-                      {selectedOrder.cancelFault || 'unspecified'})
+                    <p className="text-xs text-red-600 dark:text-red-400 mt-1">
+                      Reason: {selectedOrder.cancelReason}
                     </p>
                   )}
                 </div>
@@ -1216,9 +1309,9 @@ export const LiveOrders: React.FC = () => {
                       {!selectedOrder.isPickup && selectedOrder.fulfillmentType !== 'pickup' && (
                         <button
                           onClick={() => setReassignModalOpen(true)}
-                          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white/90 text-gray-800 text-xs font-bold hover:bg-white shadow-xs transition-colors"
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white/90 text-gray-800 text-xs font-bold hover:bg-white shadow-xs transition-colors border border-gray-300 dark:border-zinc-700"
                         >
-                          <RotateCcw className="w-3.5 h-3.5" /> Reassign
+                          <RotateCcw className="w-3.5 h-3.5" /> Reassign Driver
                         </button>
                       )}
                       <button
@@ -1237,7 +1330,7 @@ export const LiveOrders: React.FC = () => {
                   )}
               </div>
 
-              {/* Stakeholders Contact Cards: Customer, Merchant, Rider */}
+              {/* Stakeholders Contact Cards: Customer, Merchant/Service, Driver */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 {/* Customer */}
                 <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800 text-xs space-y-1">
@@ -1259,13 +1352,16 @@ export const LiveOrders: React.FC = () => {
                   )}
                 </div>
 
-                {/* Merchant */}
+                {/* Merchant or Service */}
                 <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800 text-xs space-y-1">
                   <div className="flex items-center gap-1.5 text-gray-400 font-bold uppercase text-[10px]">
-                    <Store className="w-3.5 h-3.5 text-amber-500" /> Merchant
+                    <Store className="w-3.5 h-3.5 text-amber-500" />
+                    <span>{selectedOrder.serviceType === 'taxi' ? 'Taxi Service' : 'Merchant'}</span>
                   </div>
                   <div className="font-bold text-gray-900 dark:text-white truncate">
-                    {selectedOrder.merchantName || 'Direct Service'}
+                    {selectedOrder.serviceType === 'taxi'
+                      ? 'Passenger Ride-Hailing'
+                      : selectedOrder.merchantName || 'Direct Service'}
                   </div>
                   {selectedOrder.merchantPhone ? (
                     <a
@@ -1275,19 +1371,21 @@ export const LiveOrders: React.FC = () => {
                       <Phone className="w-3 h-3" /> {selectedOrder.merchantPhone}
                     </a>
                   ) : (
-                    <div className="text-gray-400 text-[11px]">No phone listed</div>
+                    <div className="text-gray-400 text-[11px]">
+                      {selectedOrder.serviceType === 'taxi' ? 'Point-to-point transit' : 'No phone listed'}
+                    </div>
                   )}
                 </div>
 
-                {/* Rider */}
+                {/* Driver & Vehicle */}
                 <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800 text-xs space-y-1">
                   <div className="flex items-center gap-1.5 text-gray-400 font-bold uppercase text-[10px]">
-                    <Bike className="w-3.5 h-3.5 text-emerald-500" /> Assigned Rider
+                    <Car className="w-3.5 h-3.5 text-emerald-500" /> Assigned Driver
                   </div>
                   {selectedOrder.isPickup || selectedOrder.fulfillmentType === 'pickup' ? (
                     <div>
                       <div className="font-bold text-gray-900 dark:text-white">Store Pick Up</div>
-                      <div className="text-gray-400 text-[11px]">No rider needed (Customer pickup)</div>
+                      <div className="text-gray-400 text-[11px]">No driver needed (Customer pickup)</div>
                     </div>
                   ) : (
                     <>
@@ -1302,106 +1400,158 @@ export const LiveOrders: React.FC = () => {
                           <Phone className="w-3 h-3" /> {selectedOrder.riderPhone}
                         </a>
                       ) : (
-                        <div className="text-amber-600 text-[11px]">Searching for rider...</div>
+                        <div className="text-amber-600 text-[11px]">Searching for driver...</div>
+                      )}
+                      {(selectedOrder.riderVehicle || selectedOrder.vehicleType) && (
+                        <div className="text-[10px] text-gray-500 dark:text-zinc-400 pt-0.5">
+                          Vehicle: <strong className="text-gray-800 dark:text-zinc-200">
+                            {VEHICLE_LABELS[(selectedOrder.vehicleType || selectedOrder.riderVehicle?.vehicleType) as VehicleType] || 'Motorcycle'}
+                          </strong>
+                          {selectedOrder.riderVehicle?.plate && ` • ${selectedOrder.riderVehicle.plate}`}
+                        </div>
                       )}
                     </>
                   )}
                 </div>
               </div>
 
-              {/* Mini Map of Pickup & Dropoff */}
+              {/* Route Map (Pickup = Green 1, Drop-off / Next Stops = Red 2, 3, 4...) */}
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400 mb-2">
-                  Delivery Route Map
+                  Trip Route Map
                 </label>
                 <div
                   ref={miniMapContainerRef}
-                  className="h-56 w-full rounded-2xl border border-gray-200 dark:border-zinc-800 overflow-hidden shadow-xs"
+                  className="h-60 w-full rounded-2xl border border-gray-200 dark:border-zinc-800 overflow-hidden shadow-xs"
                 />
-                <div className="grid grid-cols-2 gap-3 mt-2 text-xs">
-                  <div className="p-2.5 rounded-xl bg-gray-50 dark:bg-zinc-900">
-                    <span className="text-[10px] uppercase font-bold text-amber-600">Pickup</span>
-                    <p className="text-gray-800 dark:text-zinc-200 font-medium">
-                      {selectedOrder.pickup?.address || 'Store location'}
-                    </p>
-                  </div>
-                  <div className="p-2.5 rounded-xl bg-gray-50 dark:bg-zinc-900">
-                    <span className="text-[10px] uppercase font-bold text-blue-600">Drop-Off</span>
-                    <p className="text-gray-800 dark:text-zinc-200 font-medium">
-                      {selectedOrder.dropoff?.address || 'Customer destination'}
-                    </p>
-                  </div>
-                </div>
-              </div>
 
-              {/* Items & Parcel Details */}
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400 mb-2">
-                  Order Items & Goods
-                </label>
-                <div className="border border-gray-200 dark:border-zinc-800 rounded-xl overflow-hidden divide-y divide-gray-100 dark:divide-zinc-800">
-                  {(selectedOrder.items || []).map((it, idx) => (
-                    <div
-                      key={idx}
-                      className="p-3 flex items-center justify-between text-xs bg-white dark:bg-zinc-900"
-                    >
-                      <div>
-                        <span className="font-bold text-gray-900 dark:text-white">
-                          {it.qty}x {it.name}
-                        </span>
-                        {it.notes && (
-                          <p className="text-[11px] text-gray-400 italic mt-0.5">Note: {it.notes}</p>
-                        )}
-                      </div>
-                      <span className="font-bold text-gray-900 dark:text-white">
-                        ₱{(Number(it.price || 0) * Number(it.qty || 1)).toFixed(2)}
+                {/* Route stops list */}
+                <div className="mt-3 space-y-2">
+                  {/* Stop 1: Pickup */}
+                  <div className="p-3 rounded-xl bg-gray-50 dark:bg-zinc-900 flex items-start gap-3 border border-gray-200/60 dark:border-zinc-800">
+                    <div className="w-6 h-6 rounded-full bg-emerald-600 text-white font-black text-xs flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
+                      1
+                    </div>
+                    <div className="flex-1 text-xs">
+                      <span className="text-[10px] uppercase font-bold text-emerald-600 block">
+                        Pickup Location
                       </span>
-                    </div>
-                  ))}
-
-                  {/* Parcel Details if parcel */}
-                  {selectedOrder.parcel && (
-                    <div className="p-3 bg-purple-50/50 dark:bg-purple-950/20 text-xs space-y-1">
-                      <div className="font-bold text-purple-900 dark:text-purple-300">
-                        Parcel Specifications:
-                      </div>
-                      <p className="text-purple-800 dark:text-purple-400">
-                        Item: {selectedOrder.parcel.itemType || 'Package'} • Weight:{' '}
-                        {selectedOrder.parcel.weightKg || 1}kg
-                      </p>
-                      <p className="text-purple-700 dark:text-purple-400">
-                        Recipient: {selectedOrder.parcel.recipientName} (
-                        {selectedOrder.parcel.recipientPhone})
+                      <p className="text-gray-900 dark:text-white font-medium">
+                        {selectedOrder.pickup?.address || 'Pickup Point'}
                       </p>
                     </div>
-                  )}
+                  </div>
 
-                  {/* Pabili Details if pabili */}
-                  {selectedOrder.pabili && (
-                    <div className="p-3 bg-pink-50/50 dark:bg-pink-950/20 text-xs space-y-1">
-                      <div className="font-bold text-pink-900 dark:text-pink-300">
-                        Pabili Shopping List:
+                  {/* Stop 2: Dropoff (or first stop) */}
+                  {selectedOrder.stops && selectedOrder.stops.length > 0 ? (
+                    selectedOrder.stops.map((st, idx) => (
+                      <div
+                        key={idx}
+                        className="p-3 rounded-xl bg-gray-50 dark:bg-zinc-900 flex items-start gap-3 border border-gray-200/60 dark:border-zinc-800"
+                      >
+                        <div className="w-6 h-6 rounded-full bg-red-600 text-white font-black text-xs flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
+                          {idx + 2}
+                        </div>
+                        <div className="flex-1 text-xs">
+                          <span className="text-[10px] uppercase font-bold text-red-600 block">
+                            {idx === selectedOrder.stops!.length - 1 ? 'Final Destination' : `Stop ${idx + 2}`}
+                          </span>
+                          <p className="text-gray-900 dark:text-white font-medium">
+                            {st.address || `Stop ${idx + 2}`}
+                          </p>
+                        </div>
                       </div>
-                      <p className="text-pink-800 dark:text-pink-400">
-                        Store: {selectedOrder.pabili.storeName || 'Any store'} • Estimated Budget: ₱
-                        {selectedOrder.pabili.estimatedCost || 0}
-                      </p>
-                      <p className="text-pink-700 dark:text-pink-400 whitespace-pre-wrap">
-                        {selectedOrder.pabili.shoppingList}
-                      </p>
+                    ))
+                  ) : (
+                    <div className="p-3 rounded-xl bg-gray-50 dark:bg-zinc-900 flex items-start gap-3 border border-gray-200/60 dark:border-zinc-800">
+                      <div className="w-6 h-6 rounded-full bg-red-600 text-white font-black text-xs flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
+                        2
+                      </div>
+                      <div className="flex-1 text-xs">
+                        <span className="text-[10px] uppercase font-bold text-red-600 block">
+                          Drop-Off Destination
+                        </span>
+                        <p className="text-gray-900 dark:text-white font-medium">
+                          {selectedOrder.dropoff?.address || 'Customer destination'}
+                        </p>
+                      </div>
                     </div>
                   )}
                 </div>
               </div>
 
-              {/* Financials & COD Breakdown */}
-              <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 space-y-2 text-xs">
-                <div className="flex justify-between text-gray-500">
-                  <span>Subtotal Goods</span>
-                  <span>₱{Number(selectedOrder.fees?.subtotal || 0).toFixed(2)}</span>
+              {/* Items / Goods / Specifications */}
+              {selectedOrder.serviceType !== 'taxi' && (
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-zinc-400 mb-2">
+                    Order Items & Goods
+                  </label>
+                  <div className="border border-gray-200 dark:border-zinc-800 rounded-xl overflow-hidden divide-y divide-gray-100 dark:divide-zinc-800">
+                    {(selectedOrder.items || []).map((it, idx) => (
+                      <div
+                        key={idx}
+                        className="p-3 flex items-center justify-between text-xs bg-white dark:bg-zinc-900"
+                      >
+                        <div>
+                          <span className="font-bold text-gray-900 dark:text-white">
+                            {it.qty}x {it.name}
+                          </span>
+                          {it.notes && (
+                            <p className="text-[11px] text-gray-400 italic mt-0.5">Note: {it.notes}</p>
+                          )}
+                        </div>
+                        <span className="font-bold text-gray-900 dark:text-white">
+                          ₱{(Number(it.price || 0) * Number(it.qty || 1)).toFixed(2)}
+                        </span>
+                      </div>
+                    ))}
+
+                    {/* Parcel Details */}
+                    {selectedOrder.parcel && (
+                      <div className="p-3 bg-purple-50/50 dark:bg-purple-950/20 text-xs space-y-1">
+                        <div className="font-bold text-purple-900 dark:text-purple-300">
+                          Parcel Specifications:
+                        </div>
+                        <p className="text-purple-800 dark:text-purple-400">
+                          Item: {selectedOrder.parcel.itemType || 'Package'} • Weight:{' '}
+                          {selectedOrder.parcel.weightKg || 1}kg
+                        </p>
+                        <p className="text-purple-700 dark:text-purple-400">
+                          Recipient: {selectedOrder.parcel.recipientName} (
+                          {selectedOrder.parcel.recipientPhone})
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Pabili Details */}
+                    {selectedOrder.pabili && (
+                      <div className="p-3 bg-pink-50/50 dark:bg-pink-950/20 text-xs space-y-1">
+                        <div className="font-bold text-pink-900 dark:text-pink-300">
+                          Pabili Shopping List:
+                        </div>
+                        <p className="text-pink-800 dark:text-pink-400">
+                          Store: {selectedOrder.pabili.storeName || 'Any store'} • Estimated Budget: ₱
+                          {selectedOrder.pabili.estimatedCost || 0}
+                        </p>
+                        <p className="text-pink-700 dark:text-pink-400 whitespace-pre-wrap">
+                          {selectedOrder.pabili.shoppingList}
+                        </p>
+                      </div>
+                    )}
+                  </div>
                 </div>
+              )}
+
+              {/* Financials & Payment Breakdown */}
+              <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 space-y-2 text-xs">
+                {selectedOrder.serviceType !== 'taxi' && (
+                  <div className="flex justify-between text-gray-500">
+                    <span>Subtotal Goods</span>
+                    <span>₱{Number(selectedOrder.fees?.subtotal || 0).toFixed(2)}</span>
+                  </div>
+                )}
                 <div className="flex justify-between text-gray-500">
-                  <span>Delivery Fee</span>
+                  <span>{selectedOrder.serviceType === 'taxi' ? 'Ride Distance Fare' : 'Delivery Fee'}</span>
                   <span>₱{Number(selectedOrder.fees?.deliveryFee || 0).toFixed(2)}</span>
                 </div>
                 <div className="flex justify-between text-gray-500">
@@ -1416,7 +1566,7 @@ export const LiveOrders: React.FC = () => {
                 )}
                 {Number(selectedOrder.fees?.tip || 0) > 0 && (
                   <div className="flex justify-between text-emerald-600 font-semibold">
-                    <span>Rider Tip (Direct to Rider)</span>
+                    <span>Driver Tip (Direct to Driver)</span>
                     <span>+₱{Number(selectedOrder.fees?.tip).toFixed(2)}</span>
                   </div>
                 )}
@@ -1464,7 +1614,7 @@ export const LiveOrders: React.FC = () => {
                   {(selectedOrder.cashToCollect !== undefined ||
                     selectedOrder.codAmount !== undefined) && (
                     <div className="flex items-center justify-between">
-                      <span className="text-gray-500">Cash to Collect (Rider):</span>
+                      <span className="text-gray-500">Cash to Collect:</span>
                       <span className="font-extrabold text-amber-600">
                         ₱{Number(selectedOrder.cashToCollect ?? selectedOrder.codAmount ?? 0).toFixed(2)}
                       </span>
@@ -1551,7 +1701,7 @@ export const LiveOrders: React.FC = () => {
                 >
                   <option value="customer">Customer Fault</option>
                   <option value="merchant">Merchant Fault (Out of stock, closed)</option>
-                  <option value="rider">Rider Fault (Vehicle breakdown, unresponsive)</option>
+                  <option value="rider">Driver Fault (Vehicle breakdown, unresponsive)</option>
                   <option value="platform">Platform System Error</option>
                 </select>
               </div>
@@ -1567,8 +1717,8 @@ export const LiveOrders: React.FC = () => {
                 >
                   <option value="Customer requested cancellation">Customer requested cancellation</option>
                   <option value="Merchant unable to fulfill items">Merchant unable to fulfill items</option>
-                  <option value="No riders available in delivery zone">No riders available in delivery zone</option>
-                  <option value="Customer unreachable at delivery address">Customer unreachable at delivery address</option>
+                  <option value="No drivers available in delivery zone">No drivers available in area</option>
+                  <option value="Customer unreachable at address">Customer unreachable at address</option>
                   <option value="Suspected fraudulent order">Suspected fraudulent order</option>
                   <option value="Other">Other / Custom Reason</option>
                 </select>
@@ -1639,17 +1789,17 @@ export const LiveOrders: React.FC = () => {
         </div>
       )}
 
-      {/* Reassign Rider Modal */}
+      {/* Reassign Driver Modal */}
       {reassignModalOpen && selectedOrder && (
         <ConfirmationModal
           isOpen={reassignModalOpen}
           onClose={() => setReassignModalOpen(false)}
-          onConfirm={handleReassignRider}
-          title={`Reassign Rider for #${selectedOrder.orderNumber}`}
-          message={`This will disconnect ${selectedOrder.riderName || 'the assigned rider'} from this order and return it to the open dispatcher queue for nearest riders.`}
+          onConfirm={handleReassignDriver}
+          title={`Reassign Driver for #${selectedOrder.orderNumber}`}
+          message={`This will clear ${selectedOrder.riderName || 'the assigned driver'} and vehicle details from this order and return it to 'Placed Order' for dispatch.`}
           confirmLabel="Unassign & Dispatch Again"
           reasonRequired={true}
-          reasonPlaceholder="Specify reason for rider reassignment (e.g., rider idle, breakdown, wrong route)..."
+          reasonPlaceholder="Specify reason for driver reassignment (e.g., driver idle, vehicle breakdown, wrong route)..."
           isDestructive={false}
         />
       )}

@@ -249,7 +249,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                         {totalPendingAppsCount} Application(s) Pending Review
                       </p>
                       <p className="text-red-700/80 dark:text-red-400/80 mt-0.5">
-                        New merchant and rider applications waiting for approval.
+                        New merchant and driver applications waiting for approval.
                       </p>
                     </div>
                   </div>

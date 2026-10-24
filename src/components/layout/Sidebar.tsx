@@ -7,6 +7,7 @@ import {
   Users,
   Store,
   Bike,
+  Car,
   FileCheck,
   Coins,
   Ticket,
@@ -55,7 +56,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badge: pendingChangeRequestsCount > 0 ? pendingChangeRequestsCount : undefined,
       badgeColor: 'bg-amber-500'
     },
-    { name: 'Riders', path: '/riders', icon: Bike },
+    { name: 'Drivers', path: '/riders', icon: Car },
     {
       name: 'Applications',
       path: '/applications',
@@ -63,7 +64,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badge: totalPendingAppsCount > 0 ? totalPendingAppsCount : undefined,
       badgeColor: 'bg-red-500'
     },
-    { name: 'Delivery Rates', path: '/rates', icon: Coins },
+    { name: 'Rates & Fares', path: '/rates', icon: Coins },
     {
       name: 'Banners & Promos',
       path: '/banners',
@@ -188,7 +189,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span>Realtime Live Platform</span>
             </div>
             <p className="text-[11px] text-amber-800/80 dark:text-amber-400/80 leading-snug">
-              Connected to Delivio Customer, Partner & Rider apps.
+              Connected to Delivio Customer, Partner & Driver apps.
             </p>
           </div>
         )}

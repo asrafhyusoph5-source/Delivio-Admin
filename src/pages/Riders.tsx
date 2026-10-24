@@ -24,8 +24,17 @@ import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
 import type { Rider, Order, OrderServiceType, EditHistoryEntry, TierEvent, UserProfile, WalletTransaction } from '../types';
 import {
+  VehicleType,
+  VEHICLE_TYPES,
+  VEHICLE_LABELS,
+  SERVICES_BY_VEHICLE,
+  ALL_SERVICES
+} from '../constants';
+import {
   Search,
   Bike,
+  Car,
+  Bus,
   Phone,
   Mail,
   Shield,
@@ -51,14 +60,6 @@ import {
 } from 'lucide-react';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
-
-const ALL_SERVICES: OrderServiceType[] = [
-  'food',
-  'convenience',
-  'parcel',
-  'pabili',
-  'request_rider'
-];
 
 export const Riders: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -90,10 +91,14 @@ export const Riders: React.FC = () => {
   const [photoUrl, setPhotoUrl] = useState('');
   const [riderCode, setRiderCode] = useState('');
   const [cityId, setCityId] = useState('');
-  const [vehicleType, setVehicleType] = useState('Motorcycle');
+  const [vehicleType, setVehicleType] = useState<VehicleType>('motorcycle');
   const [vehicleModel, setVehicleModel] = useState('');
+  const [vehicleColor, setVehicleColor] = useState('');
+  const [seats, setSeats] = useState<number>(1);
   const [plate, setPlate] = useState('');
   const [savingDetails, setSavingDetails] = useState(false);
+  const [vehicleConfirmModalOpen, setVehicleConfirmModalOpen] = useState(false);
+  const [pendingVehicleType, setPendingVehicleType] = useState<VehicleType | null>(null);
 
   // Orders & Earnings
   const [riderOrders, setRiderOrders] = useState<Order[]>([]);
@@ -148,20 +153,34 @@ export const Riders: React.FC = () => {
       const list: Rider[] = [];
       snap.forEach((d) => {
         const dt = d.data();
+        const rawType = (dt.vehicleType || 'motorcycle').toLowerCase();
+        const vType: VehicleType =
+          rawType === 'tricycle'
+            ? 'tricycle'
+            : rawType === 'car4' || rawType === 'car' || rawType === '4-seater car'
+            ? 'car4'
+            : rawType === 'car8' || rawType === 'van' || rawType === '8-seater car'
+            ? 'car8'
+            : 'motorcycle';
+
+        const defaultSeats = VEHICLE_TYPES.find((v) => v.id === vType)?.defaultSeats || 1;
+
         list.push({
           id: d.id,
-          name: dt.name || 'Rider',
+          name: dt.name || 'Driver',
           email: dt.email || '',
           phone: dt.phone || '',
           photoUrl: dt.photoUrl || '',
           riderCode: dt.riderCode || d.id.substring(0, 8),
           status: dt.status || 'active',
           cityId: dt.cityId,
-          vehicleType: dt.vehicleType || 'Motorcycle',
+          vehicleType: vType,
           vehicleModel: dt.vehicleModel || '',
+          vehicleColor: dt.vehicleColor || '',
+          seats: Number(dt.seats) || defaultSeats,
           plate: dt.plate || '',
-          allowedServices: dt.allowedServices || ALL_SERVICES,
-          activeServices: dt.activeServices || ALL_SERVICES,
+          allowedServices: dt.allowedServices || SERVICES_BY_VEHICLE[vType],
+          activeServices: dt.activeServices || SERVICES_BY_VEHICLE[vType],
           isOnline: Boolean(dt.isOnline),
           location: dt.location,
           currentOrderId: dt.currentOrderId,
@@ -193,14 +212,18 @@ export const Riders: React.FC = () => {
   // Sync rider details when selected
   useEffect(() => {
     if (!selectedRider) return;
+    const vType = (selectedRider.vehicleType as VehicleType) || 'motorcycle';
+    const defaultSeats = VEHICLE_TYPES.find((v) => v.id === vType)?.defaultSeats || 1;
     setName(selectedRider.name || '');
     setPhone(selectedRider.phone || '');
     setEmail(selectedRider.email || '');
     setPhotoUrl(selectedRider.photoUrl || '');
     setRiderCode(selectedRider.riderCode || '');
     setCityId(selectedRider.cityId || '');
-    setVehicleType(selectedRider.vehicleType || 'Motorcycle');
+    setVehicleType(vType);
     setVehicleModel(selectedRider.vehicleModel || '');
+    setVehicleColor(selectedRider.vehicleColor || '');
+    setSeats(Number(selectedRider.seats) || defaultSeats);
     setPlate(selectedRider.plate || '');
 
     fetchRiderSubData(selectedRider.id);
@@ -324,13 +347,19 @@ export const Riders: React.FC = () => {
       if (onlineFilter === 'online' && !r.isOnline) return false;
       if (onlineFilter === 'offline' && r.isOnline) return false;
       if (statusFilter !== 'all' && r.status !== statusFilter) return false;
-      if (vehicleFilter !== 'all' && r.vehicleType !== vehicleFilter) return false;
+      if (vehicleFilter !== 'all') {
+        const vType = (r.vehicleType || 'motorcycle').toLowerCase();
+        if (vType !== vehicleFilter.toLowerCase()) return false;
+      }
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const n = (r.name || '').toLowerCase();
         const p = (r.phone || '').toLowerCase();
         const c = (r.riderCode || '').toLowerCase();
-        if (!n.includes(q) && !p.includes(q) && !c.includes(q)) return false;
+        const pl = (r.plate || '').toLowerCase();
+        const m = (r.vehicleModel || '').toLowerCase();
+        if (!n.includes(q) && !p.includes(q) && !c.includes(q) && !pl.includes(q) && !m.includes(q))
+          return false;
       }
       return true;
     });
@@ -352,6 +381,76 @@ export const Riders: React.FC = () => {
       .slice(0, 15);
   }, [allCustomers, customerSearchQuery]);
 
+  // Handle vehicle type change request
+  const handleSelectVehicleType = (newType: VehicleType) => {
+    if (newType === vehicleType) return;
+    setPendingVehicleType(newType);
+    setVehicleConfirmModalOpen(true);
+  };
+
+  // Confirm vehicle type change and recompute services
+  const confirmChangeVehicleType = async () => {
+    if (!pendingVehicleType || !selectedRider) return;
+    const newType = pendingVehicleType;
+    const allowed = SERVICES_BY_VEHICLE[newType] || [];
+    const active = (selectedRider.activeServices || []).filter((s) => allowed.includes(s));
+    const defaultSeats = VEHICLE_TYPES.find((v) => v.id === newType)?.defaultSeats || 1;
+
+    setVehicleType(newType);
+    setSeats(defaultSeats);
+    setVehicleConfirmModalOpen(false);
+
+    try {
+      const rRef = doc(db, 'riders', selectedRider.id);
+      await updateDoc(rRef, {
+        vehicleType: newType,
+        allowedServices: allowed,
+        activeServices: active,
+        seats: defaultSeats,
+        updatedAt: Timestamp.now()
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        action: 'CHANGE_DRIVER_VEHICLE_TYPE',
+        entityType: 'rider',
+        entityId: selectedRider.id,
+        details: `Changed vehicle type to ${VEHICLE_LABELS[newType]} and recomputed allowed/active services.`
+      });
+
+      showSuccess(`Vehicle changed to ${VEHICLE_LABELS[newType]}. Services recomputed.`);
+      setSelectedRider((prev) =>
+        prev
+          ? {
+              ...prev,
+              vehicleType: newType,
+              allowedServices: allowed,
+              activeServices: active,
+              seats: defaultSeats
+            }
+          : null
+      );
+      setRiders((prev) =>
+        prev.map((r) =>
+          r.id === selectedRider.id
+            ? {
+                ...r,
+                vehicleType: newType,
+                allowedServices: allowed,
+                activeServices: active,
+                seats: defaultSeats
+              }
+            : r
+        )
+      );
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setPendingVehicleType(null);
+    }
+  };
+
   // Action: Save Details
   const handleSaveDetails = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -368,6 +467,8 @@ export const Riders: React.FC = () => {
         cityId,
         vehicleType,
         vehicleModel: vehicleModel.trim(),
+        vehicleColor: vehicleColor.trim(),
+        seats: Number(seats) || 1,
         plate: plate.trim(),
         updatedAt: Timestamp.now()
       };
@@ -376,14 +477,14 @@ export const Riders: React.FC = () => {
 
       // Track edit history
       const old = selectedRider;
-      for (const k of ['name', 'phone', 'email', 'vehicleType', 'plate'] as const) {
-        if ((old[k] as any) !== (updates[k] as any)) {
+      for (const k of ['name', 'phone', 'email', 'vehicleType', 'plate', 'vehicleModel', 'vehicleColor'] as const) {
+        if ((old[k as keyof Rider] as any) !== (updates[k as keyof typeof updates] as any)) {
           await logEditHistory({
             entityType: 'rider',
             entityId: selectedRider.id,
             field: k,
-            oldValue: old[k],
-            newValue: updates[k],
+            oldValue: (old[k as keyof Rider] as any) || '',
+            newValue: (updates[k as keyof typeof updates] as any) || '',
             editedBy: adminProfile?.uid || 'admin',
             editedByName: adminProfile?.name || 'Administrator'
           });
@@ -393,13 +494,13 @@ export const Riders: React.FC = () => {
       await logAuditEvent({
         adminId: adminProfile?.uid || 'admin',
         adminName: adminProfile?.name || 'Administrator',
-        action: 'EDIT_RIDER_DETAILS',
+        action: 'EDIT_DRIVER_DETAILS',
         entityType: 'rider',
         entityId: selectedRider.id,
-        details: `Updated rider profile for ${name}`
+        details: `Updated driver profile for ${name}`
       });
 
-      showSuccess('Rider details saved.');
+      showSuccess('Driver details saved.');
       setSelectedRider((prev) => (prev ? { ...prev, ...updates } : null));
       setRiders((prev) => prev.map((r) => (r.id === selectedRider.id ? { ...r, ...updates } : r)));
     } catch (err: any) {
@@ -409,7 +510,7 @@ export const Riders: React.FC = () => {
     }
   };
 
-  // Action: Suspend / Restore Rider
+  // Action: Suspend / Restore Driver
   const handleToggleSuspend = async () => {
     if (!selectedRider) return;
     try {
@@ -428,7 +529,7 @@ export const Riders: React.FC = () => {
 
       await batch.commit();
 
-      showSuccess(`Rider marked as ${newStatus}.`);
+      showSuccess(`Driver marked as ${newStatus}.`);
       setSelectedRider((prev) =>
         prev ? { ...prev, status: newStatus, isOnline: isSuspended ? prev.isOnline : false } : null
       );
@@ -452,12 +553,11 @@ export const Riders: React.FC = () => {
       let active = [...(selectedRider.activeServices || [])];
 
       if (allowed.includes(service)) {
-        // Remove service from both
+        // Turning one off removes it from allowedServices AND removes it from activeServices
         allowed = allowed.filter((s) => s !== service);
         active = active.filter((s) => s !== service);
       } else {
         allowed.push(service);
-        active.push(service);
       }
 
       const rRef = doc(db, 'riders', selectedRider.id);
@@ -467,9 +567,14 @@ export const Riders: React.FC = () => {
         updatedAt: Timestamp.now()
       });
 
-      showSuccess(`Updated enabled services for ${selectedRider.name}.`);
+      showSuccess(`Updated service status for ${selectedRider.name}.`);
       setSelectedRider((prev) =>
         prev ? { ...prev, allowedServices: allowed, activeServices: active } : null
+      );
+      setRiders((prev) =>
+        prev.map((r) =>
+          r.id === selectedRider.id ? { ...r, allowedServices: allowed, activeServices: active } : r
+        )
       );
     } catch (err: any) {
       showError(err);
@@ -998,45 +1103,95 @@ export const Riders: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl md:text-3xl font-extrabold text-gray-900 dark:text-white tracking-tight">
-            Rider Fleet Management
+            Driver Fleet Management
           </h1>
           <p className="text-sm text-gray-500 dark:text-zinc-400 mt-0.5">
-            Active fleet: <strong>{onlineCount}</strong> online out of <strong>{riders.length}</strong> registered riders.
+            Active fleet: <strong>{onlineCount}</strong> online out of <strong>{riders.length}</strong> registered drivers.
           </p>
         </div>
 
         <button
           onClick={() => {
             const rows = filteredRiders.map((r) => ({
-              RiderCode: r.riderCode,
+              DriverCode: r.riderCode,
               Name: r.name,
               Phone: r.phone,
-              Vehicle: r.vehicleType,
+              VehicleType: r.vehicleType,
+              Model: r.vehicleModel,
+              Color: r.vehicleColor,
+              Seats: r.seats,
               Plate: r.plate,
               Status: r.status,
               IsOnline: r.isOnline ? 'Online' : 'Offline',
               WalletBalance: r.walletBalance,
               Coins: r.coins
             }));
-            exportToCsv(`delivio_riders_${new Date().toISOString().slice(0, 10)}`, rows);
+            exportToCsv(`delivio_drivers_${new Date().toISOString().slice(0, 10)}`, rows);
           }}
           className="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-gray-700 dark:text-zinc-300 hover:bg-gray-50 text-xs font-bold shadow-xs self-start sm:self-auto"
         >
           <Download className="w-4 h-4" />
-          <span>Export Riders</span>
+          <span>Export Drivers</span>
         </button>
+      </div>
+
+      {/* Vehicle-Type Filter with Online / Total Count Chips */}
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          onClick={() => setVehicleFilter('all')}
+          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+            vehicleFilter === 'all'
+              ? 'bg-amber-400 text-black shadow-xs font-extrabold'
+              : 'bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 text-gray-700 dark:text-zinc-300 hover:bg-gray-50'
+          }`}
+        >
+          <span>All Vehicles</span>
+          <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-black/10 dark:bg-white/10 font-bold">
+            {onlineCount}/{riders.length}
+          </span>
+        </button>
+
+        {VEHICLE_TYPES.map((v) => {
+          const totalForV = riders.filter(
+            (r) => (r.vehicleType || 'motorcycle').toLowerCase() === v.id
+          ).length;
+          const onlineForV = riders.filter(
+            (r) => (r.vehicleType || 'motorcycle').toLowerCase() === v.id && r.isOnline
+          ).length;
+
+          return (
+            <button
+              key={v.id}
+              onClick={() => setVehicleFilter(v.id)}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                vehicleFilter === v.id
+                  ? 'bg-amber-400 text-black shadow-xs font-extrabold'
+                  : 'bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 text-gray-700 dark:text-zinc-300 hover:bg-gray-50'
+              }`}
+            >
+              {v.id === 'motorcycle' && <Bike className="w-3.5 h-3.5" />}
+              {v.id === 'tricycle' && <Car className="w-3.5 h-3.5" />}
+              {v.id === 'car4' && <Car className="w-3.5 h-3.5" />}
+              {v.id === 'car8' && <Bus className="w-3.5 h-3.5" />}
+              <span>{v.name}</span>
+              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-black/10 dark:bg-white/10 font-bold">
+                {onlineForV}/{totalForV}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Filter Toolbar */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-4 shadow-xs">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3.5 top-3 text-gray-400" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search rider name, phone, DLV code..."
+              placeholder="Search driver name, phone, code, plate, model..."
               className="w-full pl-9 pr-4 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
             />
           </div>
@@ -1048,7 +1203,7 @@ export const Riders: React.FC = () => {
               className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
             >
               <option value="all">All Telemetry States</option>
-              <option value="online">Online Riders Only</option>
+              <option value="online">Online Drivers Only</option>
               <option value="offline">Offline</option>
             </select>
           </div>
@@ -1059,134 +1214,264 @@ export const Riders: React.FC = () => {
               onChange={(e) => setStatusFilter(e.target.value as any)}
               className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
             >
-              <option value="all">All Account Statuses</option>
-              <option value="active">Active Accounts</option>
-              <option value="suspended">Suspended Accounts</option>
-            </select>
-          </div>
-
-          <div>
-            <select
-              value={vehicleFilter}
-              onChange={(e) => setVehicleFilter(e.target.value)}
-              className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
-            >
-              <option value="all">All Vehicle Types</option>
-              <option value="Motorcycle">Motorcycle</option>
-              <option value="Bicycle">Bicycle</option>
-              <option value="Car">Car / Sedan</option>
-              <option value="Van">Van / MPV</option>
+              <option value="all">All statuses</option>
+              <option value="active">Active Only</option>
+              <option value="suspended">Suspended Only</option>
             </select>
           </div>
         </div>
       </div>
 
-      {/* Riders Table */}
-      {loading ? (
-        <TableSkeleton rows={8} cols={6} />
-      ) : (
-        <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl overflow-hidden shadow-xs">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-gray-50 dark:bg-zinc-850/60 uppercase font-bold text-gray-500 dark:text-zinc-400 border-b border-gray-200 dark:border-zinc-800">
-                <tr>
-                  <th className="px-4 py-3.5">Rider</th>
-                  <th className="px-4 py-3.5">Contact</th>
-                  <th className="px-4 py-3.5">Vehicle</th>
-                  <th className="px-4 py-3.5">Fleet Status</th>
-                  <th className="px-4 py-3.5">Wallet / Coins</th>
-                  <th className="px-4 py-3.5 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 font-medium">
-                {filteredRiders.length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="text-center py-12 text-gray-400 text-xs">
-                      No matching riders found.
-                    </td>
-                  </tr>
-                ) : (
-                  filteredRiders.map((r) => (
-                    <tr
-                      key={r.id}
-                      onClick={() => setSelectedRider(r)}
-                      className="hover:bg-amber-50/50 dark:hover:bg-zinc-800/50 cursor-pointer transition-colors"
+      {/* MOBILE VIEW: Driver Cards (phones) */}
+      <div className="block md:hidden space-y-3">
+        {loading ? (
+          <TableSkeleton rows={4} cols={1} />
+        ) : filteredRiders.length === 0 ? (
+          <div className="p-8 text-center text-xs text-gray-400 bg-white dark:bg-zinc-900 rounded-2xl border border-gray-200 dark:border-zinc-800">
+            No matching drivers found.
+          </div>
+        ) : (
+          filteredRiders.map((r) => {
+            const vConfig = VEHICLE_TYPES.find(
+              (v) => v.id === (r.vehicleType || 'motorcycle').toLowerCase()
+            );
+            return (
+              <div
+                key={r.id}
+                onClick={() => setSelectedRider(r)}
+                className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-xs space-y-3 cursor-pointer hover:border-amber-400 transition-colors"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-xl bg-amber-400 text-black font-extrabold flex items-center justify-center shrink-0 overflow-hidden shadow-xs">
+                      {r.photoUrl ? (
+                        <img src={r.photoUrl} alt={r.name} className="w-full h-full object-cover" />
+                      ) : (
+                        <span>{r.name.charAt(0)}</span>
+                      )}
+                    </div>
+                    <div>
+                      <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
+                        {r.name}
+                        <span className="flex items-center text-[10px] text-amber-500 font-bold">
+                          <Star className="w-3 h-3 fill-amber-400" /> {r.rating || 5}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-gray-400 font-mono">{r.riderCode}</div>
+                    </div>
+                  </div>
+
+                  <span
+                    className={`text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1.5 ${
+                      r.status === 'suspended'
+                        ? 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
+                        : r.isOnline
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                        : 'bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-400'
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        r.status === 'suspended'
+                          ? 'bg-red-500'
+                          : r.isOnline
+                          ? 'bg-emerald-500 animate-pulse'
+                          : 'bg-gray-400'
+                      }`}
+                    />
+                    {r.status === 'suspended' ? 'Suspended' : r.isOnline ? 'Online' : 'Offline'}
+                  </span>
+                </div>
+
+                {/* Vehicle & Plate details */}
+                <div className="p-2.5 rounded-xl bg-gray-50 dark:bg-zinc-850/60 border border-gray-100 dark:border-zinc-800 flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`px-2 py-0.5 rounded-md text-[10px] font-bold border flex items-center gap-1 ${
+                        vConfig?.badgeColor || 'bg-gray-100 text-gray-800'
+                      }`}
                     >
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-xl bg-amber-400 text-black font-extrabold flex items-center justify-center shrink-0 overflow-hidden">
-                            {r.photoUrl ? (
-                              <img src={r.photoUrl} alt={r.name} className="w-full h-full object-cover" />
-                            ) : (
-                              <span>{r.name.charAt(0)}</span>
-                            )}
-                          </div>
-                          <div>
-                            <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
-                              {r.name}
-                              <span className="flex items-center text-[10px] text-amber-500 font-bold">
-                                <Star className="w-3 h-3 fill-amber-400" /> {r.rating || 5}
-                              </span>
-                            </div>
-                            <div className="text-[10px] text-gray-400 font-mono">
-                              {r.riderCode}
-                            </div>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="text-gray-900 dark:text-zinc-200">{r.phone}</div>
-                        <div className="text-[10px] text-gray-400">{r.email}</div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="font-semibold text-gray-900 dark:text-white">
-                          {r.vehicleType}
-                        </div>
-                        <div className="text-[10px] text-gray-400 font-mono">
-                          Plate: {r.plate || 'N/A'}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1.5">
-                          <span
-                            className={`w-2 h-2 rounded-full ${
-                              r.isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'
-                            }`}
-                          />
-                          <span className="font-bold">
-                            {r.status === 'suspended' ? 'Suspended' : r.isOnline ? 'Online' : 'Offline'}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="font-bold text-emerald-600">
-                          ₱{Number(r.walletBalance || 0).toFixed(2)}
-                        </div>
-                        <div className="text-[10px] text-amber-500 font-bold">
-                          {r.coins || 0} Coins
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedRider(r);
-                          }}
-                          className="px-2.5 py-1 rounded-lg text-xs font-bold text-amber-600 dark:text-amber-400 hover:bg-amber-50 transition-colors"
-                        >
-                          Manage &rarr;
-                        </button>
+                      {vConfig?.id === 'motorcycle' && <Bike className="w-3 h-3" />}
+                      {vConfig?.id === 'tricycle' && <Car className="w-3 h-3" />}
+                      {vConfig?.id === 'car4' && <Car className="w-3 h-3" />}
+                      {vConfig?.id === 'car8' && <Bus className="w-3 h-3" />}
+                      {vConfig?.name || r.vehicleType}
+                    </span>
+                    {r.vehicleModel && (
+                      <span className="text-gray-700 dark:text-zinc-300 font-medium">
+                        {r.vehicleModel}
+                      </span>
+                    )}
+                  </div>
+                  <span className="font-mono font-bold text-gray-900 dark:text-white">
+                    {r.plate || 'NO PLATE'}
+                  </span>
+                </div>
+
+                {/* Footer: Balance & Manage */}
+                <div className="flex items-center justify-between pt-1">
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-gray-400 block">
+                      Wallet Balance
+                    </span>
+                    <span className="text-sm font-extrabold text-emerald-600">
+                      ₱{Number(r.walletBalance || 0).toFixed(2)}
+                    </span>
+                  </div>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedRider(r);
+                    }}
+                    className="delivio-btn-yellow px-3.5 py-1.5 rounded-xl text-xs font-bold"
+                  >
+                    Manage Driver &rarr;
+                  </button>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {/* DESKTOP VIEW: Drivers Table */}
+      <div className="hidden md:block">
+        {loading ? (
+          <TableSkeleton rows={8} cols={6} />
+        ) : (
+          <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl overflow-hidden shadow-xs">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-gray-50 dark:bg-zinc-850/60 uppercase font-bold text-gray-500 dark:text-zinc-400 border-b border-gray-200 dark:border-zinc-800">
+                  <tr>
+                    <th className="px-4 py-3.5">Driver</th>
+                    <th className="px-4 py-3.5">Contact</th>
+                    <th className="px-4 py-3.5">Vehicle & Plate</th>
+                    <th className="px-4 py-3.5">Fleet Status</th>
+                    <th className="px-4 py-3.5">Wallet / Coins</th>
+                    <th className="px-4 py-3.5 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 font-medium">
+                  {filteredRiders.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="text-center py-12 text-gray-400 text-xs">
+                        No matching drivers found.
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ) : (
+                    filteredRiders.map((r) => {
+                      const vConfig = VEHICLE_TYPES.find(
+                        (v) => v.id === (r.vehicleType || 'motorcycle').toLowerCase()
+                      );
+                      return (
+                        <tr
+                          key={r.id}
+                          onClick={() => setSelectedRider(r)}
+                          className="hover:bg-amber-50/50 dark:hover:bg-zinc-800/50 cursor-pointer transition-colors"
+                        >
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-amber-400 text-black font-extrabold flex items-center justify-center shrink-0 overflow-hidden shadow-xs">
+                                {r.photoUrl ? (
+                                  <img
+                                    src={r.photoUrl}
+                                    alt={r.name}
+                                    className="w-full h-full object-cover"
+                                  />
+                                ) : (
+                                  <span>{r.name.charAt(0)}</span>
+                                )}
+                              </div>
+                              <div>
+                                <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
+                                  {r.name}
+                                  <span className="flex items-center text-[10px] text-amber-500 font-bold">
+                                    <Star className="w-3 h-3 fill-amber-400" /> {r.rating || 5}
+                                  </span>
+                                </div>
+                                <div className="text-[10px] text-gray-400 font-mono">
+                                  {r.riderCode}
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="text-gray-900 dark:text-zinc-200">{r.phone}</div>
+                            <div className="text-[10px] text-gray-400">{r.email}</div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`px-2 py-0.5 rounded-md text-[10px] font-bold border flex items-center gap-1 ${
+                                  vConfig?.badgeColor || 'bg-gray-100 text-gray-800'
+                                }`}
+                              >
+                                {vConfig?.id === 'motorcycle' && <Bike className="w-3 h-3" />}
+                                {vConfig?.id === 'tricycle' && <Car className="w-3 h-3" />}
+                                {vConfig?.id === 'car4' && <Car className="w-3 h-3" />}
+                                {vConfig?.id === 'car8' && <Bus className="w-3 h-3" />}
+                                {vConfig?.name || r.vehicleType}
+                              </span>
+                              {r.vehicleModel && (
+                                <span className="text-gray-700 dark:text-zinc-300 font-semibold">
+                                  {r.vehicleModel}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-gray-400 font-mono mt-0.5 flex items-center gap-2">
+                              <span>Plate: {r.plate || 'N/A'}</span>
+                              {r.seats ? <span>• {r.seats} seats</span> : null}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`w-2 h-2 rounded-full ${
+                                  r.isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'
+                                }`}
+                              />
+                              <span className="font-bold">
+                                {r.status === 'suspended'
+                                  ? 'Suspended'
+                                  : r.isOnline
+                                  ? 'Online'
+                                  : 'Offline'}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="font-bold text-emerald-600">
+                              ₱{Number(r.walletBalance || 0).toFixed(2)}
+                            </div>
+                            <div className="text-[10px] text-amber-500 font-bold">
+                              {r.coins || 0} Coins
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedRider(r);
+                              }}
+                              className="px-2.5 py-1 rounded-lg text-xs font-bold text-amber-600 dark:text-amber-400 hover:bg-amber-50 transition-colors"
+                            >
+                              Manage &rarr;
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {/* Selected Rider Detail Drawer */}
+      {/* Selected Driver Detail Drawer */}
       {selectedRider && (
         <div className="fixed inset-0 z-50 overflow-hidden flex justify-end bg-black/60 backdrop-blur-xs">
           <div
@@ -1328,14 +1613,55 @@ export const Riders: React.FC = () => {
                       </label>
                       <select
                         value={vehicleType}
-                        onChange={(e) => setVehicleType(e.target.value)}
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white"
+                        onChange={(e) => handleSelectVehicleType(e.target.value as VehicleType)}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
                       >
-                        <option value="Motorcycle">Motorcycle</option>
-                        <option value="Bicycle">Bicycle</option>
-                        <option value="Car">Car</option>
-                        <option value="Van">Van</option>
+                        {VEHICLE_TYPES.map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.name} ({v.defaultSeats} {v.defaultSeats === 1 ? 'seat' : 'seats'})
+                          </option>
+                        ))}
                       </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Vehicle Model / Brand
+                      </label>
+                      <input
+                        type="text"
+                        value={vehicleModel}
+                        onChange={(e) => setVehicleModel(e.target.value)}
+                        placeholder="e.g. Honda Click 125i, Toyota Vios"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Vehicle Color
+                      </label>
+                      <input
+                        type="text"
+                        value={vehicleColor}
+                        onChange={(e) => setVehicleColor(e.target.value)}
+                        placeholder="e.g. Matte Black, White, Silver"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Seats Capacity
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="20"
+                        value={seats}
+                        onChange={(e) => setSeats(Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white font-bold"
+                      />
                     </div>
 
                     <div>
@@ -1346,6 +1672,7 @@ export const Riders: React.FC = () => {
                         type="text"
                         value={plate}
                         onChange={(e) => setPlate(e.target.value)}
+                        placeholder="e.g. ABC 1234"
                         className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-mono text-gray-900 dark:text-white"
                       />
                     </div>
@@ -1363,7 +1690,7 @@ export const Riders: React.FC = () => {
                     />
                     <div className="mt-1.5 p-2 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 flex items-start gap-1.5 text-[11px] text-amber-800 dark:text-amber-300">
                       <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-500" />
-                      <span>This does not change the rider's login email.</span>
+                      <span>This does not change the driver's login email.</span>
                     </div>
                   </div>
 
@@ -1387,7 +1714,7 @@ export const Riders: React.FC = () => {
                       className="delivio-btn-yellow px-5 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2"
                     >
                       {savingDetails && <Loader2 className="w-4 h-4 animate-spin" />}
-                      Save Rider Details
+                      Save Driver Details
                     </button>
                   </div>
                 </form>
@@ -1399,10 +1726,10 @@ export const Riders: React.FC = () => {
                   <div className="p-4 rounded-2xl border border-red-200 dark:border-red-900/60 bg-red-50/50 dark:bg-red-950/20 flex items-center justify-between">
                     <div>
                       <div className="font-bold text-sm text-red-900 dark:text-red-300">
-                        Rider Operational Status
+                        Driver Operational Status
                       </div>
                       <p className="text-xs text-red-700/80 dark:text-red-400/80">
-                        Suspending marks the rider and account as suspended and forces isOnline to false.
+                        Suspending marks the driver and account as suspended and forces offline.
                       </p>
                     </div>
                     <button
@@ -1413,46 +1740,67 @@ export const Riders: React.FC = () => {
                           : 'bg-red-600 text-white hover:bg-red-700'
                       }`}
                     >
-                      {selectedRider.status === 'suspended' ? 'Restore Rider' : 'Suspend Rider'}
+                      {selectedRider.status === 'suspended' ? 'Restore Driver' : 'Suspend Driver'}
                     </button>
                   </div>
                 </div>
               )}
 
               {/* TAB 3: SERVICES */}
-              {activeTab === 'services' && (
-                <div className="space-y-4">
-                  <p className="text-xs text-gray-500">
-                    Control which services this rider is qualified and eligible to receive on the road:
-                  </p>
+              {activeTab === 'services' && (() => {
+                const currentVType = (
+                  (selectedRider.vehicleType || 'motorcycle').toLowerCase() as VehicleType
+                );
+                const validServices = SERVICES_BY_VEHICLE[currentVType] || [];
+                const vConfig = VEHICLE_TYPES.find((v) => v.id === currentVType);
 
-                  <div className="space-y-2">
-                    {ALL_SERVICES.map((srv) => {
-                      const isAllowed = (selectedRider.allowedServices || []).includes(srv);
-                      return (
-                        <div
-                          key={srv}
-                          className="flex items-center justify-between p-3.5 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs"
-                        >
-                          <span className="font-bold uppercase tracking-wider text-gray-800 dark:text-zinc-200">
-                            {srv.replace('_', ' ')}
-                          </span>
-                          <button
-                            onClick={() => handleToggleService(srv)}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-                              isAllowed
-                                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                                : 'bg-gray-200 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400'
-                            }`}
+                return (
+                  <div className="space-y-4">
+                    <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/40 text-xs text-amber-900 dark:text-amber-300 flex items-center justify-between">
+                      <div>
+                        Vehicle Capabilities:{' '}
+                        <strong>{vConfig?.name || selectedRider.vehicleType}</strong>
+                        <p className="text-[11px] text-amber-800/80 dark:text-amber-400/80 mt-0.5">
+                          Toggles only control services valid for this vehicle. Disabling a service removes it from active trip dispatch.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      {validServices.map((srv) => {
+                        const isAllowed = (selectedRider.allowedServices || []).includes(srv);
+                        const srvMeta = ALL_SERVICES.find((s) => s.id === srv);
+                        return (
+                          <div
+                            key={srv}
+                            className="flex items-center justify-between p-3.5 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs shadow-xs"
                           >
-                            {isAllowed ? 'Enabled' : 'Disabled'}
-                          </button>
-                        </div>
-                      );
-                    })}
+                            <div>
+                              <span className="font-bold uppercase tracking-wider text-gray-900 dark:text-zinc-100 block">
+                                {srvMeta?.label || srv.replace('_', ' ')}
+                              </span>
+                              <span className="text-[11px] text-gray-400">
+                                {srvMeta?.description || ''}
+                              </span>
+                            </div>
+
+                            <button
+                              onClick={() => handleToggleService(srv)}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                                isAllowed
+                                  ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                  : 'bg-gray-200 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400'
+                              }`}
+                            >
+                              {isAllowed ? 'Allowed' : 'Disabled'}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* TAB 4: ORDERS & EARNINGS */}
               {activeTab === 'orders' && (
@@ -2278,12 +2626,29 @@ export const Riders: React.FC = () => {
           onConfirm={async (reason) => {
             await handleUnlinkRider(reason);
           }}
-          title={`Unlink Rider ${selectedRider.name}`}
-          message={`Are you sure you want to unlink rider ${selectedRider.name} from customer account (${selectedRider.linkedCustomerEmail})? The shared balance will remain on the customer account. The rider's wallet balance will start at ₱0.`}
+          title={`Unlink Driver ${selectedRider.name}`}
+          message={`Are you sure you want to unlink driver ${selectedRider.name} from customer account (${selectedRider.linkedCustomerEmail})? The shared balance will remain on the customer account. The driver's wallet balance will start at ₱0.`}
           confirmLabel="Unlink Account"
           reasonRequired={true}
           reasonPlaceholder="Specify mandatory reason for unlinking account..."
           isDestructive={true}
+        />
+      )}
+
+      {/* MODAL 5: VEHICLE TYPE CHANGE CONFIRMATION */}
+      {vehicleConfirmModalOpen && pendingVehicleType && selectedRider && (
+        <ConfirmationModal
+          isOpen={vehicleConfirmModalOpen}
+          onClose={() => {
+            setVehicleConfirmModalOpen(false);
+            setPendingVehicleType(null);
+          }}
+          onConfirm={confirmChangeVehicleType}
+          title={`Change Vehicle Type to ${VEHICLE_LABELS[pendingVehicleType]}`}
+          message={`Changing vehicle type to ${VEHICLE_LABELS[pendingVehicleType]} will update vehicle capacity and automatically recompute allowed services and active services for driver ${selectedRider.name} to match vehicle capabilities (${SERVICES_BY_VEHICLE[pendingVehicleType].join(', ')}). Do you want to proceed?`}
+          confirmLabel="Update Vehicle & Services"
+          reasonRequired={false}
+          isDestructive={false}
         />
       )}
     </div>

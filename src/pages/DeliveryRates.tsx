@@ -14,7 +14,13 @@ import { useCity } from '../context/CityContext';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
-import type { City, DeliveryRatesConfig, ServiceRates, OrderServiceType } from '../types';
+import type { City, DeliveryRatesConfig, ServiceRates, OrderServiceType, DeliveryServiceType, TaxiVehicleRates } from '../types';
+import {
+  VEHICLE_TYPES,
+  VEHICLE_LABELS,
+  DEFAULT_TAXI_RATES,
+  type VehicleType
+} from '../constants';
 import {
   Coins,
   MapPin,
@@ -28,11 +34,16 @@ import {
   AlertTriangle,
   X,
   Layers,
-  Sparkles
+  Sparkles,
+  Car,
+  Bike,
+  Clock,
+  ShieldCheck,
+  DollarSign
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
-const ALL_SERVICES: OrderServiceType[] = [
+const DELIVERY_SERVICES: DeliveryServiceType[] = [
   'food',
   'convenience',
   'parcel',
@@ -58,8 +69,14 @@ export const DeliveryRates: React.FC = () => {
   const [loadingRates, setLoadingRates] = useState(false);
   const [ratesConfig, setRatesConfig] = useState<DeliveryRatesConfig | null>(null);
 
-  // Selected Service sub-tab for rates config
-  const [activeServiceTab, setActiveServiceTab] = useState<OrderServiceType>('food');
+  // Tab between "Delivery Rates" and "Taxi Fares"
+  const [activeMainTab, setActiveMainTab] = useState<'delivery' | 'taxi'>('delivery');
+
+  // Selected Service sub-tab for Delivery Rates config
+  const [activeServiceTab, setActiveServiceTab] = useState<DeliveryServiceType>('food');
+
+  // Selected Vehicle sub-tab for Taxi Fares config
+  const [activeVehicleTab, setActiveVehicleTab] = useState<VehicleType>('motorcycle');
 
   // Add / Edit City Modal
   const [cityModalOpen, setCityModalOpen] = useState(false);
@@ -72,12 +89,17 @@ export const DeliveryRates: React.FC = () => {
   const [cityStatus, setCityStatus] = useState<'active' | 'inactive'>('active');
   const [savingCity, setSavingCity] = useState(false);
 
-  // Fee Calculator States
-  const [calcService, setCalcService] = useState<OrderServiceType>('food');
-  const [calcDistance, setCalcDistance] = useState<number>(4.5);
-  const [calcHour, setCalcHour] = useState<number>(12); // 0-23
+  // Delivery Fee Simulator States
+  const [calcService, setCalcService] = useState<DeliveryServiceType>('food');
+  const [calcDeliveryDistance, setCalcDeliveryDistance] = useState<number>(4.5);
   const [calcIsNight, setCalcIsNight] = useState<boolean>(false);
   const [calcIsPeak, setCalcIsPeak] = useState<boolean>(false);
+
+  // Taxi Fare Calculator States
+  const [calcTaxiVehicle, setCalcTaxiVehicle] = useState<VehicleType>('motorcycle');
+  const [calcTaxiDistance, setCalcTaxiDistance] = useState<number>(6.0);
+  const [calcExtraStops, setCalcExtraStops] = useState<number>(0);
+  const [calcTaxiTimeOfDay, setCalcTaxiTimeOfDay] = useState<'day' | 'peak' | 'night'>('day');
 
   // Confirm save rates modal
   const [confirmSaveRatesModal, setConfirmSaveRatesModal] = useState(false);
@@ -96,7 +118,7 @@ export const DeliveryRates: React.FC = () => {
     }
   }, [cities, activeCityId]);
 
-  // Fetch Delivery Rates for active city
+  // Fetch Delivery & Taxi Rates for active city
   useEffect(() => {
     if (!activeCityId) return;
 
@@ -115,6 +137,7 @@ export const DeliveryRates: React.FC = () => {
             parcel: dt.parcel || { ...DEFAULT_SERVICE_RATES, baseFare: 40, perKm: 10 },
             pabili: dt.pabili || { ...DEFAULT_SERVICE_RATES, baseFare: 60, serviceFee: 20 },
             request_rider: dt.request_rider || { ...DEFAULT_SERVICE_RATES, baseFare: 50 },
+            rideRates: dt.rideRates || { ...DEFAULT_TAXI_RATES },
             riderCommissionPercent: dt.riderCommissionPercent ?? 80,
             surcharges: dt.surcharges || {
               peak: { enabled: false, multiplier: 1.2 },
@@ -122,7 +145,7 @@ export const DeliveryRates: React.FC = () => {
             }
           });
         } else {
-          // Provide default template
+          // Provide default template including DEFAULT_TAXI_RATES
           setRatesConfig({
             id: activeCityId,
             food: { ...DEFAULT_SERVICE_RATES },
@@ -130,6 +153,7 @@ export const DeliveryRates: React.FC = () => {
             parcel: { ...DEFAULT_SERVICE_RATES, baseFare: 40, perKm: 10 },
             pabili: { ...DEFAULT_SERVICE_RATES, baseFare: 60, serviceFee: 20 },
             request_rider: { ...DEFAULT_SERVICE_RATES, baseFare: 50 },
+            rideRates: { ...DEFAULT_TAXI_RATES },
             riderCommissionPercent: 80,
             surcharges: {
               peak: { enabled: false, multiplier: 1.2 },
@@ -273,8 +297,8 @@ export const DeliveryRates: React.FC = () => {
     }
   };
 
-  // Update rates locally in state
-  const updateServiceRateField = (
+  // Update delivery service rate field
+  const updateDeliveryRateField = (
     field: keyof ServiceRates,
     value: number
   ) => {
@@ -288,8 +312,29 @@ export const DeliveryRates: React.FC = () => {
     });
   };
 
+  // Update taxi vehicle rate field
+  const updateTaxiRateField = (
+    field: keyof TaxiVehicleRates,
+    value: any
+  ) => {
+    if (!ratesConfig) return;
+    const currentRideRates = ratesConfig.rideRates || DEFAULT_TAXI_RATES;
+    const currentVehicleRates = currentRideRates[activeVehicleTab] || DEFAULT_TAXI_RATES[activeVehicleTab];
+
+    setRatesConfig({
+      ...ratesConfig,
+      rideRates: {
+        ...currentRideRates,
+        [activeVehicleTab]: {
+          ...currentVehicleRates,
+          [field]: field === 'enabled' ? Boolean(value) : Number(value)
+        }
+      }
+    });
+  };
+
   // Save Rates to Firestore
-  const handleSaveDeliveryRates = async () => {
+  const handleSaveRates = async () => {
     if (!ratesConfig || !activeCityId) return;
     try {
       setSavingRates(true);
@@ -299,18 +344,18 @@ export const DeliveryRates: React.FC = () => {
         updatedAt: Timestamp.now()
       };
 
-      await setDoc(rateRef, payload);
+      await setDoc(rateRef, payload, { merge: true });
 
       await logAuditEvent({
         adminId: adminProfile?.uid || 'admin',
         adminName: adminProfile?.name || 'Administrator',
-        action: 'UPDATE_DELIVERY_RATES',
+        action: 'UPDATE_DELIVERY_AND_TAXI_RATES',
         entityType: 'deliveryRates',
         entityId: activeCityId,
-        details: `Saved delivery rates for city ${activeCityId}`
+        details: `Saved rates & fares (Delivery & Taxi rideRates) for city ${activeCityId}`
       });
 
-      showSuccess('Delivery rates & surcharges saved.');
+      showSuccess('Rates & Fares schedule saved successfully.');
       setConfirmSaveRatesModal(false);
     } catch (err: any) {
       showError(err);
@@ -319,9 +364,9 @@ export const DeliveryRates: React.FC = () => {
     }
   };
 
-  // Fee Calculator calculation
-  const calculatedFee = useMemo(() => {
-    if (!ratesConfig) return { baseFare: 0, distanceFee: 0, serviceFee: 0, surcharges: 0, totalDeliveryFee: 0, grandTotal: 0, riderCut: 0 };
+  // 1. Delivery Fee Simulator Calculation
+  const calculatedDeliveryFee = useMemo(() => {
+    if (!ratesConfig) return { baseFare: 0, distanceFee: 0, serviceFee: 0, surcharges: 0, totalDeliveryFee: 0, grandTotal: 0, driverCut: 0 };
     const rates = ratesConfig[calcService] || DEFAULT_SERVICE_RATES;
 
     const baseFare = Number(rates.baseFare) || 0;
@@ -329,11 +374,10 @@ export const DeliveryRates: React.FC = () => {
     const perKm = Number(rates.perKm) || 0;
     const serviceFee = Number(rates.serviceFee) || 0;
 
-    const extraKm = Math.max(0, calcDistance - includedKm);
+    const extraKm = Math.max(0, calcDeliveryDistance - includedKm);
     const distanceFee = extraKm * perKm;
     let deliverySubtotal = baseFare + distanceFee;
 
-    // Apply min/max
     if (rates.minFee && deliverySubtotal < rates.minFee) deliverySubtotal = rates.minFee;
     if (rates.maxFee && deliverySubtotal > rates.maxFee) deliverySubtotal = rates.maxFee;
 
@@ -348,8 +392,8 @@ export const DeliveryRates: React.FC = () => {
 
     const totalDeliveryFee = deliverySubtotal + surchargeTotal;
     const grandTotal = totalDeliveryFee + serviceFee;
-    const riderCommission = ratesConfig.riderCommissionPercent ?? 80;
-    const riderCut = (totalDeliveryFee * riderCommission) / 100;
+    const driverCommission = ratesConfig.riderCommissionPercent ?? 80;
+    const driverCut = (totalDeliveryFee * driverCommission) / 100;
 
     return {
       baseFare,
@@ -358,9 +402,55 @@ export const DeliveryRates: React.FC = () => {
       surcharges: surchargeTotal,
       totalDeliveryFee,
       grandTotal,
-      riderCut
+      driverCut
     };
-  }, [ratesConfig, calcService, calcDistance, calcIsPeak, calcIsNight]);
+  }, [ratesConfig, calcService, calcDeliveryDistance, calcIsPeak, calcIsNight]);
+
+  // 2. Taxi Fare Calculator Calculation
+  const calculatedTaxiFare = useMemo(() => {
+    const defaultV = DEFAULT_TAXI_RATES[calcTaxiVehicle];
+    const vRates: TaxiVehicleRates = ratesConfig?.rideRates?.[calcTaxiVehicle] || defaultV;
+
+    const baseFare = Number(vRates.baseFare) || 0;
+    const includedKm = Number(vRates.includedKm) || 0;
+    const perKm = Number(vRates.perKm) || 0;
+    const minFare = Number(vRates.minFare) || 0;
+    const perStopFee = Number(vRates.perStopFee) || 0;
+    const serviceFee = Number(vRates.serviceFee) || 0;
+    const commissionPercent = Number(vRates.commissionPercent) ?? 15;
+
+    // Distance calculation
+    const extraKm = Math.max(0, calcTaxiDistance - includedKm);
+    const distanceFare = baseFare + (extraKm * perKm);
+
+    // Apply minimum fare
+    let rideFare = Math.max(minFare, distanceFare);
+
+    // Time of day multiplier simulation
+    if (calcTaxiTimeOfDay === 'peak') {
+      rideFare = rideFare * 1.2;
+    } else if (calcTaxiTimeOfDay === 'night') {
+      rideFare = rideFare + 30; // night diff
+    }
+
+    const stopFee = Math.max(0, calcExtraStops) * perStopFee;
+    const subtotal = rideFare + stopFee;
+    const total = subtotal + serviceFee;
+
+    // Platform margin & Driver Net
+    const platformMargin = (rideFare * (commissionPercent / 100)) + serviceFee;
+    const driverNet = total - platformMargin;
+
+    return {
+      rideFare,
+      stopFee,
+      serviceFee,
+      total,
+      driverNet,
+      platformMargin,
+      commissionPercent
+    };
+  }, [ratesConfig, calcTaxiVehicle, calcTaxiDistance, calcExtraStops, calcTaxiTimeOfDay]);
 
   return (
     <div className="space-y-6">
@@ -368,10 +458,10 @@ export const DeliveryRates: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl md:text-3xl font-extrabold text-gray-900 dark:text-white tracking-tight">
-            Delivery Rates & Operational Cities
+            Rates & Fares
           </h1>
           <p className="text-sm text-gray-500 dark:text-zinc-400 mt-0.5">
-            Configure base fares, distance tiers, rider commissions, and peak/night surcharges by city.
+            Configure delivery fees, taxi fares per vehicle, driver commissions, and interactive fare calculators by city.
           </p>
         </div>
 
@@ -454,18 +544,45 @@ export const DeliveryRates: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Grid: Rates Configuration & Live Fee Calculator */}
-      {ratesConfig && (
+      {/* Main Mode Tabs: Delivery Rates vs. Taxi Fares */}
+      <div className="flex gap-3 border-b border-gray-200 dark:border-zinc-800 pb-2">
+        <button
+          onClick={() => setActiveMainTab('delivery')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-extrabold transition-all ${
+            activeMainTab === 'delivery'
+              ? 'bg-amber-400 text-black shadow-xs'
+              : 'bg-white dark:bg-zinc-900 text-gray-600 dark:text-zinc-400 hover:bg-gray-100 border border-gray-200 dark:border-zinc-800'
+          }`}
+        >
+          <Bike className="w-4 h-4" />
+          <span>Delivery Rates</span>
+        </button>
+
+        <button
+          onClick={() => setActiveMainTab('taxi')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-extrabold transition-all ${
+            activeMainTab === 'taxi'
+              ? 'bg-amber-400 text-black shadow-xs'
+              : 'bg-white dark:bg-zinc-900 text-gray-600 dark:text-zinc-400 hover:bg-gray-100 border border-gray-200 dark:border-zinc-800'
+          }`}
+        >
+          <Car className="w-4 h-4" />
+          <span>Taxi Fares (Per Vehicle)</span>
+        </button>
+      </div>
+
+      {/* 1. DELIVERY RATES SECTION */}
+      {ratesConfig && activeMainTab === 'delivery' && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Rates Form */}
+          {/* Delivery Rates Form */}
           <div className="lg:col-span-2 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-5 shadow-xs space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 dark:border-zinc-800 pb-4">
               <div>
                 <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
-                  Rates for {cities.find((c) => c.id === activeCityId)?.name || activeCityId}
+                  Delivery Rates for {cities.find((c) => c.id === activeCityId)?.name || activeCityId}
                 </h3>
                 <p className="text-xs text-gray-500">
-                  Configure base fare, per km additions, and rider commission.
+                  Configure base fare, per km additions, and driver commission.
                 </p>
               </div>
 
@@ -479,7 +596,7 @@ export const DeliveryRates: React.FC = () => {
 
             {/* Service sub-tabs */}
             <div className="flex gap-2 overflow-x-auto pb-1">
-              {ALL_SERVICES.map((srv) => (
+              {DELIVERY_SERVICES.map((srv) => (
                 <button
                   key={srv}
                   onClick={() => setActiveServiceTab(srv)}
@@ -504,7 +621,7 @@ export const DeliveryRates: React.FC = () => {
                   type="number"
                   min="0"
                   value={ratesConfig[activeServiceTab]?.baseFare || 0}
-                  onChange={(e) => updateServiceRateField('baseFare', Number(e.target.value))}
+                  onChange={(e) => updateDeliveryRateField('baseFare', Number(e.target.value))}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
                 />
               </div>
@@ -518,7 +635,7 @@ export const DeliveryRates: React.FC = () => {
                   min="0"
                   step="0.1"
                   value={ratesConfig[activeServiceTab]?.includedKm || 0}
-                  onChange={(e) => updateServiceRateField('includedKm', Number(e.target.value))}
+                  onChange={(e) => updateDeliveryRateField('includedKm', Number(e.target.value))}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
                 />
               </div>
@@ -532,7 +649,7 @@ export const DeliveryRates: React.FC = () => {
                   min="0"
                   step="0.5"
                   value={ratesConfig[activeServiceTab]?.perKm || 0}
-                  onChange={(e) => updateServiceRateField('perKm', Number(e.target.value))}
+                  onChange={(e) => updateDeliveryRateField('perKm', Number(e.target.value))}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
                 />
               </div>
@@ -545,7 +662,7 @@ export const DeliveryRates: React.FC = () => {
                   type="number"
                   min="0"
                   value={ratesConfig[activeServiceTab]?.minFee || 0}
-                  onChange={(e) => updateServiceRateField('minFee', Number(e.target.value))}
+                  onChange={(e) => updateDeliveryRateField('minFee', Number(e.target.value))}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
                 />
               </div>
@@ -558,7 +675,7 @@ export const DeliveryRates: React.FC = () => {
                   type="number"
                   min="0"
                   value={ratesConfig[activeServiceTab]?.maxFee || 0}
-                  onChange={(e) => updateServiceRateField('maxFee', Number(e.target.value))}
+                  onChange={(e) => updateDeliveryRateField('maxFee', Number(e.target.value))}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
                 />
               </div>
@@ -571,17 +688,17 @@ export const DeliveryRates: React.FC = () => {
                   type="number"
                   min="0"
                   value={ratesConfig[activeServiceTab]?.serviceFee || 0}
-                  onChange={(e) => updateServiceRateField('serviceFee', Number(e.target.value))}
+                  onChange={(e) => updateDeliveryRateField('serviceFee', Number(e.target.value))}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-amber-600"
                 />
               </div>
             </div>
 
-            {/* Rider Commission & Surcharges Section */}
+            {/* Driver Commission & Surcharges Section */}
             <div className="pt-4 border-t border-gray-100 dark:border-zinc-800 space-y-4">
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-zinc-300 mb-1">
-                  Rider Commission Share (% of delivery fee paid to rider)
+                  Driver Commission Share (% of delivery fee paid to driver)
                 </label>
                 <div className="flex items-center gap-3">
                   <input
@@ -605,7 +722,6 @@ export const DeliveryRates: React.FC = () => {
 
               {/* Surcharges */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-                {/* Peak Hours Surcharge */}
                 <div className="p-4 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-850 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="font-bold text-xs text-gray-900 dark:text-white">
@@ -652,7 +768,6 @@ export const DeliveryRates: React.FC = () => {
                   />
                 </div>
 
-                {/* Night Flat Surcharge */}
                 <div className="p-4 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-850 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="font-bold text-xs text-gray-900 dark:text-white">
@@ -700,18 +815,14 @@ export const DeliveryRates: React.FC = () => {
             </div>
           </div>
 
-          {/* Fee Simulator / Calculator */}
+          {/* Delivery Fee Simulator */}
           <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-5 shadow-xs space-y-5">
             <div className="flex items-center gap-2">
               <Calculator className="w-5 h-5 text-amber-500" />
               <h3 className="font-bold text-base text-gray-900 dark:text-white">
-                Interactive Fee Simulator
+                Delivery Fee Simulator
               </h3>
             </div>
-
-            <p className="text-xs text-gray-500 dark:text-zinc-400">
-              Test fare calculation logic live with distance & surcharge inputs:
-            </p>
 
             <div className="space-y-3 text-xs">
               <div>
@@ -721,7 +832,7 @@ export const DeliveryRates: React.FC = () => {
                   onChange={(e) => setCalcService(e.target.value as any)}
                   className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white capitalize"
                 >
-                  {ALL_SERVICES.map((s) => (
+                  {DELIVERY_SERVICES.map((s) => (
                     <option key={s} value={s}>
                       {s.replace('_', ' ')}
                     </option>
@@ -731,15 +842,15 @@ export const DeliveryRates: React.FC = () => {
 
               <div>
                 <label className="block uppercase font-semibold text-gray-500 mb-1">
-                  Trip Distance ({calcDistance} km)
+                  Trip Distance ({calcDeliveryDistance} km)
                 </label>
                 <input
                   type="range"
                   min="0.5"
                   max="30"
                   step="0.5"
-                  value={calcDistance}
-                  onChange={(e) => setCalcDistance(Number(e.target.value))}
+                  value={calcDeliveryDistance}
+                  onChange={(e) => setCalcDeliveryDistance(Number(e.target.value))}
                   className="w-full accent-amber-500"
                 />
               </div>
@@ -774,29 +885,362 @@ export const DeliveryRates: React.FC = () => {
             <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 space-y-2 text-xs">
               <div className="flex justify-between text-amber-900 dark:text-amber-300">
                 <span>Base Fare:</span>
-                <span>₱{calculatedFee.baseFare.toFixed(2)}</span>
+                <span>₱{calculatedDeliveryFee.baseFare.toFixed(2)}</span>
               </div>
               <div className="flex justify-between text-amber-900 dark:text-amber-300">
                 <span>Distance Fee:</span>
-                <span>₱{calculatedFee.distanceFee.toFixed(2)}</span>
+                <span>₱{calculatedDeliveryFee.distanceFee.toFixed(2)}</span>
               </div>
-              {calculatedFee.surcharges > 0 && (
+              {calculatedDeliveryFee.surcharges > 0 && (
                 <div className="flex justify-between text-amber-900 dark:text-amber-300 font-bold">
                   <span>Surcharges:</span>
-                  <span>+₱{calculatedFee.surcharges.toFixed(2)}</span>
+                  <span>+₱{calculatedDeliveryFee.surcharges.toFixed(2)}</span>
                 </div>
               )}
               <div className="flex justify-between text-amber-900 dark:text-amber-300">
                 <span>Service Fee:</span>
-                <span>₱{calculatedFee.serviceFee.toFixed(2)}</span>
+                <span>₱{calculatedDeliveryFee.serviceFee.toFixed(2)}</span>
               </div>
               <div className="pt-2 border-t border-amber-200 dark:border-amber-900 flex justify-between font-black text-sm text-gray-900 dark:text-white">
                 <span>Customer Delivery Fee:</span>
-                <span className="text-amber-600">₱{calculatedFee.grandTotal.toFixed(2)}</span>
+                <span className="text-amber-600">₱{calculatedDeliveryFee.grandTotal.toFixed(2)}</span>
               </div>
               <div className="flex justify-between font-bold text-emerald-600 text-xs pt-1">
-                <span>Estimated Rider Payout ({ratesConfig.riderCommissionPercent}%):</span>
-                <span>₱{calculatedFee.riderCut.toFixed(2)}</span>
+                <span>Estimated Driver Payout ({ratesConfig.riderCommissionPercent}%):</span>
+                <span>₱{calculatedDeliveryFee.driverCut.toFixed(2)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 2. TAXI FARES SECTION */}
+      {ratesConfig && activeMainTab === 'taxi' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Taxi Rates Form */}
+          <div className="lg:col-span-2 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-5 shadow-xs space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 dark:border-zinc-800 pb-4">
+              <div>
+                <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                  Taxi Fares for {cities.find((c) => c.id === activeCityId)?.name || activeCityId}
+                </h3>
+                <p className="text-xs text-gray-500">
+                  Saved in <code className="font-mono text-amber-600">deliveryRates/{'{cityId}'}.rideRates.{'{vehicleType}'}</code>
+                </p>
+              </div>
+
+              <button
+                onClick={() => setConfirmSaveRatesModal(true)}
+                className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs self-start sm:self-auto"
+              >
+                <Save className="w-4 h-4" /> Save Taxi Fares
+              </button>
+            </div>
+
+            {/* Vehicle sub-tabs */}
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {VEHICLE_TYPES.map((vt) => {
+                const currentVRates = ratesConfig.rideRates?.[vt.id] || DEFAULT_TAXI_RATES[vt.id];
+                const isEnabled = currentVRates.enabled !== false;
+
+                return (
+                  <button
+                    key={vt.id}
+                    onClick={() => setActiveVehicleTab(vt.id)}
+                    className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all ${
+                      activeVehicleTab === vt.id
+                        ? 'bg-amber-400 text-black shadow-xs font-black'
+                        : 'bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 hover:bg-gray-200'
+                    }`}
+                  >
+                    <span>{vt.name}</span>
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        isEnabled ? 'bg-emerald-500' : 'bg-gray-400'
+                      }`}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Selected Vehicle Settings */}
+            {(() => {
+              const currentVRates: TaxiVehicleRates =
+                ratesConfig.rideRates?.[activeVehicleTab] || DEFAULT_TAXI_RATES[activeVehicleTab];
+
+              return (
+                <div className="space-y-5">
+                  {/* Enabled toggle banner */}
+                  <div className="p-3.5 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-850 flex items-center justify-between">
+                    <div>
+                      <span className="font-bold text-xs text-gray-900 dark:text-white block">
+                        Enable Taxi Service for {VEHICLE_LABELS[activeVehicleTab]} in {cities.find((c) => c.id === activeCityId)?.name}
+                      </span>
+                      <span className="text-[11px] text-gray-500">
+                        When disabled, customers in this city cannot book {VEHICLE_LABELS[activeVehicleTab]} rides.
+                      </span>
+                    </div>
+
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={currentVRates.enabled !== false}
+                        onChange={(e) => updateTaxiRateField('enabled', e.target.checked)}
+                        className="w-4 h-4 rounded-sm text-amber-500"
+                      />
+                      <span className="text-xs font-bold text-gray-700 dark:text-zinc-200">
+                        {currentVRates.enabled !== false ? 'Active' : 'Disabled'}
+                      </span>
+                    </label>
+                  </div>
+
+                  {/* 8 Fare Fields */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Base Fare (₱)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={currentVRates.baseFare || 0}
+                        onChange={(e) => updateTaxiRateField('baseFare', Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Included Distance (km)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        value={currentVRates.includedKm || 0}
+                        onChange={(e) => updateTaxiRateField('includedKm', Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Per Additional Km (₱)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        value={currentVRates.perKm || 0}
+                        onChange={(e) => updateTaxiRateField('perKm', Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Minimum Fare (₱)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={currentVRates.minFare || 0}
+                        onChange={(e) => updateTaxiRateField('minFare', Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Per Extra Stop Fee (₱)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={currentVRates.perStopFee || 0}
+                        onChange={(e) => updateTaxiRateField('perStopFee', Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Platform Service Fee (₱)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={currentVRates.serviceFee || 0}
+                        onChange={(e) => updateTaxiRateField('serviceFee', Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-amber-600"
+                      />
+                    </div>
+
+                    <div className="sm:col-span-2">
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Platform Commission Share (%)
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min="0"
+                          max="50"
+                          value={currentVRates.commissionPercent ?? 15}
+                          onChange={(e) => updateTaxiRateField('commissionPercent', Number(e.target.value))}
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                        />
+                        <span className="text-xs text-gray-400 font-bold">%</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Interactive Taxi Fare Calculator */}
+          <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-5 shadow-xs space-y-5">
+            <div className="flex items-center gap-2">
+              <Calculator className="w-5 h-5 text-amber-500" />
+              <h3 className="font-bold text-base text-gray-900 dark:text-white">
+                Taxi Fare Calculator
+              </h3>
+            </div>
+
+            <p className="text-xs text-gray-500 dark:text-zinc-400">
+              Simulate taxi ride fares across vehicles, extra stops, and time of day:
+            </p>
+
+            <div className="space-y-3.5 text-xs">
+              <div>
+                <label className="block uppercase font-semibold text-gray-500 mb-1">
+                  City
+                </label>
+                <select
+                  value={activeCityId}
+                  onChange={(e) => setActiveCityId(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                >
+                  {cities.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block uppercase font-semibold text-gray-500 mb-1">
+                  Vehicle Type
+                </label>
+                <select
+                  value={calcTaxiVehicle}
+                  onChange={(e) => setCalcTaxiVehicle(e.target.value as VehicleType)}
+                  className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                >
+                  {VEHICLE_TYPES.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.name} ({v.defaultSeats} seats)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block uppercase font-semibold text-gray-500 mb-1">
+                  Estimated Distance ({calcTaxiDistance} km)
+                </label>
+                <input
+                  type="range"
+                  min="1"
+                  max="50"
+                  step="0.5"
+                  value={calcTaxiDistance}
+                  onChange={(e) => setCalcTaxiDistance(Number(e.target.value))}
+                  className="w-full accent-amber-500"
+                />
+              </div>
+
+              <div>
+                <label className="block uppercase font-semibold text-gray-500 mb-1">
+                  Extra Stops Along Route: {calcExtraStops}
+                </label>
+                <div className="flex gap-2">
+                  {[0, 1, 2, 3, 4].map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() => setCalcExtraStops(n)}
+                      className={`flex-1 py-1.5 rounded-lg text-xs font-bold border ${
+                        calcExtraStops === n
+                          ? 'bg-amber-400 text-black border-amber-400'
+                          : 'bg-gray-100 dark:bg-zinc-800 border-gray-200 dark:border-zinc-700 text-gray-700 dark:text-zinc-300'
+                      }`}
+                    >
+                      {n === 0 ? 'None' : `+${n}`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block uppercase font-semibold text-gray-500 mb-1">
+                  Time of Day
+                </label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[
+                    { id: 'day', label: 'Day Regular' },
+                    { id: 'peak', label: 'Peak Rush (+20%)' },
+                    { id: 'night', label: 'Late Night (+₱30)' }
+                  ].map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => setCalcTaxiTimeOfDay(t.id as any)}
+                      className={`py-1.5 px-2 rounded-lg text-[11px] font-bold border transition-colors ${
+                        calcTaxiTimeOfDay === t.id
+                          ? 'bg-amber-400 text-black border-amber-400'
+                          : 'bg-gray-50 dark:bg-zinc-850 border-gray-200 dark:border-zinc-700 text-gray-700 dark:text-zinc-300'
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Calculated Breakdown Card */}
+            <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 space-y-2 text-xs">
+              <div className="flex justify-between text-amber-900 dark:text-amber-300">
+                <span>Ride Fare:</span>
+                <span>₱{calculatedTaxiFare.rideFare.toFixed(2)}</span>
+              </div>
+              {calculatedTaxiFare.stopFee > 0 && (
+                <div className="flex justify-between text-amber-900 dark:text-amber-300">
+                  <span>Extra Stop Fee ({calcExtraStops}):</span>
+                  <span>+₱{calculatedTaxiFare.stopFee.toFixed(2)}</span>
+                </div>
+              )}
+              <div className="flex justify-between text-amber-900 dark:text-amber-300">
+                <span>Platform Service Fee:</span>
+                <span>₱{calculatedTaxiFare.serviceFee.toFixed(2)}</span>
+              </div>
+              <div className="pt-2 border-t border-amber-200 dark:border-amber-900 flex justify-between font-black text-sm text-gray-900 dark:text-white">
+                <span>Total Customer Fare:</span>
+                <span className="text-amber-600 font-extrabold">₱{calculatedTaxiFare.total.toFixed(2)}</span>
+              </div>
+
+              <div className="pt-2 border-t border-amber-200 dark:border-amber-900 space-y-1">
+                <div className="flex justify-between font-bold text-emerald-600 text-xs">
+                  <span>Driver Net Payout:</span>
+                  <span>₱{calculatedTaxiFare.driverNet.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-[11px] text-gray-500 dark:text-zinc-400">
+                  <span>Platform Margin ({calculatedTaxiFare.commissionPercent}% + fee):</span>
+                  <span>₱{calculatedTaxiFare.platformMargin.toFixed(2)}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -894,7 +1338,7 @@ export const DeliveryRates: React.FC = () => {
         <ConfirmationModal
           isOpen={confirmSaveRatesModal}
           onClose={() => setConfirmSaveRatesModal(false)}
-          onConfirm={handleSaveDeliveryRates}
+          onConfirm={handleSaveRates}
           title="Confirm Rate Schedule Updates"
           message={`Are you sure you want to save the new rate schedule for ${cities.find((c) => c.id === activeCityId)?.name}? This takes effect immediately on all new customer orders in this city.`}
           confirmLabel="Save & Apply Rates"
