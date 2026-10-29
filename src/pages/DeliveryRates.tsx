@@ -39,7 +39,8 @@ import {
   Bike,
   Clock,
   ShieldCheck,
-  DollarSign
+  DollarSign,
+  Percent
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
@@ -57,7 +58,10 @@ const DEFAULT_SERVICE_RATES: ServiceRates = {
   perKm: 12,
   minFee: 45,
   maxFee: 350,
-  serviceFee: 10
+  serviceFeeType: 'flat',
+  serviceFee: 10,
+  serviceFeeMin: 0,
+  serviceFeeMax: 0
 };
 
 export const DeliveryRates: React.FC = () => {
@@ -91,6 +95,7 @@ export const DeliveryRates: React.FC = () => {
 
   // Delivery Fee Simulator States
   const [calcService, setCalcService] = useState<DeliveryServiceType>('food');
+  const [calcItemSubtotal, setCalcItemSubtotal] = useState<number>(350);
   const [calcDeliveryDistance, setCalcDeliveryDistance] = useState<number>(4.5);
   const [calcIsNight, setCalcIsNight] = useState<boolean>(false);
   const [calcIsPeak, setCalcIsPeak] = useState<boolean>(false);
@@ -130,13 +135,21 @@ export const DeliveryRates: React.FC = () => {
 
         if (snap.exists()) {
           const dt = snap.data();
+          const svcs = dt.services || {};
           setRatesConfig({
             id: snap.id,
-            food: dt.food || { ...DEFAULT_SERVICE_RATES },
-            convenience: dt.convenience || { ...DEFAULT_SERVICE_RATES },
-            parcel: dt.parcel || { ...DEFAULT_SERVICE_RATES, baseFare: 40, perKm: 10 },
-            pabili: dt.pabili || { ...DEFAULT_SERVICE_RATES, baseFare: 60, serviceFee: 20 },
-            request_rider: dt.request_rider || { ...DEFAULT_SERVICE_RATES, baseFare: 50 },
+            food: svcs.food || dt.food || { ...DEFAULT_SERVICE_RATES },
+            convenience: svcs.convenience || dt.convenience || { ...DEFAULT_SERVICE_RATES },
+            parcel: svcs.parcel || dt.parcel || { ...DEFAULT_SERVICE_RATES, baseFare: 40, perKm: 10 },
+            pabili: svcs.pabili || dt.pabili || { ...DEFAULT_SERVICE_RATES, baseFare: 60, serviceFee: 20 },
+            request_rider: svcs.request_rider || dt.request_rider || { ...DEFAULT_SERVICE_RATES, baseFare: 50 },
+            services: {
+              food: svcs.food || dt.food || { ...DEFAULT_SERVICE_RATES },
+              convenience: svcs.convenience || dt.convenience || { ...DEFAULT_SERVICE_RATES },
+              parcel: svcs.parcel || dt.parcel || { ...DEFAULT_SERVICE_RATES, baseFare: 40, perKm: 10 },
+              pabili: svcs.pabili || dt.pabili || { ...DEFAULT_SERVICE_RATES, baseFare: 60, serviceFee: 20 },
+              request_rider: svcs.request_rider || dt.request_rider || { ...DEFAULT_SERVICE_RATES, baseFare: 50 }
+            },
             rideRates: dt.rideRates || { ...DEFAULT_TAXI_RATES },
             riderCommissionPercent: dt.riderCommissionPercent ?? 80,
             surcharges: dt.surcharges || {
@@ -153,6 +166,13 @@ export const DeliveryRates: React.FC = () => {
             parcel: { ...DEFAULT_SERVICE_RATES, baseFare: 40, perKm: 10 },
             pabili: { ...DEFAULT_SERVICE_RATES, baseFare: 60, serviceFee: 20 },
             request_rider: { ...DEFAULT_SERVICE_RATES, baseFare: 50 },
+            services: {
+              food: { ...DEFAULT_SERVICE_RATES },
+              convenience: { ...DEFAULT_SERVICE_RATES },
+              parcel: { ...DEFAULT_SERVICE_RATES, baseFare: 40, perKm: 10 },
+              pabili: { ...DEFAULT_SERVICE_RATES, baseFare: 60, serviceFee: 20 },
+              request_rider: { ...DEFAULT_SERVICE_RATES, baseFare: 50 }
+            },
             rideRates: { ...DEFAULT_TAXI_RATES },
             riderCommissionPercent: 80,
             surcharges: {
@@ -300,14 +320,21 @@ export const DeliveryRates: React.FC = () => {
   // Update delivery service rate field
   const updateDeliveryRateField = (
     field: keyof ServiceRates,
-    value: number
+    value: any
   ) => {
     if (!ratesConfig) return;
+    const currentServiceRates = ratesConfig[activeServiceTab] || DEFAULT_SERVICE_RATES;
+    const updatedRates: ServiceRates = {
+      ...currentServiceRates,
+      [field]: field === 'serviceFeeType' ? value : Number(value)
+    };
+
     setRatesConfig({
       ...ratesConfig,
-      [activeServiceTab]: {
-        ...ratesConfig[activeServiceTab],
-        [field]: Number(value)
+      [activeServiceTab]: updatedRates,
+      services: {
+        ...(ratesConfig.services || {}),
+        [activeServiceTab]: updatedRates
       }
     });
   };
@@ -327,7 +354,7 @@ export const DeliveryRates: React.FC = () => {
         ...currentRideRates,
         [activeVehicleTab]: {
           ...currentVehicleRates,
-          [field]: field === 'enabled' ? Boolean(value) : Number(value)
+          [field]: field === 'enabled' ? Boolean(value) : field === 'serviceFeeType' ? value : Number(value)
         }
       }
     });
@@ -341,6 +368,19 @@ export const DeliveryRates: React.FC = () => {
       const rateRef = doc(db, 'deliveryRates', activeCityId);
       const payload = {
         ...ratesConfig,
+        services: {
+          food: ratesConfig.food,
+          convenience: ratesConfig.convenience,
+          parcel: ratesConfig.parcel,
+          pabili: ratesConfig.pabili,
+          request_rider: ratesConfig.request_rider
+        },
+        food: ratesConfig.food,
+        convenience: ratesConfig.convenience,
+        parcel: ratesConfig.parcel,
+        pabili: ratesConfig.pabili,
+        request_rider: ratesConfig.request_rider,
+        rideRates: ratesConfig.rideRates,
         updatedAt: Timestamp.now()
       };
 
@@ -352,7 +392,7 @@ export const DeliveryRates: React.FC = () => {
         action: 'UPDATE_DELIVERY_AND_TAXI_RATES',
         entityType: 'deliveryRates',
         entityId: activeCityId,
-        details: `Saved rates & fares (Delivery & Taxi rideRates) for city ${activeCityId}`
+        details: `Saved rates & fares (services[service] & rideRates[vehicle]) for city ${activeCityId}`
       });
 
       showSuccess('Rates & Fares schedule saved successfully.');
@@ -364,16 +404,28 @@ export const DeliveryRates: React.FC = () => {
     }
   };
 
-  // 1. Delivery Fee Simulator Calculation
+  // 1. Delivery Fee Simulator Calculation (Percent applies to items subtotal + delivery fee)
   const calculatedDeliveryFee = useMemo(() => {
-    if (!ratesConfig) return { baseFare: 0, distanceFee: 0, serviceFee: 0, surcharges: 0, totalDeliveryFee: 0, grandTotal: 0, driverCut: 0 };
+    if (!ratesConfig) {
+      return {
+        baseFare: 0,
+        distanceFee: 0,
+        serviceFee: 0,
+        feeType: 'flat',
+        feeBreakdownNote: '',
+        surcharges: 0,
+        totalDeliveryFee: 0,
+        itemsSubtotal: calcItemSubtotal,
+        grandTotal: 0,
+        driverCut: 0,
+        platformMargin: 0
+      };
+    }
     const rates = ratesConfig[calcService] || DEFAULT_SERVICE_RATES;
 
     const baseFare = Number(rates.baseFare) || 0;
     const includedKm = Number(rates.includedKm) || 0;
     const perKm = Number(rates.perKm) || 0;
-    const serviceFee = Number(rates.serviceFee) || 0;
-
     const extraKm = Math.max(0, calcDeliveryDistance - includedKm);
     const distanceFee = extraKm * perKm;
     let deliverySubtotal = baseFare + distanceFee;
@@ -391,22 +443,51 @@ export const DeliveryRates: React.FC = () => {
     }
 
     const totalDeliveryFee = deliverySubtotal + surchargeTotal;
-    const grandTotal = totalDeliveryFee + serviceFee;
+
+    // Service Fee calculation: Flat or Percent (applies to items subtotal + delivery fee)
+    let calculatedServiceFee = 0;
+    let feeBreakdownNote = '';
+    const feeType = rates.serviceFeeType || 'flat';
+    const rawFeeVal = Number(rates.serviceFee) || 0;
+
+    if (feeType === 'percent') {
+      const baseForPercent = calcItemSubtotal + totalDeliveryFee;
+      calculatedServiceFee = (baseForPercent * rawFeeVal) / 100;
+      feeBreakdownNote = `${rawFeeVal}% of (₱${calcItemSubtotal.toFixed(2)} items + ₱${totalDeliveryFee.toFixed(2)} delivery = ₱${baseForPercent.toFixed(2)})`;
+      if (rates.serviceFeeMin && calculatedServiceFee < rates.serviceFeeMin) {
+        calculatedServiceFee = rates.serviceFeeMin;
+        feeBreakdownNote += ` (bounded by min ₱${rates.serviceFeeMin})`;
+      }
+      if (rates.serviceFeeMax && rates.serviceFeeMax > 0 && calculatedServiceFee > rates.serviceFeeMax) {
+        calculatedServiceFee = rates.serviceFeeMax;
+        feeBreakdownNote += ` (capped by max ₱${rates.serviceFeeMax})`;
+      }
+    } else {
+      calculatedServiceFee = rawFeeVal;
+      feeBreakdownNote = `Flat ₱${rawFeeVal.toFixed(2)}`;
+    }
+
+    const grandTotal = calcItemSubtotal + totalDeliveryFee + calculatedServiceFee;
     const driverCommission = ratesConfig.riderCommissionPercent ?? 80;
     const driverCut = (totalDeliveryFee * driverCommission) / 100;
+    const platformMargin = (totalDeliveryFee - driverCut) + calculatedServiceFee;
 
     return {
       baseFare,
       distanceFee,
-      serviceFee,
+      serviceFee: calculatedServiceFee,
+      feeType,
+      feeBreakdownNote,
       surcharges: surchargeTotal,
       totalDeliveryFee,
+      itemsSubtotal: calcItemSubtotal,
       grandTotal,
-      driverCut
+      driverCut,
+      platformMargin
     };
-  }, [ratesConfig, calcService, calcDeliveryDistance, calcIsPeak, calcIsNight]);
+  }, [ratesConfig, calcService, calcDeliveryDistance, calcIsPeak, calcIsNight, calcItemSubtotal]);
 
-  // 2. Taxi Fare Calculator Calculation
+  // 2. Taxi Fare Calculator Calculation (Percent applies to ride fare + stop fee)
   const calculatedTaxiFare = useMemo(() => {
     const defaultV = DEFAULT_TAXI_RATES[calcTaxiVehicle];
     const vRates: TaxiVehicleRates = ratesConfig?.rideRates?.[calcTaxiVehicle] || defaultV;
@@ -416,7 +497,6 @@ export const DeliveryRates: React.FC = () => {
     const perKm = Number(vRates.perKm) || 0;
     const minFare = Number(vRates.minFare) || 0;
     const perStopFee = Number(vRates.perStopFee) || 0;
-    const serviceFee = Number(vRates.serviceFee) || 0;
     const commissionPercent = Number(vRates.commissionPercent) ?? 15;
 
     // Distance calculation
@@ -434,17 +514,43 @@ export const DeliveryRates: React.FC = () => {
     }
 
     const stopFee = Math.max(0, calcExtraStops) * perStopFee;
-    const subtotal = rideFare + stopFee;
-    const total = subtotal + serviceFee;
+    const rideSubtotal = rideFare + stopFee;
+
+    // Service Fee: Flat or Percent
+    let calculatedServiceFee = 0;
+    let feeBreakdownNote = '';
+    const feeType = vRates.serviceFeeType || 'flat';
+    const rawFeeVal = Number(vRates.serviceFee) || 0;
+
+    if (feeType === 'percent') {
+      calculatedServiceFee = (rideSubtotal * rawFeeVal) / 100;
+      feeBreakdownNote = `${rawFeeVal}% of ride fare (₱${rideSubtotal.toFixed(2)})`;
+      if (vRates.serviceFeeMin && calculatedServiceFee < vRates.serviceFeeMin) {
+        calculatedServiceFee = vRates.serviceFeeMin;
+        feeBreakdownNote += ` (min ₱${vRates.serviceFeeMin})`;
+      }
+      if (vRates.serviceFeeMax && vRates.serviceFeeMax > 0 && calculatedServiceFee > vRates.serviceFeeMax) {
+        calculatedServiceFee = vRates.serviceFeeMax;
+        feeBreakdownNote += ` (max ₱${vRates.serviceFeeMax})`;
+      }
+    } else {
+      calculatedServiceFee = rawFeeVal;
+      feeBreakdownNote = `Flat ₱${rawFeeVal.toFixed(2)}`;
+    }
+
+    const total = rideSubtotal + calculatedServiceFee;
 
     // Platform margin & Driver Net
-    const platformMargin = (rideFare * (commissionPercent / 100)) + serviceFee;
+    const platformRideCommission = (rideFare * (commissionPercent / 100));
+    const platformMargin = platformRideCommission + calculatedServiceFee;
     const driverNet = total - platformMargin;
 
     return {
       rideFare,
       stopFee,
-      serviceFee,
+      serviceFee: calculatedServiceFee,
+      feeType,
+      feeBreakdownNote,
       total,
       driverNet,
       platformMargin,
@@ -680,17 +786,89 @@ export const DeliveryRates: React.FC = () => {
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                  Platform Service Fee (₱)
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  value={ratesConfig[activeServiceTab]?.serviceFee || 0}
-                  onChange={(e) => updateDeliveryRateField('serviceFee', Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-amber-600"
-                />
+              {/* Platform Service Fee Configuration */}
+              <div className="sm:col-span-2 p-3.5 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/50 dark:bg-amber-950/20 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-amber-900 dark:text-amber-300">
+                      Platform Service Fee
+                    </label>
+                    <p className="text-[11px] text-amber-700/80 dark:text-amber-400/80">
+                      Charged to customer. If percent, applies to items subtotal + delivery fee.
+                    </p>
+                  </div>
+                  <div className="inline-flex rounded-lg border border-amber-300 dark:border-amber-800 p-0.5 bg-white dark:bg-zinc-900">
+                    <button
+                      type="button"
+                      onClick={() => updateDeliveryRateField('serviceFeeType', 'flat')}
+                      className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${
+                        (ratesConfig[activeServiceTab]?.serviceFeeType || 'flat') === 'flat'
+                          ? 'bg-amber-500 text-white shadow-xs'
+                          : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white'
+                      }`}
+                    >
+                      Flat ₱
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateDeliveryRateField('serviceFeeType', 'percent')}
+                      className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${
+                        ratesConfig[activeServiceTab]?.serviceFeeType === 'percent'
+                          ? 'bg-amber-500 text-white shadow-xs'
+                          : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white'
+                      }`}
+                    >
+                      Percent %
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                      {ratesConfig[activeServiceTab]?.serviceFeeType === 'percent' ? 'Fee Rate (%)' : 'Flat Fee (₱)'}
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step={ratesConfig[activeServiceTab]?.serviceFeeType === 'percent' ? '0.1' : '1'}
+                      value={ratesConfig[activeServiceTab]?.serviceFee || 0}
+                      onChange={(e) => updateDeliveryRateField('serviceFee', Number(e.target.value))}
+                      className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-amber-600"
+                    />
+                  </div>
+
+                  {ratesConfig[activeServiceTab]?.serviceFeeType === 'percent' && (
+                    <>
+                      <div>
+                        <label className="block text-[11px] font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                          Min Fee Cap (₱) <span className="text-gray-400 lowercase">(optional)</span>
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          value={ratesConfig[activeServiceTab]?.serviceFeeMin || 0}
+                          onChange={(e) => updateDeliveryRateField('serviceFeeMin', Number(e.target.value))}
+                          placeholder="e.g. 5"
+                          className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                          Max Fee Cap (₱) <span className="text-gray-400 lowercase">(0 = no cap)</span>
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          value={ratesConfig[activeServiceTab]?.serviceFeeMax || 0}
+                          onChange={(e) => updateDeliveryRateField('serviceFeeMax', Number(e.target.value))}
+                          placeholder="0"
+                          className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -842,6 +1020,20 @@ export const DeliveryRates: React.FC = () => {
 
               <div>
                 <label className="block uppercase font-semibold text-gray-500 mb-1">
+                  Cart Items Subtotal (₱)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="10"
+                  value={calcItemSubtotal}
+                  onChange={(e) => setCalcItemSubtotal(Math.max(0, Number(e.target.value)))}
+                  className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                />
+              </div>
+
+              <div>
+                <label className="block uppercase font-semibold text-gray-500 mb-1">
                   Trip Distance ({calcDeliveryDistance} km)
                 </label>
                 <input
@@ -883,6 +1075,10 @@ export const DeliveryRates: React.FC = () => {
 
             {/* Calculated Breakdown Card */}
             <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 space-y-2 text-xs">
+              <div className="flex justify-between text-gray-700 dark:text-zinc-300">
+                <span>Items Subtotal:</span>
+                <span className="font-semibold">₱{calculatedDeliveryFee.itemsSubtotal.toFixed(2)}</span>
+              </div>
               <div className="flex justify-between text-amber-900 dark:text-amber-300">
                 <span>Base Fare:</span>
                 <span>₱{calculatedDeliveryFee.baseFare.toFixed(2)}</span>
@@ -897,17 +1093,34 @@ export const DeliveryRates: React.FC = () => {
                   <span>+₱{calculatedDeliveryFee.surcharges.toFixed(2)}</span>
                 </div>
               )}
-              <div className="flex justify-between text-amber-900 dark:text-amber-300">
-                <span>Service Fee:</span>
-                <span>₱{calculatedDeliveryFee.serviceFee.toFixed(2)}</span>
+              <div className="flex justify-between text-amber-900 dark:text-amber-300 font-semibold pt-1 border-t border-amber-200/60 dark:border-amber-900/40">
+                <span>Delivery Fee Subtotal:</span>
+                <span>₱{calculatedDeliveryFee.totalDeliveryFee.toFixed(2)}</span>
               </div>
+              <div className="flex justify-between text-amber-900 dark:text-amber-300">
+                <span>
+                  Platform Service Fee{' '}
+                  <span className="text-[10px] text-amber-700 dark:text-amber-400 block sm:inline">
+                    ({calculatedDeliveryFee.feeBreakdownNote})
+                  </span>
+                </span>
+                <span className="font-bold">₱{calculatedDeliveryFee.serviceFee.toFixed(2)}</span>
+              </div>
+
               <div className="pt-2 border-t border-amber-200 dark:border-amber-900 flex justify-between font-black text-sm text-gray-900 dark:text-white">
-                <span>Customer Delivery Fee:</span>
+                <span>Total Customer Pays:</span>
                 <span className="text-amber-600">₱{calculatedDeliveryFee.grandTotal.toFixed(2)}</span>
               </div>
-              <div className="flex justify-between font-bold text-emerald-600 text-xs pt-1">
-                <span>Estimated Driver Payout ({ratesConfig.riderCommissionPercent}%):</span>
-                <span>₱{calculatedDeliveryFee.driverCut.toFixed(2)}</span>
+
+              <div className="pt-2 border-t border-amber-200 dark:border-amber-900 space-y-1">
+                <div className="flex justify-between font-bold text-emerald-600 text-xs">
+                  <span>Driver Payout ({ratesConfig.riderCommissionPercent}% of delivery):</span>
+                  <span>₱{calculatedDeliveryFee.driverCut.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-[11px] text-gray-600 dark:text-zinc-400">
+                  <span>Platform Margin (retained delivery + fee):</span>
+                  <span className="font-bold text-gray-900 dark:text-white">₱{calculatedDeliveryFee.platformMargin.toFixed(2)}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -1064,17 +1277,89 @@ export const DeliveryRates: React.FC = () => {
                       />
                     </div>
 
-                    <div>
-                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                        Platform Service Fee (₱)
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        value={currentVRates.serviceFee || 0}
-                        onChange={(e) => updateTaxiRateField('serviceFee', Number(e.target.value))}
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-amber-600"
-                      />
+                    {/* Platform Service Fee Configuration */}
+                    <div className="sm:col-span-2 p-3.5 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/50 dark:bg-amber-950/20 space-y-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div>
+                          <label className="block text-xs font-bold uppercase tracking-wider text-amber-900 dark:text-amber-300">
+                            Platform Service Fee
+                          </label>
+                          <p className="text-[11px] text-amber-700/80 dark:text-amber-400/80">
+                            Charged to rider. If percent, applies to ride fare + extra stop fees.
+                          </p>
+                        </div>
+                        <div className="inline-flex rounded-lg border border-amber-300 dark:border-amber-800 p-0.5 bg-white dark:bg-zinc-900">
+                          <button
+                            type="button"
+                            onClick={() => updateTaxiRateField('serviceFeeType', 'flat')}
+                            className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${
+                              (currentVRates.serviceFeeType || 'flat') === 'flat'
+                                ? 'bg-amber-500 text-white shadow-xs'
+                                : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white'
+                            }`}
+                          >
+                            Flat ₱
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => updateTaxiRateField('serviceFeeType', 'percent')}
+                            className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${
+                              currentVRates.serviceFeeType === 'percent'
+                                ? 'bg-amber-500 text-white shadow-xs'
+                                : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white'
+                            }`}
+                          >
+                            Percent %
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                          <label className="block text-[11px] font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                            {currentVRates.serviceFeeType === 'percent' ? 'Fee Rate (%)' : 'Flat Fee (₱)'}
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step={currentVRates.serviceFeeType === 'percent' ? '0.1' : '1'}
+                            value={currentVRates.serviceFee || 0}
+                            onChange={(e) => updateTaxiRateField('serviceFee', Number(e.target.value))}
+                            className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-amber-600"
+                          />
+                        </div>
+
+                        {currentVRates.serviceFeeType === 'percent' && (
+                          <>
+                            <div>
+                              <label className="block text-[11px] font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                                Min Fee Cap (₱) <span className="text-gray-400 lowercase">(optional)</span>
+                              </label>
+                              <input
+                                type="number"
+                                min="0"
+                                value={currentVRates.serviceFeeMin || 0}
+                                onChange={(e) => updateTaxiRateField('serviceFeeMin', Number(e.target.value))}
+                                placeholder="e.g. 5"
+                                className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                                Max Fee Cap (₱) <span className="text-gray-400 lowercase">(0 = no cap)</span>
+                              </label>
+                              <input
+                                type="number"
+                                min="0"
+                                value={currentVRates.serviceFeeMax || 0}
+                                onChange={(e) => updateTaxiRateField('serviceFeeMax', Number(e.target.value))}
+                                placeholder="0"
+                                className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                              />
+                            </div>
+                          </>
+                        )}
+                      </div>
                     </div>
 
                     <div className="sm:col-span-2">
@@ -1224,8 +1509,13 @@ export const DeliveryRates: React.FC = () => {
                 </div>
               )}
               <div className="flex justify-between text-amber-900 dark:text-amber-300">
-                <span>Platform Service Fee:</span>
-                <span>₱{calculatedTaxiFare.serviceFee.toFixed(2)}</span>
+                <span>
+                  Platform Service Fee{' '}
+                  <span className="text-[10px] text-amber-700 dark:text-amber-400 block sm:inline">
+                    ({calculatedTaxiFare.feeBreakdownNote})
+                  </span>
+                </span>
+                <span className="font-bold">₱{calculatedTaxiFare.serviceFee.toFixed(2)}</span>
               </div>
               <div className="pt-2 border-t border-amber-200 dark:border-amber-900 flex justify-between font-black text-sm text-gray-900 dark:text-white">
                 <span>Total Customer Fare:</span>

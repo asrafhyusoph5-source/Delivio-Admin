@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import L from 'leaflet';
 import {
   db,
@@ -15,7 +15,8 @@ import {
   arrayUnion,
   writeBatch,
   increment,
-  runTransaction
+  runTransaction,
+  addDoc
 } from '../firebase';
 import { useCity } from '../context/CityContext';
 import { useAuth } from '../context/AuthContext';
@@ -64,6 +65,7 @@ import { TableSkeleton } from '../components/common/SkeletonLoader';
 
 export const Customers: React.FC = () => {
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
   const initialSearch = searchParams.get('search') || '';
 
   const { selectedCityId, cities } = useCity();
@@ -601,6 +603,25 @@ export const Customers: React.FC = () => {
 
       showSuccess(`Successfully credited ₱${amountNum.toFixed(2)} to ${selectedCustomer.name}'s wallet.`);
 
+      // Create customer inbox notification
+      try {
+        await addDoc(collection(db, 'inbox'), {
+          title: 'Wallet updated',
+          body: `₱${amountNum.toFixed(2)} was added to your Delivio Wallet`,
+          category: 'wallet',
+          imageUrl: null,
+          link: null,
+          audience: null,
+          customerId: selectedCustomer.uid,
+          riderId: null,
+          createdAt: now,
+          createdBy: adminProfile?.uid || 'admin',
+          createdByName: adminProfile?.name || 'Administrator'
+        });
+      } catch (inboxErr) {
+        console.error('Failed to dispatch wallet inbox notification:', inboxErr);
+      }
+
       // Update state
       setSelectedCustomer((prev) => (prev ? { ...prev, walletBalance: finalBal } : null));
       setCustomers((prev) =>
@@ -714,6 +735,25 @@ export const Customers: React.FC = () => {
       });
 
       showSuccess(`Successfully deducted ₱${amountNum.toFixed(2)}.`);
+
+      // Create customer inbox notification
+      try {
+        await addDoc(collection(db, 'inbox'), {
+          title: 'Wallet updated',
+          body: `₱${amountNum.toFixed(2)} was deducted from your Delivio Wallet`,
+          category: 'wallet',
+          imageUrl: null,
+          link: null,
+          audience: null,
+          customerId: selectedCustomer.uid,
+          riderId: null,
+          createdAt: now,
+          createdBy: adminProfile?.uid || 'admin',
+          createdByName: adminProfile?.name || 'Administrator'
+        });
+      } catch (inboxErr) {
+        console.error('Failed to dispatch wallet deduction inbox notification:', inboxErr);
+      }
 
       // Update state
       setSelectedCustomer((prev) => (prev ? { ...prev, walletBalance: finalBal } : null));
@@ -1264,6 +1304,13 @@ export const Customers: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2">
+                <button
+                  onClick={() => navigate(`/inbox?customerId=${selectedCustomer.uid}`)}
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold border border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-700 dark:text-zinc-200 hover:bg-gray-50 dark:hover:bg-zinc-700 flex items-center gap-1.5 shadow-2xs transition-colors"
+                >
+                  <Mail className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Message</span>
+                </button>
                 <button
                   onClick={() => openEditModal(selectedCustomer)}
                   className="delivio-btn-yellow px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 shadow-xs"

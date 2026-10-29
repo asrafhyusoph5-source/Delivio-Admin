@@ -62,10 +62,12 @@ export interface OrderStatusHistoryItem {
 }
 
 export interface OrderItem {
+  id?: string;
   name: string;
   qty: number;
   price: number;
   notes?: string;
+  [key: string]: any;
 }
 
 export interface OrderLocationPoint {
@@ -165,6 +167,15 @@ export interface Order {
   cancelFault?: 'customer' | 'merchant' | 'rider' | 'platform';
   cancelledBy?: string;
   rejectReason?: string;
+  editedByMerchant?: boolean;
+  isEditedByMerchant?: boolean;
+  editNote?: string;
+  originalItems?: OrderItem[];
+  originalTotal?: number;
+  originalFees?: OrderFees;
+  walletAdjustDue?: number;
+  walletAdjustApplied?: boolean;
+  walletAdjustAppliedAt?: any;
   createdAt?: any;
   updatedAt?: any;
   pickedUpAt?: any;
@@ -175,6 +186,7 @@ export interface WalletTransaction {
   id?: string;
   customerId?: string;
   riderId?: string;
+  merchantId?: string;
   type: 'cash_in' | 'adjustment' | 'refund' | 'order_payment' | 'merge' | 'transfer_sent' | 'transfer_received' | string;
   amount: number;
   note?: string;
@@ -215,6 +227,15 @@ export interface WalletDirectoryEntry {
   updatedAt?: any;
 }
 
+export interface MerchantOperatingDay {
+  open: string;
+  close: string;
+  isOpen?: boolean;
+  closed?: boolean;
+}
+
+export type MerchantWeeklyHours = Record<string, MerchantOperatingDay>;
+
 export interface Merchant {
   id: string;
   name: string;
@@ -237,6 +258,15 @@ export interface Merchant {
   commissionRate: number; // e.g. 15 for 15%
   rating?: number;
   totalOrders?: number;
+  walletBalance?: number;
+  linkedCustomerUid?: string | null;
+  linkedCustomerEmail?: string | null;
+  linkedCustomerName?: string | null;
+  linkedAt?: any;
+  hours?: MerchantWeeklyHours;
+  autoSchedule?: boolean;
+  isPaused?: boolean;
+  pauseUntilTime?: any;
   createdAt?: any;
 }
 
@@ -306,13 +336,18 @@ export interface City {
   createdAt?: any;
 }
 
+export type ServiceFeeType = 'flat' | 'percent';
+
 export interface ServiceRates {
   baseFare: number;
   includedKm: number;
   perKm: number;
   minFee: number;
   maxFee: number;
-  serviceFee: number;
+  serviceFeeType?: ServiceFeeType; // 'flat' | 'percent'
+  serviceFee: number; // amount or percent
+  serviceFeeMin?: number; // optional percent min
+  serviceFeeMax?: number; // optional percent max
 }
 
 export interface TaxiVehicleFareConfig {
@@ -322,7 +357,10 @@ export interface TaxiVehicleFareConfig {
   perKm: number;
   minFare: number;
   perStopFee: number;
-  serviceFee: number;
+  serviceFeeType?: ServiceFeeType; // 'flat' | 'percent'
+  serviceFee: number; // amount or percent
+  serviceFeeMin?: number; // optional percent min
+  serviceFeeMax?: number; // optional percent max
   commissionPercent: number;
 }
 
@@ -337,6 +375,7 @@ export interface DeliveryRatesConfig {
   parcel: ServiceRates;
   pabili: ServiceRates;
   request_rider: ServiceRates;
+  services?: Record<string, ServiceRates>;
   rideRates?: Record<string, TaxiVehicleFareConfig>;
   riderCommissionPercent: number;
   surcharges: {
@@ -511,6 +550,13 @@ export interface EditHistoryEntry {
   at: any;
 }
 
+export interface PlatformVatConfig {
+  enabled: boolean;
+  percent: number;
+  mode: 'added' | 'included';
+  base: 'total' | 'fees';
+}
+
 export interface PlatformSettings {
   platformName: string;
   supportPhone: string;
@@ -519,5 +565,35 @@ export interface PlatformSettings {
   defaultCommissionRate?: number;
   services?: Record<string, boolean>;
   taxiVehicles?: Record<string, boolean>;
+  vat?: PlatformVatConfig;
+  timezone?: string;
   updatedAt?: any;
 }
+
+export type InboxCategory = 'promo' | 'order' | 'wallet' | 'safety' | 'system' | 'admin';
+
+export interface InboxLink {
+  merchantId?: string | null;
+  category?: 'food' | 'convenience' | null;
+}
+
+export interface InboxMessage {
+  id: string;
+  title: string;
+  body: string;
+  category: InboxCategory;
+  imageUrl?: string | null;
+  link?: InboxLink | null;
+  audience?: 'all_customers' | 'all_riders' | null;
+  customerId?: string | null;
+  riderId?: string | null;
+  customerName?: string | null;
+  customerEmail?: string | null;
+  riderName?: string | null;
+  createdAt: any;
+  createdBy?: string | null;
+  createdByName?: string | null;
+  sentBy?: string | null;
+  sentById?: string | null;
+}
+

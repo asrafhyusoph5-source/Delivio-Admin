@@ -53,7 +53,8 @@ import {
   Truck,
   ChevronDown,
   Calendar,
-  Navigation
+  Navigation,
+  Edit
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
@@ -62,7 +63,7 @@ export const FulfillmentChip: React.FC<{ order: Order }> = ({ order }) => {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700 whitespace-nowrap">
         <Car className="w-3 h-3 text-amber-600 shrink-0" />
-        <span>Ride Hailing</span>
+        <span>Taxi</span>
       </span>
     );
   }
@@ -90,7 +91,7 @@ export const FulfillmentChip: React.FC<{ order: Order }> = ({ order }) => {
 
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200 dark:border-blue-800 whitespace-nowrap">
-      <Car className="w-3 h-3 text-blue-600 shrink-0" />
+      <Truck className="w-3 h-3 text-blue-600 shrink-0" />
       <span>Delivery</span>
     </span>
   );
@@ -173,6 +174,182 @@ export const PaymentChip: React.FC<{ order: Order }> = ({ order }) => {
       <span className="text-[9px] font-semibold text-gray-500 dark:text-zinc-400 px-1">
         {order.codCollected ? 'Collected' : status || 'To Collect'}
       </span>
+    </div>
+  );
+};
+
+export const EditedByMerchantBadge: React.FC<{ order: Order }> = ({ order }) => {
+  const isEdited = Boolean(
+    order.editedByMerchant ||
+    order.isEditedByMerchant ||
+    (order.originalItems && order.originalItems.length > 0) ||
+    (order.originalTotal !== undefined && order.originalTotal !== null && order.originalTotal !== order.fees?.total)
+  );
+
+  if (!isEdited) return null;
+
+  return (
+    <span
+      title={order.editNote ? `Merchant Edit Note: ${order.editNote}` : 'Order was modified by the merchant'}
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950/80 dark:text-amber-300 border border-amber-400 dark:border-amber-700 shadow-2xs whitespace-nowrap"
+    >
+      <Edit className="w-3 h-3 text-amber-600 dark:text-amber-400 shrink-0" />
+      <span>Edited by merchant</span>
+    </span>
+  );
+};
+
+export const OrderMerchantEditComparison: React.FC<{ order: Order }> = ({ order }) => {
+  const isEdited = Boolean(
+    order.editedByMerchant ||
+    order.isEditedByMerchant ||
+    (order.originalItems && order.originalItems.length > 0) ||
+    (order.originalTotal !== undefined && order.originalTotal !== null && order.originalTotal !== order.fees?.total)
+  );
+
+  if (!isEdited) return null;
+
+  const origTotal = order.originalTotal ?? order.originalFees?.total ?? order.fees?.total ?? 0;
+  const currentTotal = order.fees?.total ?? 0;
+  const diff = currentTotal - origTotal;
+
+  return (
+    <div className="rounded-2xl border-2 border-amber-400 dark:border-amber-600/70 bg-amber-50/60 dark:bg-amber-950/20 p-4 space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2 pb-3 border-b border-amber-200 dark:border-amber-900/60">
+        <div className="flex items-center gap-2">
+          <span className="p-1.5 rounded-lg bg-amber-500 text-white">
+            <Edit className="w-4 h-4" />
+          </span>
+          <div>
+            <h4 className="text-xs font-black uppercase tracking-wider text-amber-950 dark:text-amber-200">
+              Edited by Merchant
+            </h4>
+            <p className="text-[11px] text-amber-800 dark:text-amber-300">
+              {order.editNote ? (
+                <span><strong className="font-bold">Note:</strong> {order.editNote}</span>
+              ) : (
+                <span className="italic">Items or pricing were updated by the merchant after order placement.</span>
+              )}
+            </p>
+          </div>
+        </div>
+
+        {/* Wallet Adjustment Status */}
+        <div className="flex items-center gap-2">
+          {order.walletAdjustDue !== undefined && order.walletAdjustDue !== 0 && (
+            <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-amber-200/80 dark:bg-amber-900/60 text-amber-950 dark:text-amber-200">
+              Adjust Due: ₱{Number(order.walletAdjustDue).toFixed(2)}
+            </span>
+          )}
+          {order.walletAdjustApplied !== undefined && (
+            <span
+              className={`text-[11px] font-extrabold px-2.5 py-0.5 rounded-full border ${
+                order.walletAdjustApplied
+                  ? 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-700'
+                  : 'bg-red-100 text-red-800 border-red-300 dark:bg-red-950/60 dark:text-red-300 dark:border-red-700'
+              }`}
+            >
+              {order.walletAdjustApplied ? '✓ Wallet Adjust Applied' : '⏳ Wallet Adjust Pending'}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Totals Comparison Card */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+        <div className="p-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-amber-200/80 dark:border-zinc-800">
+          <span className="text-[10px] font-bold uppercase text-gray-500 dark:text-zinc-400 block">Original Total</span>
+          <span className="text-sm font-black text-gray-700 dark:text-zinc-300 line-through">
+            ₱{Number(origTotal).toFixed(2)}
+          </span>
+        </div>
+        <div className="p-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-amber-400 dark:border-amber-700">
+          <span className="text-[10px] font-bold uppercase text-amber-700 dark:text-amber-400 block">New Total</span>
+          <span className="text-sm font-black text-amber-600 dark:text-amber-400">
+            ₱{Number(currentTotal).toFixed(2)}
+          </span>
+        </div>
+        <div className="p-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-amber-200/80 dark:border-zinc-800">
+          <span className="text-[10px] font-bold uppercase text-gray-500 dark:text-zinc-400 block">Difference</span>
+          <span
+            className={`text-sm font-black ${
+              diff > 0 ? 'text-red-600' : diff < 0 ? 'text-emerald-600' : 'text-gray-600'
+            }`}
+          >
+            {diff > 0 ? `+₱${diff.toFixed(2)}` : diff < 0 ? `-₱${Math.abs(diff).toFixed(2)}` : '₱0.00'}
+          </span>
+        </div>
+      </div>
+
+      {/* Original Items vs New Items Comparison */}
+      {order.originalItems && order.originalItems.length > 0 && (
+        <div className="space-y-2">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {/* Left: Original Items */}
+            <div className="border border-gray-200 dark:border-zinc-800 rounded-xl bg-white dark:bg-zinc-900 overflow-hidden">
+              <div className="px-3 py-2 bg-gray-100 dark:bg-zinc-800 font-bold text-[11px] text-gray-700 dark:text-zinc-300 flex justify-between items-center">
+                <span>Original Order Items</span>
+                <span className="text-[10px] font-normal text-gray-500">({order.originalItems.length} items)</span>
+              </div>
+              <div className="divide-y divide-gray-100 dark:divide-zinc-800 text-xs">
+                {order.originalItems.map((item, idx) => (
+                  <div key={idx} className="p-2.5 flex items-start justify-between">
+                    <div>
+                      <div className="font-semibold text-gray-800 dark:text-zinc-200">
+                        {item.qty}x {item.name}
+                      </div>
+                      {item.notes && <p className="text-[10px] text-gray-400 italic">Note: {item.notes}</p>}
+                    </div>
+                    <span className="font-bold text-gray-600 dark:text-zinc-400 ml-2">
+                      ₱{(Number(item.price || 0) * Number(item.qty || 1)).toFixed(2)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Right: Updated Items */}
+            <div className="border border-amber-300 dark:border-amber-700 rounded-xl bg-white dark:bg-zinc-900 overflow-hidden">
+              <div className="px-3 py-2 bg-amber-100/70 dark:bg-amber-950/40 font-bold text-[11px] text-amber-900 dark:text-amber-200 flex justify-between items-center">
+                <span>Updated Order Items</span>
+                <span className="text-[10px] font-normal text-amber-700 dark:text-amber-400">({(order.items || []).length} items)</span>
+              </div>
+              <div className="divide-y divide-gray-100 dark:divide-zinc-800 text-xs">
+                {(order.items || []).map((item, idx) => {
+                  const origMatch = order.originalItems?.find(
+                    (oi) => (oi.id && oi.id === item.id) || oi.name.toLowerCase() === item.name.toLowerCase()
+                  );
+                  const isModified = !origMatch || origMatch.qty !== item.qty || origMatch.price !== item.price;
+
+                  return (
+                    <div
+                      key={idx}
+                      className={`p-2.5 flex items-start justify-between ${
+                        isModified ? 'bg-amber-50/50 dark:bg-amber-950/20' : ''
+                      }`}
+                    >
+                      <div>
+                        <div className="font-semibold text-gray-900 dark:text-white flex items-center gap-1.5 flex-wrap">
+                          <span>{item.qty}x {item.name}</span>
+                          {isModified && (
+                            <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded bg-amber-200 text-amber-900 dark:bg-amber-900 dark:text-amber-200">
+                              Modified
+                            </span>
+                          )}
+                        </div>
+                        {item.notes && <p className="text-[10px] text-gray-400 italic">Note: {item.notes}</p>}
+                      </div>
+                      <span className="font-bold text-gray-900 dark:text-white ml-2">
+                        ₱{(Number(item.price || 0) * Number(item.qty || 1)).toFixed(2)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -300,6 +477,15 @@ export const LiveOrders: React.FC = () => {
             cancelFault: data.cancelFault,
             cancelledBy: data.cancelledBy,
             rejectReason: data.rejectReason,
+            editedByMerchant: Boolean(data.editedByMerchant || data.isEditedByMerchant),
+            isEditedByMerchant: Boolean(data.isEditedByMerchant || data.editedByMerchant),
+            editNote: data.editNote || data.merchantEditNote || '',
+            originalItems: data.originalItems || [],
+            originalTotal: data.originalTotal ?? data.originalFees?.total,
+            originalFees: data.originalFees,
+            walletAdjustDue: data.walletAdjustDue,
+            walletAdjustApplied: data.walletAdjustApplied,
+            walletAdjustAppliedAt: data.walletAdjustAppliedAt,
             createdAt: data.createdAt,
             updatedAt: data.updatedAt,
             pickedUpAt: data.pickedUpAt,
@@ -1073,7 +1259,10 @@ export const LiveOrders: React.FC = () => {
                       className="hover:bg-amber-50/50 dark:hover:bg-zinc-800/50 cursor-pointer transition-colors"
                     >
                       <td className="px-4 py-3 font-mono font-bold text-gray-900 dark:text-white">
-                        #{order.orderNumber}
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span>#{order.orderNumber}</span>
+                          <EditedByMerchantBadge order={order} />
+                        </div>
                       </td>
                       <td className="px-4 py-3">
                         <FulfillmentChip order={order} />
@@ -1203,11 +1392,17 @@ export const LiveOrders: React.FC = () => {
                         onClick={() => setSelectedOrder(ord)}
                         className="bg-white dark:bg-zinc-850 p-3.5 rounded-xl border border-gray-200 dark:border-zinc-750 shadow-xs hover:border-amber-400 dark:hover:border-amber-500 cursor-pointer transition-all"
                       >
-                        <div className="flex items-center justify-between mb-1.5">
-                          <span className="font-mono font-bold text-xs text-gray-900 dark:text-white">
-                            #{ord.orderNumber}
-                          </span>
-                          <ServiceChips order={ord} />
+                        <div className="flex items-center justify-between mb-1.5 gap-2">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-mono font-bold text-xs text-gray-900 dark:text-white">
+                              #{ord.orderNumber}
+                            </span>
+                            <EditedByMerchantBadge order={ord} />
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <FulfillmentChip order={ord} />
+                            <ServiceChips order={ord} />
+                          </div>
                         </div>
                         <p className="text-xs font-semibold text-gray-900 dark:text-zinc-100">
                           {ord.serviceType === 'taxi' ? `Taxi: ${ord.pickup?.address || 'Pickup'}` : ord.merchantName || ord.serviceType}
@@ -1254,11 +1449,13 @@ export const LiveOrders: React.FC = () => {
           <div className="h-full w-full max-w-2xl bg-white dark:bg-zinc-950 border-l border-gray-200 dark:border-zinc-800 shadow-2xl flex flex-col animate-in slide-in-from-right duration-200 overflow-hidden">
             {/* Modal Header */}
             <div className="p-4 sm:p-5 border-b border-gray-200 dark:border-zinc-800 flex items-center justify-between bg-white dark:bg-zinc-950">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2.5 flex-wrap">
                 <span className="font-mono font-black text-lg text-gray-900 dark:text-white">
                   #{selectedOrder.orderNumber}
                 </span>
+                <FulfillmentChip order={selectedOrder} />
                 <ServiceChips order={selectedOrder} />
+                <EditedByMerchantBadge order={selectedOrder} />
                 <span
                   className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold border ${getStatusBadge(
                     selectedOrder.status
@@ -1479,6 +1676,9 @@ export const LiveOrders: React.FC = () => {
                   )}
                 </div>
               </div>
+
+              {/* Order Modified by Merchant Comparison */}
+              <OrderMerchantEditComparison order={selectedOrder} />
 
               {/* Items / Goods / Specifications */}
               {selectedOrder.serviceType !== 'taxi' && (

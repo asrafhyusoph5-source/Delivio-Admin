@@ -14,7 +14,7 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { useCity } from '../context/CityContext';
 import { logAuditEvent } from '../utils/audit';
-import type { PlatformSettings, OrderServiceType } from '../types';
+import type { PlatformSettings, OrderServiceType, PlatformVatConfig } from '../types';
 import {
   VEHICLE_TYPES,
   SERVICES_BY_VEHICLE,
@@ -46,7 +46,11 @@ import {
   ArrowRight,
   RefreshCw,
   SlidersHorizontal,
-  Layers
+  Layers,
+  Receipt,
+  Clock,
+  Globe,
+  Percent
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
@@ -89,6 +93,18 @@ export const Settings: React.FC = () => {
     car4: true,
     car8: true
   });
+
+  // Taxes & Fees (VAT & Timezone) state
+  const [vatEnabled, setVatEnabled] = useState(false);
+  const [vatPercent, setVatPercent] = useState<number>(12);
+  const [vatMode, setVatMode] = useState<'added' | 'included'>('added');
+  const [vatBase, setVatBase] = useState<'total' | 'fees'>('total');
+  const [timezone, setTimezone] = useState('Asia/Manila');
+  const [sampleItems, setSampleItems] = useState<number>(350);
+  const [sampleDelivery, setSampleDelivery] = useState<number>(49);
+  const [sampleServiceFee, setSampleServiceFee] = useState<number>(15);
+  const [confirmSaveVatModalOpen, setConfirmSaveVatModalOpen] = useState(false);
+  const [savingTaxesAndFees, setSavingTaxesAndFees] = useState(false);
 
   // Initialize DB state
   const [initDbModalOpen, setInitDbModalOpen] = useState(false);
@@ -278,6 +294,19 @@ export const Settings: React.FC = () => {
               car8: dt.taxiVehicles.car8 !== false
             });
           }
+
+          // VAT settings
+          if (dt.vat) {
+            setVatEnabled(Boolean(dt.vat.enabled));
+            setVatPercent(dt.vat.percent ?? 12);
+            setVatMode(dt.vat.mode || 'added');
+            setVatBase(dt.vat.base || 'total');
+          }
+
+          // Platform timezone
+          if (dt.timezone) {
+            setTimezone(dt.timezone);
+          }
         }
       } catch (err) {
         showError(err);
@@ -321,6 +350,48 @@ export const Settings: React.FC = () => {
       showError(err);
     } finally {
       setSavingSettings(false);
+    }
+  };
+
+  // Save Taxes & Fees (VAT and Timezone) to Firestore
+  const handleSaveTaxesAndFees = async () => {
+    try {
+      setSavingTaxesAndFees(true);
+      const sRef = doc(db, 'settings', 'platform');
+      const vatPayload: PlatformVatConfig = {
+        enabled: Boolean(vatEnabled),
+        percent: Number(vatPercent) || 0,
+        mode: vatMode,
+        base: vatBase
+      };
+      const cleanTimezone = timezone.trim() || 'Asia/Manila';
+
+      await setDoc(
+        sRef,
+        {
+          vat: vatPayload,
+          timezone: cleanTimezone,
+          updatedAt: Timestamp.now()
+        },
+        { merge: true }
+      );
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'UPDATE_TAXES_AND_FEES',
+        entityType: 'settings',
+        entityId: 'platform',
+        details: `Saved Taxes & Fees: VAT ${vatEnabled ? 'Enabled' : 'Disabled'} (${vatPercent}%, mode: ${vatMode}, base: ${vatBase}), Timezone: ${cleanTimezone}`
+      });
+
+      showSuccess('Taxes, VAT rules & platform timezone updated successfully.');
+      setConfirmSaveVatModalOpen(false);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSavingTaxesAndFees(false);
     }
   };
 
@@ -829,6 +900,335 @@ export const Settings: React.FC = () => {
         </div>
       </div>
 
+      {/* Taxes & Fees (VAT & Platform Timezone) Panel */}
+      <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-gray-100 dark:border-zinc-800">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-2xl bg-amber-400 text-black shadow-xs">
+              <Receipt className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                Taxes & Fees (VAT & Platform Timezone)
+              </h3>
+              <p className="text-xs text-gray-500 dark:text-zinc-400">
+                Configure VAT rules, taxation base, customer checkout computation mode, and platform operating timezone. Saved in <code className="font-mono text-amber-600">settings/platform.vat</code> and <code className="font-mono text-amber-600">settings/platform.timezone</code>.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setConfirmSaveVatModalOpen(true)}
+            disabled={savingTaxesAndFees}
+            className="delivio-btn-yellow px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 self-start sm:self-auto shadow-xs"
+          >
+            {savingTaxesAndFees ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            Save Taxes & Fees
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* VAT and Timezone Configuration Form */}
+          <div className="lg:col-span-7 space-y-5">
+            {/* VAT Toggle */}
+            <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-gray-50/70 dark:bg-zinc-850 flex items-center justify-between">
+              <div>
+                <span className="font-bold text-xs text-gray-900 dark:text-white block">
+                  Value-Added Tax (VAT) Status
+                </span>
+                <p className="text-[11px] text-gray-500">
+                  Enable or disable VAT assessment on checkout across mobile & web customer apps.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setVatEnabled(!vatEnabled)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-colors ${
+                  vatEnabled
+                    ? 'bg-emerald-500 text-white'
+                    : 'bg-gray-300 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300'
+                }`}
+              >
+                {vatEnabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
+                <span>{vatEnabled ? 'VAT Enabled' : 'VAT Disabled'}</span>
+              </button>
+            </div>
+
+            {/* VAT Rate and Computation Mode */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  VAT Percentage (%)
+                </label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    value={vatPercent}
+                    onChange={(e) => setVatPercent(Math.max(0, Number(e.target.value)))}
+                    disabled={!vatEnabled}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white disabled:opacity-50"
+                  />
+                  <Percent className="w-4 h-4 absolute right-3 top-3 text-gray-400 pointer-events-none" />
+                </div>
+                <span className="text-[10px] text-gray-400 mt-0.5 block">Standard Philippine rate is 12%</span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  Platform Operating Timezone
+                </label>
+                <div className="relative">
+                  <select
+                    value={timezone}
+                    onChange={(e) => setTimezone(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                  >
+                    <option value="Asia/Manila">Asia/Manila (PHT, UTC+8)</option>
+                    <option value="Asia/Singapore">Asia/Singapore (SGT, UTC+8)</option>
+                    <option value="Asia/Tokyo">Asia/Tokyo (JST, UTC+9)</option>
+                    <option value="UTC">UTC (Coordinated Universal Time)</option>
+                    <option value="America/New_York">America/New_York (EST/EDT)</option>
+                    <option value="America/Los_Angeles">America/Los_Angeles (PST/PDT)</option>
+                  </select>
+                </div>
+                <span className="text-[10px] text-gray-400 mt-0.5 block">Used for merchant operating hours windows</span>
+              </div>
+            </div>
+
+            {/* VAT Mode: Added vs Included */}
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-zinc-300 mb-2">
+                VAT Mode (<code className="font-mono text-amber-600">settings/platform.vat.mode</code>)
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setVatMode('added')}
+                  disabled={!vatEnabled}
+                  className={`p-3.5 rounded-2xl border text-left transition-all ${
+                    vatMode === 'added'
+                      ? 'border-amber-400 bg-amber-50/50 dark:bg-amber-950/20 ring-2 ring-amber-400/40'
+                      : 'border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-800 opacity-70'
+                  } ${!vatEnabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-xs text-gray-900 dark:text-white">Added on top ("added")</span>
+                    {vatMode === 'added' && <CheckCircle2 className="w-4 h-4 text-amber-500" />}
+                  </div>
+                  <p className="text-[11px] text-gray-500 mt-1">
+                    VAT is computed and added on top of the taxable base. Customer pays Base + VAT.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setVatMode('included')}
+                  disabled={!vatEnabled}
+                  className={`p-3.5 rounded-2xl border text-left transition-all ${
+                    vatMode === 'included'
+                      ? 'border-amber-400 bg-amber-50/50 dark:bg-amber-950/20 ring-2 ring-amber-400/40'
+                      : 'border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-800 opacity-70'
+                  } ${!vatEnabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-xs text-gray-900 dark:text-white">Included in price ("included")</span>
+                    {vatMode === 'included' && <CheckCircle2 className="w-4 h-4 text-amber-500" />}
+                  </div>
+                  <p className="text-[11px] text-gray-500 mt-1">
+                    Display prices are VAT-inclusive. The VAT component is broken out without increasing the nominal total.
+                  </p>
+                </button>
+              </div>
+            </div>
+
+            {/* VAT Base: Total vs Fees */}
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-zinc-300 mb-2">
+                VAT Taxable Base (<code className="font-mono text-amber-600">settings/platform.vat.base</code>)
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setVatBase('total')}
+                  disabled={!vatEnabled}
+                  className={`p-3.5 rounded-2xl border text-left transition-all ${
+                    vatBase === 'total'
+                      ? 'border-amber-400 bg-amber-50/50 dark:bg-amber-950/20 ring-2 ring-amber-400/40'
+                      : 'border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-800 opacity-70'
+                  } ${!vatEnabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-xs text-gray-900 dark:text-white">Entire Order ("total")</span>
+                    {vatBase === 'total' && <CheckCircle2 className="w-4 h-4 text-amber-500" />}
+                  </div>
+                  <p className="text-[11px] text-gray-500 mt-1">
+                    Tax applies to full order amount: items subtotal + delivery fee + platform service fee.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setVatBase('fees')}
+                  disabled={!vatEnabled}
+                  className={`p-3.5 rounded-2xl border text-left transition-all ${
+                    vatBase === 'fees'
+                      ? 'border-amber-400 bg-amber-50/50 dark:bg-amber-950/20 ring-2 ring-amber-400/40'
+                      : 'border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-800 opacity-70'
+                  } ${!vatEnabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-xs text-gray-900 dark:text-white">Fees Only ("fees")</span>
+                    {vatBase === 'fees' && <CheckCircle2 className="w-4 h-4 text-amber-500" />}
+                  </div>
+                  <p className="text-[11px] text-gray-500 mt-1">
+                    Tax applies strictly to platform revenue (delivery fee + service fee). Merchant food/store items exempt.
+                  </p>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Live Interactive Checkout Example Card */}
+          <div className="lg:col-span-5 bg-amber-50/40 dark:bg-zinc-850 border border-amber-200 dark:border-zinc-700/60 rounded-3xl p-5 space-y-4 shadow-xs">
+            <div className="flex items-center gap-2 pb-2 border-b border-amber-200/60 dark:border-zinc-700">
+              <Sparkles className="w-4 h-4 text-amber-500" />
+              <h4 className="font-extrabold text-xs uppercase tracking-wider text-gray-900 dark:text-white">
+                Live Interactive Checkout Example
+              </h4>
+            </div>
+
+            <p className="text-[11px] text-gray-500 dark:text-zinc-400">
+              Simulate checkout totals in real-time based on active VAT settings:
+            </p>
+
+            {/* Test Simulation Inputs */}
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase mb-0.5">
+                  Items (₱)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="10"
+                  value={sampleItems}
+                  onChange={(e) => setSampleItems(Math.max(0, Number(e.target.value)))}
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 font-bold text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase mb-0.5">
+                  Delivery (₱)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="5"
+                  value={sampleDelivery}
+                  onChange={(e) => setSampleDelivery(Math.max(0, Number(e.target.value)))}
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 font-bold text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-gray-500 uppercase mb-0.5">
+                  Service (₱)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="5"
+                  value={sampleServiceFee}
+                  onChange={(e) => setSampleServiceFee(Math.max(0, Number(e.target.value)))}
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 font-bold text-xs"
+                />
+              </div>
+            </div>
+
+            {/* Live Calculation Output Card */}
+            {(() => {
+              const vatRate = Math.max(0, Number(vatPercent) || 0);
+              const sampleGoodsTotal = sampleItems + sampleDelivery + sampleServiceFee;
+              let sampleVatAmount = 0;
+              let sampleCustomerTotal = sampleGoodsTotal;
+              const sampleTaxableBase = vatBase === 'total' ? sampleGoodsTotal : (sampleDelivery + sampleServiceFee);
+
+              if (vatEnabled && vatRate > 0) {
+                if (vatMode === 'added') {
+                  sampleVatAmount = (sampleTaxableBase * vatRate) / 100;
+                  sampleCustomerTotal = sampleGoodsTotal + sampleVatAmount;
+                } else {
+                  sampleVatAmount = sampleTaxableBase - (sampleTaxableBase / (1 + vatRate / 100));
+                  sampleCustomerTotal = sampleGoodsTotal;
+                }
+              }
+
+              return (
+                <div className="bg-white dark:bg-zinc-900 border border-amber-200 dark:border-amber-900/60 rounded-2xl p-4 space-y-2 text-xs">
+                  <div className="flex justify-between text-gray-600 dark:text-zinc-400">
+                    <span>Cart Items Subtotal:</span>
+                    <span>₱{sampleItems.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-gray-600 dark:text-zinc-400">
+                    <span>Delivery Fee:</span>
+                    <span>₱{sampleDelivery.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-gray-600 dark:text-zinc-400">
+                    <span>Platform Service Fee:</span>
+                    <span>₱{sampleServiceFee.toFixed(2)}</span>
+                  </div>
+
+                  <div className="pt-2 border-t border-gray-100 dark:border-zinc-800 flex justify-between font-semibold text-gray-700 dark:text-zinc-300">
+                    <span>Subtotal Before VAT:</span>
+                    <span>₱{sampleGoodsTotal.toFixed(2)}</span>
+                  </div>
+
+                  <div className="flex justify-between text-amber-900 dark:text-amber-400 font-medium">
+                    <span>
+                      VAT ({vatEnabled ? `${vatRate}%` : 'Disabled'} &bull;{' '}
+                      {vatBase === 'total' ? 'Full order' : 'Fees only'} &bull;{' '}
+                      {vatMode === 'added' ? 'Added' : 'Included'}):
+                    </span>
+                    <span className="font-bold">
+                      {vatEnabled
+                        ? (vatMode === 'added' ? `+₱${sampleVatAmount.toFixed(2)}` : `₱${sampleVatAmount.toFixed(2)} (incl.)`)
+                        : '₱0.00'}
+                    </span>
+                  </div>
+
+                  <div className="pt-2.5 border-t border-amber-300 dark:border-amber-800 flex justify-between items-baseline">
+                    <span className="font-extrabold text-sm text-gray-900 dark:text-white">
+                      Customer Pays:
+                    </span>
+                    <span className="font-black text-base text-amber-600">
+                      ₱{sampleCustomerTotal.toFixed(2)}
+                    </span>
+                  </div>
+
+                  <div className="pt-2 border-t border-dashed border-gray-200 dark:border-zinc-800 text-[11px] text-gray-400 space-y-0.5">
+                    <div className="flex justify-between">
+                      <span>Merchant Payout:</span>
+                      <span>₱{sampleItems.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Platform + Delivery:</span>
+                      <span>₱{(sampleDelivery + sampleServiceFee).toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Government Tax Collected:</span>
+                      <span>₱{sampleVatAmount.toFixed(2)}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      </div>
+
       {/* Service Types & Platform Switches Panel */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-gray-100 dark:border-zinc-800">
@@ -1238,6 +1638,20 @@ export const Settings: React.FC = () => {
           confirmLabel="Delete Directory Entry"
           reasonRequired={true}
           isDestructive={true}
+        />
+      )}
+
+      {/* Confirmation Modal for Taxes & Fees Save */}
+      {confirmSaveVatModalOpen && (
+        <ConfirmationModal
+          isOpen={confirmSaveVatModalOpen}
+          onClose={() => setConfirmSaveVatModalOpen(false)}
+          onConfirm={handleSaveTaxesAndFees}
+          title="Save Taxes & Platform Timezone Settings?"
+          message={`Are you sure you want to update platform VAT to ${vatEnabled ? 'ENABLED' : 'DISABLED'} (${vatPercent}%, mode: ${vatMode}, base: ${vatBase}) and timezone to "${timezone}"? This affects checkout pricing and operational schedules.`}
+          confirmLabel="Save Changes"
+          reasonRequired={false}
+          isDestructive={false}
         />
       )}
     </div>

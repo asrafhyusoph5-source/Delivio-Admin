@@ -106,7 +106,10 @@ export const DEFAULT_TAXI_RATES: Record<VehicleType, {
   perKm: number;
   minFare: number;
   perStopFee: number;
+  serviceFeeType?: 'flat' | 'percent';
   serviceFee: number;
+  serviceFeeMin?: number;
+  serviceFeeMax?: number;
   commissionPercent: number;
 }> = {
   motorcycle: {
@@ -116,6 +119,7 @@ export const DEFAULT_TAXI_RATES: Record<VehicleType, {
     perKm: 10,
     minFare: 50,
     perStopFee: 15,
+    serviceFeeType: 'flat',
     serviceFee: 5,
     commissionPercent: 15
   },
@@ -126,6 +130,7 @@ export const DEFAULT_TAXI_RATES: Record<VehicleType, {
     perKm: 8,
     minFare: 40,
     perStopFee: 10,
+    serviceFeeType: 'flat',
     serviceFee: 5,
     commissionPercent: 15
   },
@@ -136,6 +141,7 @@ export const DEFAULT_TAXI_RATES: Record<VehicleType, {
     perKm: 15,
     minFare: 80,
     perStopFee: 20,
+    serviceFeeType: 'flat',
     serviceFee: 10,
     commissionPercent: 15
   },
@@ -146,7 +152,9 @@ export const DEFAULT_TAXI_RATES: Record<VehicleType, {
     perKm: 18,
     minFare: 100,
     perStopFee: 25,
+    serviceFeeType: 'flat',
     serviceFee: 10,
     commissionPercent: 15
   }
 };
+

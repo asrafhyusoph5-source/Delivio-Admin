@@ -8,13 +8,15 @@ import {
   where,
   limit,
   getDocs,
+  getDoc,
   doc,
   setDoc,
   updateDoc,
   deleteDoc,
   addDoc,
   Timestamp,
-  writeBatch
+  writeBatch,
+  runTransaction
 } from '../firebase';
 import { useCity } from '../context/CityContext';
 import { useAuth } from '../context/AuthContext';
@@ -22,7 +24,17 @@ import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp } from '../utils/date';
-import type { Merchant, MenuItem, MenuCategory, Order, ChangeRequest, EditHistoryEntry } from '../types';
+import type {
+  Merchant,
+  MenuItem,
+  MenuCategory,
+  Order,
+  ChangeRequest,
+  EditHistoryEntry,
+  WalletTransaction,
+  MerchantWeeklyHours,
+  MerchantOperatingDay
+} from '../types';
 import { FOOD_CATEGORIES, CONVENIENCE_CATEGORIES } from '../constants';
 import {
   Search,
@@ -45,10 +57,136 @@ import {
   ShoppingBag,
   ExternalLink,
   Layers,
-  FileCheck
+  FileCheck,
+  Wallet,
+  Clock,
+  Calendar,
+  Link as LinkIcon,
+  Unlink,
+  ArrowUpRight,
+  ArrowDownLeft,
+  ArrowRightLeft,
+  ShieldCheck,
+  Sun,
+  Moon
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
+
+export const DEFAULT_WEEKLY_HOURS: MerchantWeeklyHours = {
+  monday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
+  tuesday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
+  wednesday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
+  thursday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
+  friday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
+  saturday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
+  sunday: { open: '08:00', close: '22:00', isOpen: true, closed: false }
+};
+
+export function computeEffectiveMerchantOpen(
+  merchant: Merchant,
+  platformTimezone: string = 'Asia/Manila'
+): { isOpen: boolean; reason: string } {
+  // 1. false if status != "active"
+  if (merchant.status !== 'active') {
+    return { isOpen: false, reason: `Merchant status is ${merchant.status || 'inactive'}` };
+  }
+
+  // 2. false if isPaused and now < pauseUntilTime
+  const now = new Date();
+  if (merchant.isPaused && merchant.pauseUntilTime) {
+    const pauseTime = merchant.pauseUntilTime.toDate
+      ? merchant.pauseUntilTime.toDate()
+      : new Date(merchant.pauseUntilTime);
+    if (now.getTime() < pauseTime.getTime()) {
+      return {
+        isOpen: false,
+        reason: `Store paused until ${pauseTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+      };
+    }
+  }
+
+  // 3. if autoSchedule and hours exist, inside today's window in the platform timezone (overnight windows check yesterday)
+  if (merchant.autoSchedule && merchant.hours) {
+    const tz = platformTimezone || 'Asia/Manila';
+    let currentDayName = 'monday';
+    let currentTimeStr = '12:00';
+
+    try {
+      const dayFormatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz,
+        weekday: 'long'
+      });
+      currentDayName = dayFormatter.format(now).toLowerCase();
+
+      const timeFormatter = new Intl.DateTimeFormat('en-GB', {
+        timeZone: tz,
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      });
+      currentTimeStr = timeFormatter.format(now);
+    } catch {
+      const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+      currentDayName = days[now.getDay()];
+      currentTimeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    }
+
+    const daysOrder = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const currentDayIdx = daysOrder.indexOf(currentDayName);
+    const prevDayIdx = (currentDayIdx + 6) % 7;
+    const prevDayName = daysOrder[prevDayIdx];
+
+    const todaySchedule = merchant.hours[currentDayName];
+    const yesterdaySchedule = merchant.hours[prevDayName];
+
+    let insideWindow = false;
+
+    // Overnight window check from yesterday: if yesterday's window crossed midnight (close < open, e.g. 18:00 to 02:00)
+    if (yesterdaySchedule && !yesterdaySchedule.closed && yesterdaySchedule.isOpen !== false) {
+      const yOpen = yesterdaySchedule.open || '00:00';
+      const yClose = yesterdaySchedule.close || '00:00';
+      if (yClose < yOpen && currentTimeStr < yClose) {
+        insideWindow = true;
+      }
+    }
+
+    // Today's schedule check
+    if (!insideWindow && todaySchedule && !todaySchedule.closed && todaySchedule.isOpen !== false) {
+      const tOpen = todaySchedule.open || '08:00';
+      const tClose = todaySchedule.close || '22:00';
+      if (tClose > tOpen) {
+        // Standard daytime window
+        if (currentTimeStr >= tOpen && currentTimeStr < tClose) {
+          insideWindow = true;
+        }
+      } else if (tClose < tOpen) {
+        // Overnight window starting today
+        if (currentTimeStr >= tOpen) {
+          insideWindow = true;
+        }
+      }
+    }
+
+    if (insideWindow) {
+      return {
+        isOpen: true,
+        reason: `Auto-schedule: Open (${todaySchedule?.open || '08:00'} - ${todaySchedule?.close || '22:00'})`
+      };
+    } else {
+      return {
+        isOpen: false,
+        reason: `Auto-schedule: Closed (outside operating hours for ${currentDayName})`
+      };
+    }
+  }
+
+  // 4. otherwise isOpen
+  return {
+    isOpen: Boolean(merchant.isOpen),
+    reason: merchant.isOpen ? 'Manually set to Open' : 'Manually set to Closed'
+  };
+}
 
 export const Merchants: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -61,6 +199,9 @@ export const Merchants: React.FC = () => {
   const [merchants, setMerchants] = useState<Merchant[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Platform Timezone
+  const [platformTimezone, setPlatformTimezone] = useState('Asia/Manila');
+
   // Filters
   const [searchQuery, setSearchQuery] = useState(initialSearch);
   const [typeFilter, setTypeFilter] = useState<'all' | 'food' | 'convenience'>('all');
@@ -70,7 +211,50 @@ export const Merchants: React.FC = () => {
 
   // Selected Merchant for detail
   const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(null);
-  const [activeTab, setActiveTab] = useState<'details' | 'status' | 'location' | 'menu' | 'orders' | 'changes' | 'history'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'status' | 'location' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet'>('details');
+
+  // Operating Hours & AutoSchedule
+  const [merchantHours, setMerchantHours] = useState<MerchantWeeklyHours>(DEFAULT_WEEKLY_HOURS);
+  const [merchantAutoSchedule, setMerchantAutoSchedule] = useState<boolean>(false);
+  const [savingHours, setSavingHours] = useState<boolean>(false);
+
+  // Merchant Wallet & Customer Linking State
+  const [merchantWalletTxns, setMerchantWalletTxns] = useState<WalletTransaction[]>([]);
+  const [loadingWalletTxns, setLoadingWalletTxns] = useState(false);
+  const [linkedCustomer, setLinkedCustomer] = useState<{
+    uid: string;
+    email: string;
+    name: string;
+    walletBalance: number;
+  } | null>(null);
+  const [loadingLinkedCustomer, setLoadingLinkedCustomer] = useState(false);
+
+  // Cash In Modal
+  const [cashInModalOpen, setCashInModalOpen] = useState(false);
+  const [cashInAmount, setCashInAmount] = useState<number>(0);
+  const [cashInNote, setCashInNote] = useState('');
+  const [addingCash, setAddingCash] = useState(false);
+
+  // Adjust / Deduct Modal
+  const [adjustModalOpen, setAdjustModalOpen] = useState(false);
+  const [adjustType, setAdjustType] = useState<'add' | 'deduct'>('add');
+  const [adjustAmount, setAdjustAmount] = useState<number>(0);
+  const [adjustReason, setAdjustReason] = useState('');
+  const [submittingAdjust, setSubmittingAdjust] = useState(false);
+
+  // Link to Customer Account Modal
+  const [linkModalOpen, setLinkModalOpen] = useState(false);
+  const [customerSearchQuery, setCustomerSearchQuery] = useState('');
+  const [allCustomers, setAllCustomers] = useState<any[]>([]);
+  const [loadingCustomers, setLoadingCustomers] = useState(false);
+  const [selectedCandidateCustomer, setSelectedCandidateCustomer] = useState<any | null>(null);
+  const [confirmLinkModalOpen, setConfirmLinkModalOpen] = useState(false);
+  const [linking, setLinking] = useState(false);
+
+  // Unlink Modal
+  const [unlinkModalOpen, setUnlinkModalOpen] = useState(false);
+  const [unlinkReason, setUnlinkReason] = useState('');
+  const [unlinking, setUnlinking] = useState(false);
 
   // Details Edit State
   const [shopName, setShopName] = useState('');
@@ -176,6 +360,15 @@ export const Merchants: React.FC = () => {
           bannerUrl: dt.bannerUrl,
           description: dt.description || '',
           commissionRate: dt.commissionRate ?? 15,
+          walletBalance: Number(dt.walletBalance || 0),
+          linkedCustomerUid: dt.linkedCustomerUid || null,
+          linkedCustomerEmail: dt.linkedCustomerEmail || null,
+          linkedCustomerName: dt.linkedCustomerName || null,
+          linkedAt: dt.linkedAt || null,
+          hours: dt.hours,
+          autoSchedule: Boolean(dt.autoSchedule),
+          isPaused: Boolean(dt.isPaused),
+          pauseUntilTime: dt.pauseUntilTime,
           createdAt: dt.createdAt
         });
       });
@@ -190,6 +383,18 @@ export const Merchants: React.FC = () => {
 
   useEffect(() => {
     fetchMerchants();
+    // Load platform timezone
+    const fetchPlatformSettings = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', 'platform'));
+        if (snap.exists() && snap.data().timezone) {
+          setPlatformTimezone(snap.data().timezone);
+        }
+      } catch (err) {
+        console.warn('Could not load platform timezone:', err);
+      }
+    };
+    fetchPlatformSettings();
   }, []);
 
   // Sync selected merchant fields when selected
@@ -207,6 +412,13 @@ export const Merchants: React.FC = () => {
     setLocLng(selectedMerchant.lng || 118.7353);
     setLocAddress(selectedMerchant.address || '');
 
+    // Initialize Hours & AutoSchedule
+    setMerchantHours(selectedMerchant.hours || DEFAULT_WEEKLY_HOURS);
+    setMerchantAutoSchedule(Boolean(selectedMerchant.autoSchedule));
+
+    // Fetch Wallet Data
+    fetchMerchantWallet(selectedMerchant);
+
     // Fetch Menu
     fetchMenuData(selectedMerchant.id);
     // Fetch Orders & Payouts
@@ -216,6 +428,487 @@ export const Merchants: React.FC = () => {
     // Fetch Edit History
     fetchEditHistory(selectedMerchant.id);
   }, [selectedMerchant]);
+
+  // Fetch Merchant Wallet and linked customer
+  const fetchMerchantWallet = async (merchant: Merchant) => {
+    try {
+      setLoadingWalletTxns(true);
+      if (merchant.linkedCustomerUid) {
+        setLoadingLinkedCustomer(true);
+        const uSnap = await getDoc(doc(db, 'users', merchant.linkedCustomerUid));
+        if (uSnap.exists()) {
+          const uDt = uSnap.data();
+          setLinkedCustomer({
+            uid: uSnap.id,
+            email: uDt.email || merchant.linkedCustomerEmail || '',
+            name: uDt.name || merchant.linkedCustomerName || 'Customer',
+            walletBalance: Number(uDt.walletBalance || 0)
+          });
+        } else {
+          setLinkedCustomer(null);
+        }
+        setLoadingLinkedCustomer(false);
+      } else {
+        setLinkedCustomer(null);
+      }
+
+      const qTxn = query(
+        collection(db, 'walletTransactions'),
+        where('merchantId', '==', merchant.id),
+        limit(100)
+      );
+      const snap = await getDocs(qTxn);
+      const list: WalletTransaction[] = [];
+      snap.forEach((d) => {
+        const dt = d.data();
+        list.push({
+          id: d.id,
+          merchantId: dt.merchantId,
+          customerId: dt.customerId,
+          type: dt.type || 'credit',
+          amount: Number(dt.amount || 0),
+          note: dt.note || '',
+          adminId: dt.adminId || '',
+          adminName: dt.adminName || '',
+          balanceAfter: Number(dt.balanceAfter || 0),
+          createdAt: dt.createdAt
+        });
+      });
+      list.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+      setMerchantWalletTxns(list);
+    } catch (err) {
+      console.error('Failed to load merchant wallet transactions:', err);
+    } finally {
+      setLoadingWalletTxns(false);
+    }
+  };
+
+  // 1. Add Cash to Merchant Wallet (In One Transaction)
+  const handleAddCash = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedMerchant || cashInAmount <= 0) {
+      showError('Please enter a valid cash amount.');
+      return;
+    }
+
+    try {
+      setAddingCash(true);
+      const isLinked = Boolean(selectedMerchant.linkedCustomerUid);
+      const now = Timestamp.now();
+      const txnRef = doc(collection(db, 'walletTransactions'));
+      const adminId = adminProfile?.uid || 'admin';
+      const adminName = adminProfile?.name || 'Administrator';
+      const note = cashInNote.trim() || `Cash added by admin (${adminName})`;
+      let balanceAfter = 0;
+
+      await runTransaction(db, async (t) => {
+        if (isLinked) {
+          const custRef = doc(db, 'users', selectedMerchant.linkedCustomerUid!);
+          const cSnap = await t.get(custRef);
+          if (!cSnap.exists()) throw new Error('Linked customer account not found.');
+          const currentBal = Number(cSnap.data().walletBalance || 0);
+          balanceAfter = currentBal + cashInAmount;
+
+          t.update(custRef, {
+            walletBalance: balanceAfter,
+            updatedAt: now
+          });
+
+          t.set(txnRef, {
+            merchantId: selectedMerchant.id,
+            customerId: selectedMerchant.linkedCustomerUid,
+            type: 'credit',
+            amount: cashInAmount,
+            note,
+            adminId,
+            adminName,
+            balanceAfter,
+            createdAt: now
+          });
+        } else {
+          const mRef = doc(db, 'merchants', selectedMerchant.id);
+          const mSnap = await t.get(mRef);
+          if (!mSnap.exists()) throw new Error('Merchant record not found.');
+          const currentBal = Number(mSnap.data().walletBalance || 0);
+          balanceAfter = currentBal + cashInAmount;
+
+          t.update(mRef, {
+            walletBalance: balanceAfter,
+            updatedAt: now
+          });
+
+          t.set(txnRef, {
+            merchantId: selectedMerchant.id,
+            type: 'credit',
+            amount: cashInAmount,
+            note,
+            adminId,
+            adminName,
+            balanceAfter,
+            createdAt: now
+          });
+        }
+      });
+
+      await logAuditEvent({
+        adminId,
+        adminName,
+        adminEmail: adminProfile?.email,
+        action: 'ADD_MERCHANT_WALLET_CASH',
+        entityType: 'merchant',
+        entityId: selectedMerchant.id,
+        details: `Added ₱${cashInAmount.toFixed(2)} to ${
+          isLinked ? `shared customer wallet (${selectedMerchant.linkedCustomerEmail})` : 'merchant wallet'
+        }. New balance: ₱${balanceAfter.toFixed(2)}`
+      });
+
+      showSuccess(`Successfully added ₱${cashInAmount.toFixed(2)}.`);
+      setCashInAmount(0);
+      setCashInNote('');
+      setCashInModalOpen(false);
+
+      if (isLinked) {
+        setLinkedCustomer((prev) => prev ? { ...prev, walletBalance: balanceAfter } : null);
+      } else {
+        setSelectedMerchant((prev) => prev ? { ...prev, walletBalance: balanceAfter } : null);
+        setMerchants((prev) => prev.map((m) => m.id === selectedMerchant.id ? { ...m, walletBalance: balanceAfter } : m));
+      }
+      fetchMerchantWallet(selectedMerchant);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setAddingCash(false);
+    }
+  };
+
+  // 2. Adjust / Deduct Merchant Wallet Balance (In One Transaction)
+  const handleAdjustBalance = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedMerchant || adjustAmount <= 0) {
+      showError('Please enter a valid adjustment amount.');
+      return;
+    }
+    if (!adjustReason.trim()) {
+      showError('Please provide a reason for this adjustment.');
+      return;
+    }
+
+    try {
+      setSubmittingAdjust(true);
+      const isLinked = Boolean(selectedMerchant.linkedCustomerUid);
+      const now = Timestamp.now();
+      const txnRef = doc(collection(db, 'walletTransactions'));
+      const adminId = adminProfile?.uid || 'admin';
+      const adminName = adminProfile?.name || 'Administrator';
+      const isDeduct = adjustType === 'deduct';
+      const effectiveAmount = isDeduct ? -adjustAmount : adjustAmount;
+      let balanceAfter = 0;
+
+      await runTransaction(db, async (t) => {
+        if (isLinked) {
+          const custRef = doc(db, 'users', selectedMerchant.linkedCustomerUid!);
+          const cSnap = await t.get(custRef);
+          if (!cSnap.exists()) throw new Error('Linked customer account not found.');
+          const currentBal = Number(cSnap.data().walletBalance || 0);
+          balanceAfter = currentBal + effectiveAmount;
+
+          t.update(custRef, {
+            walletBalance: balanceAfter,
+            updatedAt: now
+          });
+
+          t.set(txnRef, {
+            merchantId: selectedMerchant.id,
+            customerId: selectedMerchant.linkedCustomerUid,
+            type: isDeduct ? 'debit' : 'adjust',
+            amount: adjustAmount,
+            note: `${isDeduct ? 'Deducted / adjusted' : 'Adjusted'} by admin (${adminName}): ${adjustReason.trim()}`,
+            adminId,
+            adminName,
+            balanceAfter,
+            createdAt: now
+          });
+        } else {
+          const mRef = doc(db, 'merchants', selectedMerchant.id);
+          const mSnap = await t.get(mRef);
+          if (!mSnap.exists()) throw new Error('Merchant record not found.');
+          const currentBal = Number(mSnap.data().walletBalance || 0);
+          balanceAfter = currentBal + effectiveAmount;
+
+          t.update(mRef, {
+            walletBalance: balanceAfter,
+            updatedAt: now
+          });
+
+          t.set(txnRef, {
+            merchantId: selectedMerchant.id,
+            type: isDeduct ? 'debit' : 'adjust',
+            amount: adjustAmount,
+            note: `${isDeduct ? 'Deducted / adjusted' : 'Adjusted'} by admin (${adminName}): ${adjustReason.trim()}`,
+            adminId,
+            adminName,
+            balanceAfter,
+            createdAt: now
+          });
+        }
+      });
+
+      await logAuditEvent({
+        adminId,
+        adminName,
+        adminEmail: adminProfile?.email,
+        action: 'ADJUST_MERCHANT_WALLET',
+        entityType: 'merchant',
+        entityId: selectedMerchant.id,
+        reason: adjustReason.trim(),
+        details: `${isDeduct ? 'Deducted' : 'Added'} ₱${adjustAmount.toFixed(2)} on ${
+          isLinked ? `shared customer wallet (${selectedMerchant.linkedCustomerEmail})` : 'merchant wallet'
+        }. Balance after: ₱${balanceAfter.toFixed(2)}`
+      });
+
+      showSuccess(`Wallet balance adjusted by ₱${effectiveAmount.toFixed(2)}.`);
+      setAdjustAmount(0);
+      setAdjustReason('');
+      setAdjustModalOpen(false);
+
+      if (isLinked) {
+        setLinkedCustomer((prev) => prev ? { ...prev, walletBalance: balanceAfter } : null);
+      } else {
+        setSelectedMerchant((prev) => prev ? { ...prev, walletBalance: balanceAfter } : null);
+        setMerchants((prev) => prev.map((m) => m.id === selectedMerchant.id ? { ...m, walletBalance: balanceAfter } : m));
+      }
+      fetchMerchantWallet(selectedMerchant);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSubmittingAdjust(false);
+    }
+  };
+
+  // 3. Open Link Customer Modal & fetch customers
+  const handleOpenLinkModal = async () => {
+    setLinkModalOpen(true);
+    setCustomerSearchQuery('');
+    setSelectedCandidateCustomer(null);
+    try {
+      setLoadingCustomers(true);
+      const qCust = query(collection(db, 'users'), where('role', '==', 'customer'), limit(150));
+      const snap = await getDocs(qCust);
+      const list: any[] = [];
+      snap.forEach((d) => {
+        const dt = d.data();
+        list.push({
+          uid: d.id,
+          email: dt.email || '',
+          name: dt.name || 'Customer',
+          phone: dt.phone || '',
+          walletBalance: Number(dt.walletBalance || 0),
+          status: dt.status || 'active'
+        });
+      });
+      list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      setAllCustomers(list);
+    } catch (err) {
+      showError('Failed to load registered customers.');
+    } finally {
+      setLoadingCustomers(false);
+    }
+  };
+
+  // 4. Confirm Link Customer in ONE Transaction
+  const handleConfirmLink = async () => {
+    if (!selectedMerchant || !selectedCandidateCustomer) return;
+    try {
+      setLinking(true);
+
+      // Validate customer exists and has role customer
+      const custDocRef = doc(db, 'users', selectedCandidateCustomer.uid);
+      const custDocSnap = await getDoc(custDocRef);
+      if (!custDocSnap.exists()) {
+        throw new Error('Customer account does not exist.');
+      }
+      const custData = custDocSnap.data();
+      if ((custData.role || '').toLowerCase() !== 'customer') {
+        throw new Error(`Customer must have role "customer", found "${custData.role}".`);
+      }
+
+      // Validate not linked to another merchant
+      const qCheck = query(
+        collection(db, 'merchants'),
+        where('linkedCustomerUid', '==', selectedCandidateCustomer.uid)
+      );
+      const checkSnap = await getDocs(qCheck);
+      const otherLinked = checkSnap.docs.filter((d) => d.id !== selectedMerchant.id);
+      if (otherLinked.length > 0) {
+        const otherData = otherLinked[0].data();
+        throw new Error(
+          `Customer ${selectedCandidateCustomer.email} is already linked to merchant "${otherData.name || otherLinked[0].id}". A customer account cannot be linked to multiple merchants.`
+        );
+      }
+
+      const mRef = doc(db, 'merchants', selectedMerchant.id);
+      const now = Timestamp.now();
+      const txnRef = doc(collection(db, 'walletTransactions'));
+      const adminId = adminProfile?.uid || 'admin';
+      const adminName = adminProfile?.name || 'Administrator';
+      let merchantBal = 0;
+      let custBal = 0;
+      let mergedBal = 0;
+
+      await runTransaction(db, async (t) => {
+        const mSnap = await t.get(mRef);
+        if (!mSnap.exists()) throw new Error('Merchant record not found.');
+        const cSnap = await t.get(custDocRef);
+        if (!cSnap.exists()) throw new Error('Customer record not found.');
+
+        merchantBal = Number(mSnap.data().walletBalance || 0);
+        custBal = Number(cSnap.data().walletBalance || 0);
+        mergedBal = custBal + merchantBal;
+
+        t.update(mRef, {
+          linkedCustomerUid: selectedCandidateCustomer.uid,
+          linkedCustomerEmail: selectedCandidateCustomer.email,
+          linkedCustomerName: selectedCandidateCustomer.name,
+          linkedAt: now,
+          walletBalance: 0,
+          updatedAt: now
+        });
+
+        t.update(custDocRef, {
+          walletBalance: mergedBal,
+          updatedAt: now
+        });
+
+        t.set(txnRef, {
+          merchantId: selectedMerchant.id,
+          customerId: selectedCandidateCustomer.uid,
+          type: 'merge',
+          amount: merchantBal,
+          note: `Merged merchant wallet (₱${merchantBal.toFixed(2)}) into customer account ${selectedCandidateCustomer.email}`,
+          adminId,
+          adminName,
+          balanceAfter: mergedBal,
+          createdAt: now
+        });
+      });
+
+      await logAuditEvent({
+        adminId,
+        adminName,
+        adminEmail: adminProfile?.email,
+        action: 'LINK_MERCHANT_WALLET',
+        entityType: 'merchant',
+        entityId: selectedMerchant.id,
+        details: `Linked merchant to customer ${selectedCandidateCustomer.email}. Merged balance ₱${merchantBal.toFixed(2)} into customer wallet (new shared balance: ₱${mergedBal.toFixed(2)}).`
+      });
+
+      showSuccess(`Merchant successfully linked to customer ${selectedCandidateCustomer.email}!`);
+      setConfirmLinkModalOpen(false);
+      setLinkModalOpen(false);
+
+      const updatedMerchant: Merchant = {
+        ...selectedMerchant,
+        linkedCustomerUid: selectedCandidateCustomer.uid,
+        linkedCustomerEmail: selectedCandidateCustomer.email,
+        linkedCustomerName: selectedCandidateCustomer.name,
+        linkedAt: now,
+        walletBalance: 0
+      };
+      setSelectedMerchant(updatedMerchant);
+      setMerchants((prev) => prev.map((m) => m.id === selectedMerchant.id ? updatedMerchant : m));
+      fetchMerchantWallet(updatedMerchant);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  // 5. Unlink Customer Shared Wallet (Requires reason)
+  const handleUnlinkCustomer = async () => {
+    if (!selectedMerchant || !unlinkReason.trim()) {
+      showError('Please provide a reason for unlinking.');
+      return;
+    }
+    try {
+      setUnlinking(true);
+      const mRef = doc(db, 'merchants', selectedMerchant.id);
+      const adminId = adminProfile?.uid || 'admin';
+      const adminName = adminProfile?.name || 'Administrator';
+      const prevEmail = selectedMerchant.linkedCustomerEmail;
+
+      await updateDoc(mRef, {
+        linkedCustomerUid: null,
+        linkedCustomerEmail: null,
+        linkedCustomerName: null,
+        linkedAt: null,
+        updatedAt: Timestamp.now()
+      });
+
+      await logAuditEvent({
+        adminId,
+        adminName,
+        adminEmail: adminProfile?.email,
+        action: 'UNLINK_MERCHANT_WALLET',
+        entityType: 'merchant',
+        entityId: selectedMerchant.id,
+        reason: unlinkReason.trim(),
+        details: `Unlinked shared wallet customer account ${prevEmail}. Reason: ${unlinkReason.trim()}`
+      });
+
+      showSuccess('Merchant shared wallet unlinked successfully.');
+      setUnlinkModalOpen(false);
+      setUnlinkReason('');
+
+      const updatedMerchant: Merchant = {
+        ...selectedMerchant,
+        linkedCustomerUid: null,
+        linkedCustomerEmail: null,
+        linkedCustomerName: null,
+        linkedAt: null
+      };
+      setSelectedMerchant(updatedMerchant);
+      setMerchants((prev) => prev.map((m) => m.id === selectedMerchant.id ? updatedMerchant : m));
+      setLinkedCustomer(null);
+      fetchMerchantWallet(updatedMerchant);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setUnlinking(false);
+    }
+  };
+
+  // 6. Save Operating Hours & AutoSchedule
+  const handleSaveOperatingHours = async () => {
+    if (!selectedMerchant) return;
+    try {
+      setSavingHours(true);
+      const mRef = doc(db, 'merchants', selectedMerchant.id);
+      await updateDoc(mRef, {
+        hours: merchantHours,
+        autoSchedule: Boolean(merchantAutoSchedule),
+        updatedAt: Timestamp.now()
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'UPDATE_MERCHANT_HOURS',
+        entityType: 'merchant',
+        entityId: selectedMerchant.id,
+        details: `Updated operating hours & autoSchedule (${merchantAutoSchedule ? 'ON' : 'OFF'}) for ${selectedMerchant.name}`
+      });
+
+      showSuccess('Operating hours and autoSchedule schedule saved.');
+      setSelectedMerchant((prev) => prev ? { ...prev, hours: merchantHours, autoSchedule: merchantAutoSchedule } : null);
+      setMerchants((prev) => prev.map((m) => m.id === selectedMerchant.id ? { ...m, hours: merchantHours, autoSchedule: merchantAutoSchedule } : m));
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSavingHours(false);
+    }
+  };
 
   // Fetch Menu Categories & Items
   const fetchMenuData = async (merchantId: string) => {
@@ -1165,24 +1858,29 @@ export const Merchants: React.FC = () => {
                         </span>
                       </td>
                       <td className="px-4 py-3">
-                        <div className="flex items-center gap-1.5">
-                          <span
-                            className={`w-2 h-2 rounded-full ${
-                              m.status === 'suspended'
-                                ? 'bg-red-500'
-                                : m.isOpen
-                                ? 'bg-emerald-500'
-                                : 'bg-gray-400'
-                            }`}
-                          />
-                          <span className="font-bold">
-                            {m.status === 'suspended'
-                              ? 'Suspended'
-                              : m.isOpen
-                              ? 'Open'
-                              : 'Closed'}
-                          </span>
-                        </div>
+                        {(() => {
+                          const eff = computeEffectiveMerchantOpen(m, platformTimezone);
+                          return (
+                            <div className="flex items-center gap-1.5" title={eff.reason}>
+                              <span
+                                className={`w-2 h-2 rounded-full ${
+                                  m.status === 'suspended'
+                                    ? 'bg-red-500'
+                                    : eff.isOpen
+                                    ? 'bg-emerald-500'
+                                    : 'bg-gray-400'
+                                }`}
+                              />
+                              <span className="font-bold">
+                                {m.status === 'suspended'
+                                  ? 'Suspended'
+                                  : eff.isOpen
+                                  ? 'Open'
+                                  : 'Closed'}
+                              </span>
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="px-4 py-3 font-bold text-amber-600">
                         {m.commissionRate || 15}%
@@ -1231,15 +1929,22 @@ export const Merchants: React.FC = () => {
                 <div>
                   <h3 className="font-extrabold text-lg text-gray-900 dark:text-white flex items-center gap-2">
                     {selectedMerchant.name}
-                    <span
-                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                        selectedMerchant.isOpen
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : 'bg-gray-100 text-gray-700'
-                      }`}
-                    >
-                      {selectedMerchant.isOpen ? 'Open' : 'Closed'}
-                    </span>
+                    {(() => {
+                      const eff = computeEffectiveMerchantOpen(selectedMerchant, platformTimezone);
+                      return (
+                        <span
+                          title={eff.reason}
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 ${
+                            eff.isOpen
+                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300'
+                              : 'bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-300 border border-gray-300'
+                          }`}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full ${eff.isOpen ? 'bg-emerald-500' : 'bg-gray-400'}`} />
+                          <span>{eff.isOpen ? 'Open' : 'Closed'}</span>
+                        </span>
+                      );
+                    })()}
                   </h3>
                   <p className="text-xs text-gray-400">ID: {selectedMerchant.id}</p>
                 </div>
@@ -1257,7 +1962,8 @@ export const Merchants: React.FC = () => {
             <div className="flex border-b border-gray-200 dark:border-zinc-800 px-5 pt-2 overflow-x-auto">
               {[
                 { id: 'details', label: 'Details' },
-                { id: 'status', label: 'Status & Type' },
+                { id: 'status', label: 'Status & Hours' },
+                { id: 'wallet', label: 'Wallet' },
                 { id: 'location', label: 'Location Map' },
                 { id: 'menu', label: `Menu (${menuItems.length})` },
                 { id: 'orders', label: 'Orders & Payouts' },
@@ -1404,17 +2110,192 @@ export const Merchants: React.FC = () => {
                 </form>
               )}
 
-              {/* TAB 2: STATUS & TYPE */}
+              {/* TAB 2: STATUS & OPERATING HOURS */}
               {activeTab === 'status' && (
                 <div className="space-y-6">
-                  {/* Open / Close Switch */}
+                  {/* Effective Live Status Indicator Card */}
+                  {(() => {
+                    const eff = computeEffectiveMerchantOpen(selectedMerchant, platformTimezone);
+                    return (
+                      <div
+                        className={`p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                          eff.isOpen
+                            ? 'bg-emerald-50/70 dark:bg-emerald-950/30 border-emerald-300 dark:border-emerald-800'
+                            : 'bg-gray-50 dark:bg-zinc-900 border-gray-200 dark:border-zinc-800'
+                        }`}
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`w-3 h-3 rounded-full ${
+                                eff.isOpen ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'
+                              }`}
+                            />
+                            <span className="font-extrabold text-sm text-gray-900 dark:text-white">
+                              Effective Status: {eff.isOpen ? 'OPEN FOR ORDERS' : 'CLOSED TO CUSTOMERS'}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-600 dark:text-zinc-400">
+                            Reason: <strong>{eff.reason}</strong> (Timezone: <code className="font-mono text-amber-600">{platformTimezone}</code>)
+                          </p>
+                        </div>
+
+                        <span
+                          className={`self-start sm:self-auto px-3 py-1 rounded-full text-xs font-bold ${
+                            eff.isOpen
+                              ? 'bg-emerald-600 text-white'
+                              : 'bg-gray-200 dark:bg-zinc-700 text-gray-800 dark:text-zinc-200'
+                          }`}
+                        >
+                          {eff.isOpen ? 'Active Online' : 'Offline / Closed'}
+                        </span>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Weekly Operating Hours & AutoSchedule Editor */}
+                  <div className="p-4 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-gray-100 dark:border-zinc-800">
+                      <div>
+                        <div className="font-bold text-sm text-gray-900 dark:text-white flex items-center gap-2">
+                          <Clock className="w-4 h-4 text-amber-500" />
+                          <span>Weekly Operating Hours & Auto-Schedule</span>
+                        </div>
+                        <p className="text-xs text-gray-500">
+                          Automatically opens and closes the store based on weekly time windows in {platformTimezone}.
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleSaveOperatingHours}
+                        disabled={savingHours}
+                        className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 self-start sm:self-auto"
+                      >
+                        {savingHours ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Clock className="w-3.5 h-3.5" />}
+                        <span>Save Schedule</span>
+                      </button>
+                    </div>
+
+                    {/* AutoSchedule Toggle */}
+                    <div className="flex items-center justify-between p-3 rounded-xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800">
+                      <div>
+                        <span className="font-bold text-xs text-gray-900 dark:text-white block">
+                          Enable Auto-Schedule Mode
+                        </span>
+                        <span className="text-[11px] text-gray-500">
+                          When turned on, store availability strictly follows the day schedules below (overnight windows supported).
+                        </span>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={merchantAutoSchedule}
+                        onChange={(e) => setMerchantAutoSchedule(e.target.checked)}
+                        className="w-5 h-5 rounded-md accent-amber-500 cursor-pointer"
+                      />
+                    </div>
+
+                    {/* Schedule Grid: Monday - Sunday */}
+                    <div className="space-y-2">
+                      {[
+                        { dayKey: 'monday', label: 'Monday' },
+                        { dayKey: 'tuesday', label: 'Tuesday' },
+                        { dayKey: 'wednesday', label: 'Wednesday' },
+                        { dayKey: 'thursday', label: 'Thursday' },
+                        { dayKey: 'friday', label: 'Friday' },
+                        { dayKey: 'saturday', label: 'Saturday' },
+                        { dayKey: 'sunday', label: 'Sunday' }
+                      ].map(({ dayKey, label }) => {
+                        const dayData: MerchantOperatingDay = merchantHours[dayKey] || {
+                          open: '08:00',
+                          close: '22:00',
+                          isOpen: true,
+                          closed: false
+                        };
+                        const isDayClosed = Boolean(dayData.closed || dayData.isOpen === false);
+
+                        const updateDayField = (field: 'open' | 'close' | 'closed', val: any) => {
+                          setMerchantHours((prev) => ({
+                            ...prev,
+                            [dayKey]: {
+                              ...(prev[dayKey] || { open: '08:00', close: '22:00' }),
+                              [field]: val,
+                              ...(field === 'closed' ? { isOpen: !val } : {})
+                            }
+                          }));
+                        };
+
+                        return (
+                          <div
+                            key={dayKey}
+                            className={`p-2.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs transition-colors ${
+                              isDayClosed
+                                ? 'bg-gray-50/60 dark:bg-zinc-850/60 border-gray-200 dark:border-zinc-800 opacity-60'
+                                : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-800'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 sm:w-32">
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={!isDayClosed}
+                                  onChange={(e) => updateDayField('closed', !e.target.checked)}
+                                  className="w-4 h-4 rounded-sm accent-amber-500"
+                                />
+                                <span className="font-bold text-gray-900 dark:text-white">
+                                  {label}
+                                </span>
+                              </label>
+                            </div>
+
+                            <div className="flex items-center gap-2 flex-1 justify-end">
+                              {!isDayClosed ? (
+                                <>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[11px] text-gray-400">Open:</span>
+                                    <input
+                                      type="time"
+                                      value={dayData.open || '08:00'}
+                                      onChange={(e) => updateDayField('open', e.target.value)}
+                                      className="px-2 py-1 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 font-mono text-xs"
+                                    />
+                                  </div>
+                                  <span className="text-gray-400">—</span>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[11px] text-gray-400">Close:</span>
+                                    <input
+                                      type="time"
+                                      value={dayData.close || '22:00'}
+                                      onChange={(e) => updateDayField('close', e.target.value)}
+                                      className="px-2 py-1 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 font-mono text-xs"
+                                    />
+                                  </div>
+                                  {dayData.close && dayData.open && dayData.close < dayData.open && (
+                                    <span className="text-[10px] font-bold text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-950 px-1.5 py-0.5 rounded">
+                                      Overnight
+                                    </span>
+                                  )}
+                                </>
+                              ) : (
+                                <span className="text-gray-400 italic text-[11px] py-1">
+                                  Closed all day
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Manual Open / Close Switch */}
                   <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 flex items-center justify-between">
                     <div>
                       <div className="font-bold text-sm text-gray-900 dark:text-white">
-                        Store Open / Closed Switch
+                        Manual Open / Closed Override Switch
                       </div>
                       <p className="text-xs text-gray-500">
-                        When closed, customers cannot place active orders from this merchant.
+                        When manually closed or autoSchedule is off, controls store availability.
                       </p>
                     </div>
                     <button
@@ -1426,7 +2307,7 @@ export const Merchants: React.FC = () => {
                       }`}
                     >
                       <Power className="w-4 h-4" />
-                      {selectedMerchant.isOpen ? 'Open Now' : 'Closed'}
+                      {selectedMerchant.isOpen ? 'Manual: Open' : 'Manual: Closed'}
                     </button>
                   </div>
 
@@ -1495,6 +2376,216 @@ export const Merchants: React.FC = () => {
                         ? 'Restore Merchant'
                         : 'Suspend Merchant'}
                     </button>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB: WALLET & SHARED ACCOUNT */}
+              {activeTab === 'wallet' && (
+                <div className="space-y-6">
+                  {/* Balance & Linking Status Banner */}
+                  <div className="p-5 rounded-3xl bg-gradient-to-br from-amber-50 via-white to-amber-50/40 dark:from-zinc-900 dark:via-zinc-900 dark:to-zinc-850 border border-amber-200 dark:border-zinc-800 shadow-xs space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <Wallet className="w-5 h-5 text-amber-500" />
+                          <h4 className="font-extrabold text-sm text-gray-900 dark:text-white uppercase tracking-wider">
+                            {selectedMerchant.linkedCustomerUid ? 'Shared Delivio Wallet' : 'Merchant Wallet Balance'}
+                          </h4>
+                          {selectedMerchant.linkedCustomerUid ? (
+                            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300">
+                              Shared with Customer
+                            </span>
+                          ) : (
+                            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400">
+                              Direct Merchant Account
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-3xl font-black text-gray-900 dark:text-white">
+                            ₱
+                            {selectedMerchant.linkedCustomerUid
+                              ? (linkedCustomer ? linkedCustomer.walletBalance : 0).toFixed(2)
+                              : (selectedMerchant.walletBalance || 0).toFixed(2)}
+                          </span>
+                          <span className="text-xs text-gray-400 font-semibold">Available Funds</span>
+                        </div>
+                      </div>
+
+                      {/* Top-up and Adjust Action Buttons */}
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCashInAmount(0);
+                            setCashInNote('');
+                            setCashInModalOpen(true);
+                          }}
+                          className="delivio-btn-yellow px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>Add Cash</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAdjustAmount(0);
+                            setAdjustReason('');
+                            setAdjustType('deduct');
+                            setAdjustModalOpen(true);
+                          }}
+                          className="px-4 py-2.5 rounded-xl text-xs font-bold border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 hover:bg-gray-50 flex items-center gap-1.5 shadow-xs"
+                        >
+                          <Edit className="w-4 h-4 text-amber-500" />
+                          <span>Adjust / Deduct</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Customer Account Linking Card */}
+                    <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-850/80 space-y-3">
+                      {selectedMerchant.linkedCustomerUid ? (
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div className="flex items-start gap-3">
+                            <div className="p-2.5 rounded-xl bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 shrink-0">
+                              <LinkIcon className="w-4 h-4" />
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-xs text-gray-900 dark:text-white">
+                                  Linked to Customer Account: {selectedMerchant.linkedCustomerEmail}
+                                </span>
+                                <span className="text-[10px] text-gray-400">
+                                  ({selectedMerchant.linkedCustomerName || 'Customer'})
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-gray-500 mt-0.5">
+                                Wallet is unified across store merchant operations and personal customer ordering. Top-ups and deductions affect the shared customer account balance.
+                              </p>
+                              {selectedMerchant.linkedAt && (
+                                <p className="text-[10px] text-gray-400 mt-0.5">
+                                  Linked on: {formatTimestamp(selectedMerchant.linkedAt)}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setUnlinkReason('');
+                              setUnlinkModalOpen(true);
+                            }}
+                            className="px-3 py-1.5 rounded-xl border border-red-300 dark:border-red-900 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 text-xs font-bold flex items-center gap-1.5 self-start sm:self-auto shrink-0 transition-colors"
+                          >
+                            <Unlink className="w-3.5 h-3.5" />
+                            <span>Unlink Account</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div>
+                            <span className="font-bold text-xs text-gray-900 dark:text-white block">
+                              Link to Registered Customer Account
+                            </span>
+                            <p className="text-[11px] text-gray-500">
+                              Merge store wallet balance into an existing Delivio customer account to enable a single unified wallet.
+                            </p>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={handleOpenLinkModal}
+                            className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shrink-0 self-start sm:self-auto"
+                          >
+                            <LinkIcon className="w-3.5 h-3.5" />
+                            <span>Link to Customer</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Wallet Transactions History Table */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="font-bold text-xs uppercase tracking-wider text-gray-700 dark:text-zinc-300">
+                        Wallet Transaction History ({merchantWalletTxns.length})
+                      </h4>
+                      <button
+                        type="button"
+                        onClick={() => fetchMerchantWallet(selectedMerchant)}
+                        className="text-xs text-amber-600 font-semibold hover:underline flex items-center gap-1"
+                      >
+                        <RotateCw className="w-3 h-3" /> Refresh
+                      </button>
+                    </div>
+
+                    {loadingWalletTxns ? (
+                      <div className="py-8 text-center text-xs text-gray-400">
+                        <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-amber-500" />
+                        Loading transaction ledger...
+                      </div>
+                    ) : merchantWalletTxns.length === 0 ? (
+                      <div className="p-8 text-center text-xs text-gray-400 rounded-2xl border border-dashed border-gray-200 dark:border-zinc-800">
+                        No recorded wallet transactions found for this merchant.
+                      </div>
+                    ) : (
+                      <div className="border border-gray-200 dark:border-zinc-800 rounded-2xl overflow-hidden shadow-xs">
+                        <table className="w-full text-left text-xs">
+                          <thead className="bg-gray-50 dark:bg-zinc-850/60 uppercase font-bold text-gray-500 dark:text-zinc-400 border-b border-gray-200 dark:border-zinc-800">
+                            <tr>
+                              <th className="px-4 py-3">Date / Time</th>
+                              <th className="px-4 py-3">Type</th>
+                              <th className="px-4 py-3">Amount</th>
+                              <th className="px-4 py-3">Balance After</th>
+                              <th className="px-4 py-3">Details / Note</th>
+                              <th className="px-4 py-3">Admin</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 font-medium">
+                            {merchantWalletTxns.map((tx) => (
+                              <tr key={tx.id} className="hover:bg-gray-50 dark:hover:bg-zinc-800/40">
+                                <td className="px-4 py-3 whitespace-nowrap text-gray-500">
+                                  {formatTimestamp(tx.createdAt)}
+                                </td>
+                                <td className="px-4 py-3">
+                                  <span
+                                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                                      tx.type === 'credit'
+                                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                        : tx.type === 'merge'
+                                        ? 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300'
+                                        : 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
+                                    }`}
+                                  >
+                                    {tx.type}
+                                  </span>
+                                </td>
+                                <td
+                                  className={`px-4 py-3 font-bold whitespace-nowrap ${
+                                    tx.type === 'debit' ? 'text-red-600' : 'text-emerald-600'
+                                  }`}
+                                >
+                                  {tx.type === 'debit' ? '-' : '+'}₱{Number(tx.amount || 0).toFixed(2)}
+                                </td>
+                                <td className="px-4 py-3 font-bold text-gray-900 dark:text-white whitespace-nowrap">
+                                  ₱{Number(tx.balanceAfter || 0).toFixed(2)}
+                                </td>
+                                <td className="px-4 py-3 text-gray-600 dark:text-zinc-300 max-w-xs truncate">
+                                  {tx.note || '—'}
+                                </td>
+                                <td className="px-4 py-3 text-gray-500 text-[11px] whitespace-nowrap">
+                                  {tx.adminName || 'Admin'}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -2453,6 +3544,326 @@ export const Merchants: React.FC = () => {
           confirmLabel="Reject Request"
           reasonRequired={true}
           reasonPlaceholder="Specify reason for rejection..."
+          isDestructive={true}
+        />
+      )}
+
+      {/* Add Cash to Wallet Modal */}
+      {cashInModalOpen && selectedMerchant && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100 dark:border-zinc-800">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-amber-400 text-black">
+                  <Plus className="w-4 h-4" />
+                </div>
+                <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                  Add Cash to Wallet
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCashInModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddCash} className="space-y-4 pt-4">
+              <p className="text-xs text-gray-500">
+                Top-up merchant wallet for <strong>{selectedMerchant.name}</strong>
+                {selectedMerchant.linkedCustomerUid && (
+                  <span className="text-emerald-600 font-semibold block mt-0.5">
+                    (Crediting shared customer account: {selectedMerchant.linkedCustomerEmail})
+                  </span>
+                )}.
+              </p>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  Cash Amount (₱)
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="0.5"
+                  required
+                  value={cashInAmount || ''}
+                  onChange={(e) => setCashInAmount(Number(e.target.value))}
+                  placeholder="e.g. 500"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm font-bold text-gray-900 dark:text-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  Internal Note / Reference
+                </label>
+                <input
+                  type="text"
+                  value={cashInNote}
+                  onChange={(e) => setCashInNote(e.target.value)}
+                  placeholder="e.g. Over-the-counter deposit / promo credit"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setCashInModalOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={addingCash || cashInAmount <= 0}
+                  className="delivio-btn-yellow px-5 py-2.5 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                >
+                  {addingCash && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>Confirm Add Cash</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Adjust / Deduct Wallet Modal */}
+      {adjustModalOpen && selectedMerchant && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100 dark:border-zinc-800">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-amber-400 text-black">
+                  <Edit className="w-4 h-4" />
+                </div>
+                <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                  Adjust Wallet Balance
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAdjustModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleAdjustBalance} className="space-y-4 pt-4">
+              <div className="flex rounded-xl border border-gray-200 dark:border-zinc-700 p-1 bg-gray-50 dark:bg-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => setAdjustType('deduct')}
+                  className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                    adjustType === 'deduct'
+                      ? 'bg-red-600 text-white shadow-xs'
+                      : 'text-gray-600 dark:text-zinc-400'
+                  }`}
+                >
+                  Deduct / Debit (-)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAdjustType('add')}
+                  className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                    adjustType === 'add'
+                      ? 'bg-emerald-600 text-white shadow-xs'
+                      : 'text-gray-600 dark:text-zinc-400'
+                  }`}
+                >
+                  Add / Credit (+)
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  Adjustment Amount (₱)
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="0.5"
+                  required
+                  value={adjustAmount || ''}
+                  onChange={(e) => setAdjustAmount(Number(e.target.value))}
+                  placeholder="e.g. 100"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm font-bold text-gray-900 dark:text-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  Adjustment Reason <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  rows={2}
+                  required
+                  value={adjustReason}
+                  onChange={(e) => setAdjustReason(e.target.value)}
+                  placeholder="Reason for manual balance adjustment..."
+                  className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAdjustModalOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingAdjust || adjustAmount <= 0 || !adjustReason.trim()}
+                  className="delivio-btn-yellow px-5 py-2.5 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                >
+                  {submittingAdjust && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>Execute Adjustment</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Link to Registered Customer Modal */}
+      {linkModalOpen && selectedMerchant && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="w-full max-w-lg bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100 dark:border-zinc-800">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-amber-400 text-black">
+                  <LinkIcon className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                    Link Merchant to Customer Account
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    Search registered customer by email or name to unify wallet balances.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLinkModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Type-ahead search input */}
+            <div className="relative">
+              <Search className="w-4 h-4 absolute left-3 top-3 text-gray-400" />
+              <input
+                type="text"
+                value={customerSearchQuery}
+                onChange={(e) => setCustomerSearchQuery(e.target.value)}
+                placeholder="Type customer registered email or name..."
+                className="w-full pl-9 pr-4 py-2.5 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+              />
+            </div>
+
+            {/* Candidates List */}
+            <div className="border border-gray-200 dark:border-zinc-800 rounded-2xl max-h-60 overflow-y-auto divide-y divide-gray-100 dark:divide-zinc-800 text-xs">
+              {loadingCustomers ? (
+                <div className="p-8 text-center text-gray-400">
+                  <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-amber-500" />
+                  Loading customers...
+                </div>
+              ) : (() => {
+                const q = customerSearchQuery.trim().toLowerCase();
+                const filtered = allCustomers.filter(
+                  (c) =>
+                    !q ||
+                    (c.email || '').toLowerCase().includes(q) ||
+                    (c.name || '').toLowerCase().includes(q)
+                );
+
+                if (filtered.length === 0) {
+                  return (
+                    <div className="p-6 text-center text-gray-400">
+                      No matching registered customer account found.
+                    </div>
+                  );
+                }
+
+                return filtered.slice(0, 10).map((cust) => (
+                  <div
+                    key={cust.uid}
+                    onClick={() => {
+                      setSelectedCandidateCustomer(cust);
+                      setConfirmLinkModalOpen(true);
+                    }}
+                    className="p-3 hover:bg-amber-50/70 dark:hover:bg-zinc-800/60 cursor-pointer flex items-center justify-between transition-colors"
+                  >
+                    <div>
+                      <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
+                        <span>{cust.name}</span>
+                        <span className="text-[10px] text-gray-400">({cust.email})</span>
+                      </div>
+                      <div className="text-[11px] text-gray-500">
+                        UID: <span className="font-mono">{cust.uid.substring(0, 10)}...</span>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <span className="font-bold text-emerald-600 block">
+                        ₱{(cust.walletBalance || 0).toFixed(2)}
+                      </span>
+                      <span className="text-[10px] text-gray-400">Wallet balance</span>
+                    </div>
+                  </div>
+                ));
+              })()}
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => setLinkModalOpen(false)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal to Execute Link & Merge */}
+      {confirmLinkModalOpen && selectedCandidateCustomer && selectedMerchant && (
+        <ConfirmationModal
+          isOpen={confirmLinkModalOpen}
+          onClose={() => setConfirmLinkModalOpen(false)}
+          onConfirm={handleConfirmLink}
+          title="Confirm Linking & Wallet Balance Merge"
+          message={`Link merchant "${selectedMerchant.name}" to customer account "${selectedCandidateCustomer.email}"? In one atomic transaction, the merchant wallet balance (₱${(selectedMerchant.walletBalance || 0).toFixed(2)}) will be merged into the customer wallet (current balance: ₱${(selectedCandidateCustomer.walletBalance || 0).toFixed(2)}), resetting merchant wallet to ₱0.00. Both will share this wallet.`}
+          confirmLabel={linking ? 'Linking...' : 'Confirm & Merge Wallet'}
+          reasonRequired={false}
+          isDestructive={false}
+        />
+      )}
+
+      {/* Confirmation Modal to Unlink Customer (Requires Reason) */}
+      {unlinkModalOpen && selectedMerchant && (
+        <ConfirmationModal
+          isOpen={unlinkModalOpen}
+          onClose={() => setUnlinkModalOpen(false)}
+          onConfirm={(reason) => {
+            setUnlinkReason(reason || '');
+            handleUnlinkCustomer();
+          }}
+          title="Unlink Customer Shared Wallet?"
+          message={`Are you sure you want to unlink customer account "${selectedMerchant.linkedCustomerEmail}" from this merchant? Future wallet top-ups will no longer be shared with this customer. The customer will keep their existing wallet balance.`}
+          confirmLabel={unlinking ? 'Unlinking...' : 'Unlink Shared Wallet'}
+          reasonRequired={true}
+          reasonPlaceholder="Provide the administrative reason for unlinking..."
           isDestructive={true}
         />
       )}
