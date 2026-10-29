@@ -2466,40 +2466,92 @@ export const Merchants: React.FC = () => {
                 <div className="space-y-6">
                   {/* Effective Live Status Indicator Card */}
                   {(() => {
-                    const eff = computeEffectiveMerchantOpen(selectedMerchant, platformTimezone);
-                    return (
-                      <div
-                        className={`p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-                          eff.isOpen
-                            ? 'bg-emerald-50/70 dark:bg-emerald-950/30 border-emerald-300 dark:border-emerald-800'
-                            : 'bg-gray-50 dark:bg-zinc-900 border-gray-200 dark:border-zinc-800'
-                        }`}
-                      >
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`w-3 h-3 rounded-full ${
-                                eff.isOpen ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'
-                              }`}
-                            />
-                            <span className="font-extrabold text-sm text-gray-900 dark:text-white">
-                              Effective Status: {eff.isOpen ? 'OPEN FOR ORDERS' : 'CLOSED TO CUSTOMERS'}
-                            </span>
-                          </div>
-                          <p className="text-xs text-gray-600 dark:text-zinc-400">
-                            Reason: <strong>{eff.reason}</strong> (Timezone: <code className="font-mono text-amber-600">{platformTimezone}</code>)
-                          </p>
-                        </div>
+                    const eff = effectiveOpen(selectedMerchant, platformTimezone);
+                    const isForceClosed = Boolean(
+                      selectedMerchant.closedUntil &&
+                      parseDate(selectedMerchant.closedUntil) &&
+                      new Date().getTime() < parseDate(selectedMerchant.closedUntil)!.getTime()
+                    );
+                    const nextOpening = getNextOpeningDate(selectedMerchant, platformTimezone);
 
-                        <span
-                          className={`self-start sm:self-auto px-3 py-1 rounded-full text-xs font-bold ${
+                    return (
+                      <div className="space-y-3">
+                        <div
+                          className={`p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
                             eff.isOpen
-                              ? 'bg-emerald-600 text-white'
-                              : 'bg-gray-200 dark:bg-zinc-700 text-gray-800 dark:text-zinc-200'
+                              ? 'bg-emerald-50/70 dark:bg-emerald-950/30 border-emerald-300 dark:border-emerald-800'
+                              : 'bg-gray-50 dark:bg-zinc-900 border-gray-200 dark:border-zinc-800'
                           }`}
                         >
-                          {eff.isOpen ? 'Active Online' : 'Offline / Closed'}
-                        </span>
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`w-3 h-3 rounded-full ${
+                                  eff.isOpen ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'
+                                }`}
+                              />
+                              <span className="font-extrabold text-sm text-gray-900 dark:text-white">
+                                Effective Status: {eff.isOpen ? 'OPEN FOR ORDERS' : 'CLOSED TO CUSTOMERS'}
+                              </span>
+                            </div>
+                            <p className="text-xs text-gray-600 dark:text-zinc-400">
+                              Reason: <strong className="text-gray-900 dark:text-white">{eff.reason}</strong> (Timezone: <code className="font-mono text-amber-600">{platformTimezone}</code>)
+                            </p>
+                          </div>
+
+                          <span
+                            className={`self-start sm:self-auto px-3 py-1 rounded-full text-xs font-bold ${
+                              eff.isOpen
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-gray-200 dark:bg-zinc-700 text-gray-800 dark:text-zinc-200'
+                            }`}
+                          >
+                            {eff.isOpen ? 'Active Online' : 'Offline / Closed'}
+                          </span>
+                        </div>
+
+                        {/* Force Close & Reopen Override Controls */}
+                        <div className="p-4 rounded-2xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div>
+                            <div className="font-bold text-xs text-amber-950 dark:text-amber-200 flex items-center gap-1.5">
+                              <ShieldAlert className="w-4 h-4 text-amber-600" />
+                              <span>Admin Override Availability</span>
+                            </div>
+                            <p className="text-[11px] text-amber-800/90 dark:text-amber-300 mt-0.5">
+                              {isForceClosed ? (
+                                <span>
+                                  Store is currently Force Closed until <strong>{eff.closedUntilDate ? formatInPlatformTz(eff.closedUntilDate, platformTimezone) : 'reopen'}</strong>.
+                                </span>
+                              ) : (
+                                <span>
+                                  Force close sets <code>closedUntil</code> to next scheduled opening (<strong>{nextOpening.displayString}</strong>) or <strong>2100-01-01</strong> if unscheduled.
+                                </span>
+                              )}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {isForceClosed ? (
+                              <button
+                                type="button"
+                                onClick={() => handleReopenMerchant(selectedMerchant)}
+                                className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1.5 shadow-xs transition-colors"
+                              >
+                                <Play className="w-3.5 h-3.5" />
+                                <span>Reopen</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleForceCloseMerchant(selectedMerchant)}
+                                className="px-4 py-2 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white flex items-center gap-1.5 shadow-xs transition-colors"
+                              >
+                                <Ban className="w-3.5 h-3.5" />
+                                <span>Force close</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
                       </div>
                     );
                   })()}
