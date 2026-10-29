@@ -267,6 +267,8 @@ export interface Merchant {
   autoSchedule?: boolean;
   isPaused?: boolean;
   pauseUntilTime?: any;
+  closedUntil?: any;
+  openUntil?: any;
   createdAt?: any;
 }
 

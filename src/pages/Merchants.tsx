@@ -67,6 +67,9 @@ import {
   ArrowDownLeft,
   ArrowRightLeft,
   ShieldCheck,
+  ShieldAlert,
+  Ban,
+  Play,
   Sun,
   Moon
 } from 'lucide-react';
@@ -83,32 +86,97 @@ export const DEFAULT_WEEKLY_HOURS: MerchantWeeklyHours = {
   sunday: { open: '08:00', close: '22:00', isOpen: true, closed: false }
 };
 
-export function computeEffectiveMerchantOpen(
-  merchant: Merchant,
-  platformTimezone: string = 'Asia/Manila'
-): { isOpen: boolean; reason: string } {
-  // 1. false if status != "active"
-  if (merchant.status !== 'active') {
-    return { isOpen: false, reason: `Merchant status is ${merchant.status || 'inactive'}` };
-  }
-
-  // 2. false if isPaused and now < pauseUntilTime
-  const now = new Date();
-  if (merchant.isPaused && merchant.pauseUntilTime) {
-    const pauseTime = merchant.pauseUntilTime.toDate
-      ? merchant.pauseUntilTime.toDate()
-      : new Date(merchant.pauseUntilTime);
-    if (now.getTime() < pauseTime.getTime()) {
-      return {
-        isOpen: false,
-        reason: `Store paused until ${pauseTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-      };
+export function parseDate(val: any): Date | null {
+  if (!val) return null;
+  if (val instanceof Date) return isNaN(val.getTime()) ? null : val;
+  if (typeof val.toDate === 'function') {
+    try {
+      const d = val.toDate();
+      return isNaN(d.getTime()) ? null : d;
+    } catch {
+      return null;
     }
   }
+  if (typeof val.toMillis === 'function') {
+    return new Date(val.toMillis());
+  }
+  if (typeof val === 'number') return new Date(val);
+  if (typeof val === 'string') {
+    const d = new Date(val);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  if (val && typeof val.seconds === 'number') {
+    return new Date(val.seconds * 1000 + (val.nanoseconds ? val.nanoseconds / 1000000 : 0));
+  }
+  return null;
+}
 
-  // 3. if autoSchedule and hours exist, inside today's window in the platform timezone (overnight windows check yesterday)
-  if (merchant.autoSchedule && merchant.hours) {
-    const tz = platformTimezone || 'Asia/Manila';
+export function formatInPlatformTz(date: Date, platformTimezone: string = 'Asia/Manila'): string {
+  const tz = platformTimezone || 'Asia/Manila';
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true
+    }).format(date);
+  } catch {
+    return date.toLocaleString();
+  }
+}
+
+export function effectiveOpen(
+  shop: Merchant,
+  platformTimezone: string = 'Asia/Manila'
+): {
+  isOpen: boolean;
+  reason: string;
+  closedUntilDate?: Date | null;
+  openUntilDate?: Date | null;
+} {
+  const now = new Date();
+  const tz = platformTimezone || 'Asia/Manila';
+
+  // 1. false if status != "active"
+  if (shop.status !== 'active') {
+    return { isOpen: false, reason: 'Suspended' };
+  }
+
+  // 2. false if closedUntil is set and now < closedUntil
+  const closedUntilDate = parseDate(shop.closedUntil);
+  if (closedUntilDate && now.getTime() < closedUntilDate.getTime()) {
+    const isFarFuture = closedUntilDate.getFullYear() >= 2099;
+    const formatted = isFarFuture ? '2100-01-01' : formatInPlatformTz(closedUntilDate, tz);
+    return {
+      isOpen: false,
+      reason: `Closed manually until ${formatted}`,
+      closedUntilDate
+    };
+  }
+
+  // 3. false if isPaused and now < pauseUntilTime
+  const pauseUntilDate = parseDate(shop.pauseUntilTime);
+  if (shop.isPaused && pauseUntilDate && now.getTime() < pauseUntilDate.getTime()) {
+    return {
+      isOpen: false,
+      reason: 'Paused'
+    };
+  }
+
+  // 4. true if openUntil is set and now < openUntil
+  const openUntilDate = parseDate(shop.openUntil);
+  if (openUntilDate && now.getTime() < openUntilDate.getTime()) {
+    return {
+      isOpen: true,
+      reason: `Open manually until ${formatInPlatformTz(openUntilDate, tz)}`,
+      openUntilDate
+    };
+  }
+
+  // 5. else if autoSchedule and hours exist, inside today's window (platform timezone, default "Asia/Manila"; overnight windows check yesterday)
+  if (shop.autoSchedule && shop.hours) {
     let currentDayName = 'monday';
     let currentTimeStr = '12:00';
 
@@ -137,8 +205,8 @@ export function computeEffectiveMerchantOpen(
     const prevDayIdx = (currentDayIdx + 6) % 7;
     const prevDayName = daysOrder[prevDayIdx];
 
-    const todaySchedule = merchant.hours[currentDayName];
-    const yesterdaySchedule = merchant.hours[prevDayName];
+    const todaySchedule = shop.hours[currentDayName];
+    const yesterdaySchedule = shop.hours[prevDayName];
 
     let insideWindow = false;
 
@@ -171,21 +239,124 @@ export function computeEffectiveMerchantOpen(
     if (insideWindow) {
       return {
         isOpen: true,
-        reason: `Auto-schedule: Open (${todaySchedule?.open || '08:00'} - ${todaySchedule?.close || '22:00'})`
+        reason: 'Open (Operating hours)'
       };
     } else {
       return {
         isOpen: false,
-        reason: `Auto-schedule: Closed (outside operating hours for ${currentDayName})`
+        reason: 'Outside hours'
       };
     }
   }
 
-  // 4. otherwise isOpen
+  // 6. else isOpen
   return {
-    isOpen: Boolean(merchant.isOpen),
-    reason: merchant.isOpen ? 'Manually set to Open' : 'Manually set to Closed'
+    isOpen: Boolean(shop.isOpen),
+    reason: shop.isOpen ? 'Open' : 'Closed manually'
   };
+}
+
+export const computeEffectiveMerchantOpen = effectiveOpen;
+
+export function getNextOpeningDate(
+  shop: Merchant,
+  platformTimezone: string = 'Asia/Manila'
+): { isoString: string; displayString: string } {
+  const fallbackISO = '2100-01-01T00:00:00.000Z';
+  const fallbackDisplay = '2100-01-01';
+
+  if (!shop.autoSchedule || !shop.hours) {
+    return { isoString: fallbackISO, displayString: fallbackDisplay };
+  }
+
+  const tz = platformTimezone || 'Asia/Manila';
+  const now = new Date();
+
+  let currentDayName = 'monday';
+  let currentTimeStr = '12:00';
+  let currentYear = now.getFullYear();
+  let currentMonth = now.getMonth() + 1;
+  let currentDayOfMonth = now.getDate();
+
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+      weekday: 'long',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    }).formatToParts(now);
+
+    for (const p of parts) {
+      if (p.type === 'weekday') currentDayName = p.value.toLowerCase();
+      if (p.type === 'year') currentYear = parseInt(p.value, 10);
+      if (p.type === 'month') currentMonth = parseInt(p.value, 10);
+      if (p.type === 'day') currentDayOfMonth = parseInt(p.value, 10);
+      if (p.type === 'hour') currentTimeStr = p.value + ':';
+      if (p.type === 'minute') currentTimeStr += p.value;
+    }
+  } catch {
+    const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    currentDayName = days[now.getDay()];
+    currentTimeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  }
+
+  const daysOrder = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const currentDayIdx = daysOrder.indexOf(currentDayName);
+
+  // Check today first (if current time is before today's open time)
+  const todaySchedule = shop.hours[currentDayName];
+  if (
+    todaySchedule &&
+    !todaySchedule.closed &&
+    todaySchedule.isOpen !== false &&
+    todaySchedule.open &&
+    currentTimeStr < todaySchedule.open
+  ) {
+    const iso = `${String(currentYear).padStart(4, '0')}-${String(currentMonth).padStart(2, '0')}-${String(currentDayOfMonth).padStart(2, '0')}T${todaySchedule.open}:00+08:00`;
+    return {
+      isoString: iso,
+      displayString: `Today at ${todaySchedule.open}`
+    };
+  }
+
+  // Look ahead across the next 7 days
+  for (let offset = 1; offset <= 7; offset++) {
+    const nextDayIdx = (currentDayIdx + offset) % 7;
+    const nextDayName = daysOrder[nextDayIdx];
+    const sched = shop.hours[nextDayName];
+    if (sched && !sched.closed && sched.isOpen !== false && sched.open) {
+      const d = new Date(now.getTime() + offset * 86400000);
+      let y = d.getFullYear();
+      let m = d.getMonth() + 1;
+      let dayNum = d.getDate();
+      try {
+        const parts = new Intl.DateTimeFormat('en-US', {
+          timeZone: tz,
+          year: 'numeric',
+          month: 'numeric',
+          day: 'numeric'
+        }).formatToParts(d);
+        for (const p of parts) {
+          if (p.type === 'year') y = parseInt(p.value, 10);
+          if (p.type === 'month') m = parseInt(p.value, 10);
+          if (p.type === 'day') dayNum = parseInt(p.value, 10);
+        }
+      } catch {}
+
+      const iso = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}T${sched.open}:00+08:00`;
+      const capitalizedDay = nextDayName.charAt(0).toUpperCase() + nextDayName.slice(1);
+      return {
+        isoString: iso,
+        displayString: offset === 1 ? `Tomorrow at ${sched.open}` : `${capitalizedDay} at ${sched.open}`
+      };
+    }
+  }
+
+  return { isoString: fallbackISO, displayString: fallbackDisplay };
 }
 
 export const Merchants: React.FC = () => {
@@ -369,6 +540,8 @@ export const Merchants: React.FC = () => {
           autoSchedule: Boolean(dt.autoSchedule),
           isPaused: Boolean(dt.isPaused),
           pauseUntilTime: dt.pauseUntilTime,
+          closedUntil: dt.closedUntil || null,
+          openUntil: dt.openUntil || null,
           createdAt: dt.createdAt
         });
       });
@@ -1256,6 +1429,96 @@ export const Merchants: React.FC = () => {
     }
   };
 
+  // Force Close (closedUntil = next opening or 2100-01-01)
+  const handleForceCloseMerchant = async (merchantToClose: Merchant) => {
+    try {
+      const nextOpening = getNextOpeningDate(merchantToClose, platformTimezone);
+      const closedUntilVal = nextOpening.isoString;
+      const mRef = doc(db, 'merchants', merchantToClose.id);
+      await updateDoc(mRef, {
+        closedUntil: closedUntilVal,
+        isOpen: false,
+        updatedAt: Timestamp.now()
+      });
+
+      const adminId = adminProfile?.uid || 'admin';
+      const adminName = adminProfile?.name || 'Administrator';
+
+      await logAuditEvent({
+        adminId,
+        adminName,
+        adminEmail: adminProfile?.email,
+        action: 'MERCHANT_FORCE_CLOSE',
+        entityType: 'merchant',
+        entityId: merchantToClose.id,
+        details: `Force closed merchant "${merchantToClose.name}" until ${nextOpening.displayString} (${closedUntilVal})`,
+        oldValue: { closedUntil: merchantToClose.closedUntil || null, isOpen: merchantToClose.isOpen },
+        newValue: { closedUntil: closedUntilVal, isOpen: false }
+      });
+
+      setMerchants((prev) =>
+        prev.map((m) =>
+          m.id === merchantToClose.id
+            ? { ...m, closedUntil: closedUntilVal, isOpen: false }
+            : m
+        )
+      );
+      if (selectedMerchant && selectedMerchant.id === merchantToClose.id) {
+        setSelectedMerchant((prev) =>
+          prev ? { ...prev, closedUntil: closedUntilVal, isOpen: false } : null
+        );
+      }
+
+      showSuccess(`Force closed "${merchantToClose.name}" until ${nextOpening.displayString}.`);
+    } catch (err: any) {
+      showError(err);
+    }
+  };
+
+  // Reopen (closedUntil null)
+  const handleReopenMerchant = async (merchantToReopen: Merchant) => {
+    try {
+      const mRef = doc(db, 'merchants', merchantToReopen.id);
+      await updateDoc(mRef, {
+        closedUntil: null,
+        isOpen: true,
+        updatedAt: Timestamp.now()
+      });
+
+      const adminId = adminProfile?.uid || 'admin';
+      const adminName = adminProfile?.name || 'Administrator';
+
+      await logAuditEvent({
+        adminId,
+        adminName,
+        adminEmail: adminProfile?.email,
+        action: 'MERCHANT_REOPEN',
+        entityType: 'merchant',
+        entityId: merchantToReopen.id,
+        details: `Reopened merchant "${merchantToReopen.name}" (cleared closedUntil, set isOpen true)`,
+        oldValue: { closedUntil: merchantToReopen.closedUntil || null, isOpen: merchantToReopen.isOpen },
+        newValue: { closedUntil: null, isOpen: true }
+      });
+
+      setMerchants((prev) =>
+        prev.map((m) =>
+          m.id === merchantToReopen.id
+            ? { ...m, closedUntil: null, isOpen: true }
+            : m
+        )
+      );
+      if (selectedMerchant && selectedMerchant.id === merchantToReopen.id) {
+        setSelectedMerchant((prev) =>
+          prev ? { ...prev, closedUntil: null, isOpen: true } : null
+        );
+      }
+
+      showSuccess(`Reopened "${merchantToReopen.name}". Store is now available.`);
+    } catch (err: any) {
+      showError(err);
+    }
+  };
+
   // Recompute merchants/{id}.cuisineTags: distinct categoryName values of available items
   const recomputeMerchantCuisineTags = async (merchantId: string, currentItems: MenuItem[]) => {
     try {
@@ -1677,8 +1940,9 @@ export const Merchants: React.FC = () => {
         if (!m.cuisineTags || !m.cuisineTags.includes(categoryFilter)) return false;
       }
       if (statusFilter !== 'all' && m.status !== statusFilter) return false;
-      if (openFilter === 'open' && !m.isOpen) return false;
-      if (openFilter === 'closed' && m.isOpen) return false;
+      const eff = effectiveOpen(m, platformTimezone);
+      if (openFilter === 'open' && !eff.isOpen) return false;
+      if (openFilter === 'closed' && eff.isOpen) return false;
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const n = (m.name || '').toLowerCase();
@@ -1688,7 +1952,7 @@ export const Merchants: React.FC = () => {
       }
       return true;
     });
-  }, [merchants, selectedCityId, typeFilter, categoryFilter, statusFilter, openFilter, searchQuery]);
+  }, [merchants, selectedCityId, typeFilter, categoryFilter, statusFilter, openFilter, searchQuery, platformTimezone]);
 
   return (
     <div className="space-y-6">
@@ -1705,16 +1969,20 @@ export const Merchants: React.FC = () => {
 
         <button
           onClick={() => {
-            const rows = filteredMerchants.map((m) => ({
-              ID: m.id,
-              Name: m.name,
-              Owner: m.ownerName,
-              Phone: m.phone,
-              Type: m.type,
-              Status: m.status,
-              IsOpen: m.isOpen ? 'Open' : 'Closed',
-              CommissionRate: m.commissionRate
-            }));
+            const rows = filteredMerchants.map((m) => {
+              const eff = effectiveOpen(m, platformTimezone);
+              return {
+                ID: m.id,
+                Name: m.name,
+                Owner: m.ownerName,
+                Phone: m.phone,
+                Type: m.type,
+                Status: m.status,
+                EffectiveStatus: eff.isOpen ? 'Open' : 'Closed',
+                EffectiveReason: eff.reason,
+                CommissionRate: m.commissionRate
+              };
+            });
             exportToCsv(`delivio_merchants_${new Date().toISOString().slice(0, 10)}`, rows);
           }}
           className="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-gray-700 dark:text-zinc-300 hover:bg-gray-50 text-xs font-bold shadow-xs self-start sm:self-auto"
@@ -1859,24 +2127,37 @@ export const Merchants: React.FC = () => {
                       </td>
                       <td className="px-4 py-3">
                         {(() => {
-                          const eff = computeEffectiveMerchantOpen(m, platformTimezone);
+                          const eff = effectiveOpen(m, platformTimezone);
+                          const isSuspended = m.status === 'suspended';
                           return (
-                            <div className="flex items-center gap-1.5" title={eff.reason}>
+                            <div className="flex flex-col gap-0.5">
+                              <div className="flex items-center gap-1.5" title={eff.reason}>
+                                <span
+                                  className={`w-2 h-2 rounded-full shrink-0 ${
+                                    isSuspended
+                                      ? 'bg-red-500'
+                                      : eff.isOpen
+                                      ? 'bg-emerald-500'
+                                      : 'bg-gray-400'
+                                  }`}
+                                />
+                                <span
+                                  className={`font-bold ${
+                                    isSuspended
+                                      ? 'text-red-600 dark:text-red-400'
+                                      : eff.isOpen
+                                      ? 'text-emerald-700 dark:text-emerald-400'
+                                      : 'text-gray-700 dark:text-zinc-300'
+                                  }`}
+                                >
+                                  {isSuspended ? 'Suspended' : eff.isOpen ? 'Open' : 'Closed'}
+                                </span>
+                              </div>
                               <span
-                                className={`w-2 h-2 rounded-full ${
-                                  m.status === 'suspended'
-                                    ? 'bg-red-500'
-                                    : eff.isOpen
-                                    ? 'bg-emerald-500'
-                                    : 'bg-gray-400'
-                                }`}
-                              />
-                              <span className="font-bold">
-                                {m.status === 'suspended'
-                                  ? 'Suspended'
-                                  : eff.isOpen
-                                  ? 'Open'
-                                  : 'Closed'}
+                                className="text-[10px] text-gray-500 dark:text-zinc-400 truncate max-w-[200px]"
+                                title={eff.reason}
+                              >
+                                {eff.reason}
                               </span>
                             </div>
                           );
@@ -1886,15 +2167,52 @@ export const Merchants: React.FC = () => {
                         {m.commissionRate || 15}%
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedMerchant(m);
-                          }}
-                          className="px-2.5 py-1 rounded-lg text-xs font-bold text-amber-600 dark:text-amber-400 hover:bg-amber-50 transition-colors"
-                        >
-                          Manage &rarr;
-                        </button>
+                        <div className="flex items-center justify-end gap-1.5">
+                          {(() => {
+                            const isForceClosed = Boolean(
+                              m.closedUntil &&
+                              parseDate(m.closedUntil) &&
+                              new Date().getTime() < parseDate(m.closedUntil)!.getTime()
+                            );
+                            if (isForceClosed) {
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleReopenMerchant(m);
+                                  }}
+                                  title="Clear closedUntil and reopen this merchant"
+                                  className="px-2 py-1 rounded-lg text-[11px] font-bold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 hover:bg-emerald-100 transition-colors"
+                                >
+                                  Reopen
+                                </button>
+                              );
+                            }
+                            return (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleForceCloseMerchant(m);
+                                }}
+                                title="Force close until next opening or 2100-01-01"
+                                className="px-2 py-1 rounded-lg text-[11px] font-bold bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800 hover:bg-amber-100 transition-colors"
+                              >
+                                Force close
+                              </button>
+                            );
+                          })()}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedMerchant(m);
+                            }}
+                            className="px-2.5 py-1 rounded-lg text-xs font-bold text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40 transition-colors"
+                          >
+                            Manage &rarr;
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1927,14 +2245,14 @@ export const Merchants: React.FC = () => {
                   )}
                 </div>
                 <div>
-                  <h3 className="font-extrabold text-lg text-gray-900 dark:text-white flex items-center gap-2">
-                    {selectedMerchant.name}
+                  <h3 className="font-extrabold text-lg text-gray-900 dark:text-white flex items-center gap-2 flex-wrap">
+                    <span>{selectedMerchant.name}</span>
                     {(() => {
-                      const eff = computeEffectiveMerchantOpen(selectedMerchant, platformTimezone);
+                      const eff = effectiveOpen(selectedMerchant, platformTimezone);
                       return (
                         <span
                           title={eff.reason}
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 ${
+                          className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1.5 ${
                             eff.isOpen
                               ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300'
                               : 'bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-300 border border-gray-300'
@@ -1942,6 +2260,7 @@ export const Merchants: React.FC = () => {
                         >
                           <span className={`w-1.5 h-1.5 rounded-full ${eff.isOpen ? 'bg-emerald-500' : 'bg-gray-400'}`} />
                           <span>{eff.isOpen ? 'Open' : 'Closed'}</span>
+                          <span className="font-normal opacity-80">({eff.reason})</span>
                         </span>
                       );
                     })()}
@@ -1950,12 +2269,44 @@ export const Merchants: React.FC = () => {
                 </div>
               </div>
 
-              <button
-                onClick={() => setSelectedMerchant(null)}
-                className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                {(() => {
+                  const isForceClosed = Boolean(
+                    selectedMerchant.closedUntil &&
+                    parseDate(selectedMerchant.closedUntil) &&
+                    new Date().getTime() < parseDate(selectedMerchant.closedUntil)!.getTime()
+                  );
+                  if (isForceClosed) {
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => handleReopenMerchant(selectedMerchant)}
+                        className="px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1.5 shadow-xs transition-colors"
+                      >
+                        <Play className="w-3.5 h-3.5" />
+                        <span>Reopen</span>
+                      </button>
+                    );
+                  }
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => handleForceCloseMerchant(selectedMerchant)}
+                      className="px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white flex items-center gap-1.5 shadow-xs transition-colors"
+                    >
+                      <Ban className="w-3.5 h-3.5" />
+                      <span>Force close</span>
+                    </button>
+                  );
+                })()}
+
+                <button
+                  onClick={() => setSelectedMerchant(null)}
+                  className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
             {/* Navigation Tabs */}
