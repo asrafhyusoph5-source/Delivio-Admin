@@ -228,6 +228,27 @@ export const BannersPromos: React.FC = () => {
           approvedBy: adminProfile?.name || 'Administrator',
           approvedAt: Timestamp.now()
         });
+
+        // Automatic notice in inbox for the merchant
+        const matchedReq = promoRequests.find((r) => r.id === associatedPromoRequestId);
+        const mId = linkMerchantId || matchedReq?.merchantId;
+        if (mId) {
+          await addDoc(collection(db, 'inbox'), {
+            merchantId: mId,
+            merchantName: matchedReq?.merchantName || null,
+            category: 'update',
+            title: 'Promo Request Approved',
+            body: `Your promotional campaign "${title}" has been approved and published to the customer banner carousel!`,
+            audience: null,
+            customerId: null,
+            riderId: null,
+            imageUrl: imageUrl.trim() || null,
+            link: { merchantId: mId, category: null },
+            createdAt: Timestamp.now(),
+            createdBy: adminProfile?.uid || 'admin',
+            createdByName: adminProfile?.name || 'Administrator'
+          });
+        }
       }
 
       await logAuditEvent({
@@ -272,6 +293,26 @@ export const BannersPromos: React.FC = () => {
         rejectedBy: adminProfile?.name || 'Administrator',
         rejectedAt: Timestamp.now()
       });
+
+      // Automatic notice in inbox for the merchant
+      if (targetPromoRequest.merchantId) {
+        await addDoc(collection(db, 'inbox'), {
+          merchantId: targetPromoRequest.merchantId,
+          merchantName: targetPromoRequest.merchantName || null,
+          category: 'update',
+          title: 'Promo Request Rejected',
+          body: `Your promotional campaign request "${targetPromoRequest.title}" was rejected.${reason ? ` Reason: ${reason}` : ''}`,
+          audience: null,
+          customerId: null,
+          riderId: null,
+          imageUrl: targetPromoRequest.imageUrl || null,
+          link: { merchantId: targetPromoRequest.merchantId, category: null },
+          createdAt: Timestamp.now(),
+          createdBy: adminProfile?.uid || 'admin',
+          createdByName: adminProfile?.name || 'Administrator'
+        });
+      }
+
       showSuccess('Promo request rejected.');
       setRejectModalOpen(false);
       fetchData();

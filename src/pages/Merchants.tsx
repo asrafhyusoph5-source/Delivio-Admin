@@ -28,6 +28,8 @@ import type {
   Merchant,
   MenuItem,
   MenuCategory,
+  MenuChoice,
+  MenuSet,
   Order,
   ChangeRequest,
   EditHistoryEntry,
@@ -467,6 +469,7 @@ export const Merchants: React.FC = () => {
   const [itemImageUrl, setItemImageUrl] = useState('');
   const [itemCategory, setItemCategory] = useState('');
   const [itemAvailable, setItemAvailable] = useState(true);
+  const [itemSets, setItemSets] = useState<MenuSet[]>([]);
   const [savingItem, setSavingItem] = useState(false);
 
   // Bulk Price Modal
@@ -1100,6 +1103,7 @@ export const Merchants: React.FC = () => {
       const itemsList: MenuItem[] = [];
       itemsSnap.forEach((d) => {
         const dt = d.data();
+        const hasSetsVal = Boolean(dt.hasSets || (dt.sets && dt.sets.length > 0));
         itemsList.push({
           id: d.id,
           categoryId: dt.categoryId,
@@ -1108,7 +1112,10 @@ export const Merchants: React.FC = () => {
           description: dt.description || '',
           imageUrl: dt.imageUrl || '',
           available: dt.available !== false,
-          createdAt: dt.createdAt
+          hasSets: hasSetsVal,
+          sets: dt.sets || [],
+          createdAt: dt.createdAt,
+          updatedAt: dt.updatedAt
         });
       });
       setMenuItems(itemsList);
@@ -1678,18 +1685,64 @@ export const Merchants: React.FC = () => {
       const itemsCol = collection(db, 'merchants', selectedMerchant.id, 'items');
       let updatedItems: MenuItem[] = [];
 
+      // Validate sets if any
+      const sanitizedSets: MenuSet[] = [];
+      for (let sIdx = 0; sIdx < itemSets.length; sIdx++) {
+        const s = itemSets[sIdx];
+        const sName = (s.name || '').trim();
+        if (!sName) {
+          showError(`Option Set #${sIdx + 1} requires a name.`);
+          setSavingItem(false);
+          return;
+        }
+        if (!s.choices || s.choices.length === 0) {
+          showError(`Option Set "${sName}" must have at least one choice.`);
+          setSavingItem(false);
+          return;
+        }
+        const validChoices: MenuChoice[] = [];
+        for (let cIdx = 0; cIdx < s.choices.length; cIdx++) {
+          const c = s.choices[cIdx];
+          const cName = (c.name || '').trim();
+          if (!cName) {
+            showError(`Choice #${cIdx + 1} in set "${sName}" requires a name.`);
+            setSavingItem(false);
+            return;
+          }
+          const price = Math.max(0, Number(c.price) || 0);
+          validChoices.push({
+            id: c.id || `c_${sIdx}_${cIdx}_${Date.now().toString(36)}`,
+            name: cName,
+            price,
+            available: c.available !== false
+          });
+        }
+        sanitizedSets.push({
+          id: s.id || `set_${sIdx}_${Date.now().toString(36)}`,
+          name: sName,
+          required: Boolean(s.required),
+          maxSelect: Math.max(1, Number(s.maxSelect) || 1),
+          sortOrder: typeof s.sortOrder === 'number' ? s.sortOrder : sIdx,
+          choices: validChoices
+        });
+      }
+      const hasSets = sanitizedSets.length > 0;
+
       if (editingItem) {
-        // Edit
+        // Edit - never overwrite sets/hasSets unless modified via form
         const itemDoc = doc(db, 'merchants', selectedMerchant.id, 'items', editingItem.id);
-        await updateDoc(itemDoc, {
+        const updatePayload: Record<string, any> = {
           name: itemName.trim(),
           price: Number(itemPrice) || 0,
           description: itemDesc.trim(),
           imageUrl: itemImageUrl.trim(),
           categoryId: itemCategory,
           available: itemAvailable,
+          hasSets,
+          sets: sanitizedSets,
           updatedAt: Timestamp.now()
-        });
+        };
+        await updateDoc(itemDoc, updatePayload);
         updatedItems = menuItems.map((i) =>
           i.id === editingItem.id
             ? {
@@ -1699,7 +1752,9 @@ export const Merchants: React.FC = () => {
                 description: itemDesc.trim(),
                 imageUrl: itemImageUrl.trim(),
                 categoryId: itemCategory,
-                available: itemAvailable
+                available: itemAvailable,
+                hasSets,
+                sets: sanitizedSets
               }
             : i
         );
@@ -1713,6 +1768,8 @@ export const Merchants: React.FC = () => {
           imageUrl: itemImageUrl.trim(),
           categoryId: itemCategory,
           available: itemAvailable,
+          hasSets,
+          sets: sanitizedSets,
           createdAt: Timestamp.now()
         });
         const newItem: MenuItem = {
@@ -1723,6 +1780,8 @@ export const Merchants: React.FC = () => {
           imageUrl: itemImageUrl.trim(),
           categoryId: itemCategory,
           available: itemAvailable,
+          hasSets,
+          sets: sanitizedSets,
           createdAt: Timestamp.now()
         };
         updatedItems = [...menuItems, newItem];
@@ -1884,6 +1943,27 @@ export const Merchants: React.FC = () => {
 
       await batch.commit();
 
+      // Automatic inbox notice to merchant
+      try {
+        await addDoc(collection(db, 'inbox'), {
+          title: `Change Request Approved: ${req.kind}`,
+          body: `Your request to update ${req.kind} has been approved and applied. (New value: ${req.newValue})`,
+          category: 'update',
+          imageUrl: null,
+          link: null,
+          audience: null,
+          customerId: null,
+          riderId: null,
+          merchantId: req.merchantId || selectedMerchant.id,
+          merchantName: selectedMerchant.name || null,
+          createdAt: Timestamp.now(),
+          createdBy: adminProfile?.uid || 'admin',
+          createdByName: adminProfile?.name || 'Administrator'
+        });
+      } catch (inboxErr) {
+        console.warn('Failed to send inbox notice for change request approval:', inboxErr);
+      }
+
       showSuccess('Change request approved and applied.');
       fetchChangeRequests(selectedMerchant.id);
       fetchMerchants();
@@ -1903,6 +1983,28 @@ export const Merchants: React.FC = () => {
         reviewedBy: adminProfile?.name || 'Admin',
         reviewedAt: Timestamp.now()
       });
+
+      // Automatic inbox notice to merchant
+      try {
+        await addDoc(collection(db, 'inbox'), {
+          title: `Change Request Rejected: ${targetChangeRequest.kind}`,
+          body: `Your request to update ${targetChangeRequest.kind} was rejected by administration. Reason: ${reason || 'Does not comply with platform policy'}`,
+          category: 'update',
+          imageUrl: null,
+          link: null,
+          audience: null,
+          customerId: null,
+          riderId: null,
+          merchantId: targetChangeRequest.merchantId || selectedMerchant?.id,
+          merchantName: selectedMerchant?.name || null,
+          createdAt: Timestamp.now(),
+          createdBy: adminProfile?.uid || 'admin',
+          createdByName: adminProfile?.name || 'Administrator'
+        });
+      } catch (inboxErr) {
+        console.warn('Failed to send inbox notice for change request rejection:', inboxErr);
+      }
+
       showSuccess('Change request rejected.');
       if (selectedMerchant) fetchChangeRequests(selectedMerchant.id);
     } catch (err: any) {
@@ -3116,6 +3218,7 @@ export const Merchants: React.FC = () => {
                               setItemImageUrl('');
                               setItemCategory(merchantAllowedCategories[0]);
                               setItemAvailable(true);
+                              setItemSets([]);
                               setItemModalOpen(true);
                             }}
                             className="delivio-btn-yellow px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 shadow-xs"
@@ -3309,15 +3412,25 @@ export const Merchants: React.FC = () => {
                                     <h5 className="font-bold text-gray-900 dark:text-white leading-tight">
                                       {item.name}
                                     </h5>
-                                    <span
-                                      className={`inline-block mt-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-md ${
-                                        item.categoryId && merchantAllowedCategories.includes(item.categoryId)
-                                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                                          : 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
-                                      }`}
-                                    >
-                                      {item.categoryId || 'No Category'}
-                                    </span>
+                                    <div className="flex items-center gap-1 flex-wrap mt-0.5">
+                                      <span
+                                        className={`inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-md ${
+                                          item.categoryId && merchantAllowedCategories.includes(item.categoryId)
+                                            ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                                            : 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
+                                        }`}
+                                      >
+                                        {item.categoryId || 'No Category'}
+                                      </span>
+                                      {(item.hasSets || (item.sets && item.sets.length > 0)) && (
+                                        <span
+                                          className="inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-purple-100 text-purple-800 dark:bg-purple-950/70 dark:text-purple-300 border border-purple-200 dark:border-purple-800"
+                                          title={`${item.sets?.length || 0} option set(s)`}
+                                        >
+                                          Set {item.sets?.length ? `(${item.sets.length})` : ''}
+                                        </span>
+                                      )}
+                                    </div>
                                   </div>
                                   <span className="font-extrabold text-amber-600 shrink-0">
                                     ₱{Number(item.price).toFixed(2)}
@@ -3352,6 +3465,11 @@ export const Merchants: React.FC = () => {
                                       setItemImageUrl(item.imageUrl || '');
                                       setItemCategory(item.categoryId || merchantAllowedCategories[0]);
                                       setItemAvailable(item.available);
+                                      setItemSets(
+                                        item.sets && Array.isArray(item.sets)
+                                          ? JSON.parse(JSON.stringify(item.sets))
+                                          : []
+                                      );
                                       setItemModalOpen(true);
                                     }}
                                     className="p-1 text-gray-400 hover:text-amber-600 rounded-md hover:bg-gray-100 dark:hover:bg-zinc-800"
@@ -3570,38 +3688,76 @@ export const Merchants: React.FC = () => {
       {/* Add / Edit Menu Item Modal */}
       {itemModalOpen && selectedMerchant && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
-          <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-6 shadow-2xl">
-            <h3 className="font-bold text-base text-gray-900 dark:text-white mb-4">
-              {editingItem ? 'Edit Menu Item' : 'Add New Item'}
-            </h3>
+          <div className="w-full max-w-xl max-h-[90vh] flex flex-col bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl shadow-2xl overflow-hidden">
+            <div className="p-5 border-b border-gray-100 dark:border-zinc-800 flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-base text-gray-900 dark:text-white">
+                  {editingItem ? 'Edit Menu Item' : 'Add New Item'}
+                </h3>
+                <p className="text-xs text-gray-500">
+                  Configure item pricing, description, category, and customization sets.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setItemModalOpen(false)}
+                className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
 
-            <form onSubmit={handleSaveItem} className="space-y-3">
+            <form onSubmit={handleSaveItem} className="flex-1 overflow-y-auto p-5 space-y-4 text-xs">
               <div>
                 <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                  Item Name
+                  Item Name <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
                   value={itemName}
                   onChange={(e) => setItemName(e.target.value)}
                   required
-                  className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                  placeholder="e.g. Delivio Special Burger"
+                  className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                  Price (PHP)
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={itemPrice}
-                  onChange={(e) => setItemPrice(Number(e.target.value))}
-                  required
-                  className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                    Base Price (PHP) <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={itemPrice}
+                    onChange={(e) => setItemPrice(Number(e.target.value))}
+                    required
+                    className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                    Category ({selectedMerchant.type === 'food' ? 'Food & Restaurant' : 'Convenience'}) <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    value={itemCategory}
+                    onChange={(e) => setItemCategory(e.target.value)}
+                    required
+                    className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium"
+                  >
+                    <option value="">-- Select Category --</option>
+                    {(selectedMerchant.type === 'food' ? FOOD_CATEGORIES : CONVENIENCE_CATEGORIES).map(
+                      (cat) => (
+                        <option key={cat} value={cat}>
+                          {cat}
+                        </option>
+                      )
+                    )}
+                  </select>
+                </div>
               </div>
 
               <div>
@@ -3612,7 +3768,8 @@ export const Merchants: React.FC = () => {
                   rows={2}
                   value={itemDesc}
                   onChange={(e) => setItemDesc(e.target.value)}
-                  className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                  placeholder="Short description of ingredients, flavor, or serving size..."
+                  className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
                 />
               </div>
 
@@ -3625,32 +3782,11 @@ export const Merchants: React.FC = () => {
                   value={itemImageUrl}
                   onChange={(e) => setItemImageUrl(e.target.value)}
                   placeholder="https://..."
-                  className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                  className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                  Category ({selectedMerchant.type === 'food' ? 'Food & Restaurant' : 'Convenience'} Catalog)
-                </label>
-                <select
-                  value={itemCategory}
-                  onChange={(e) => setItemCategory(e.target.value)}
-                  required
-                  className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium"
-                >
-                  <option value="">-- Select Category --</option>
-                  {(selectedMerchant.type === 'food' ? FOOD_CATEGORIES : CONVENIENCE_CATEGORIES).map(
-                    (cat) => (
-                      <option key={cat} value={cat}>
-                        {cat}
-                      </option>
-                    )
-                  )}
-                </select>
-              </div>
-
-              <div className="flex items-center gap-2 pt-2">
+              <div className="flex items-center gap-2 pt-1">
                 <input
                   type="checkbox"
                   id="availCheck"
@@ -3658,16 +3794,268 @@ export const Merchants: React.FC = () => {
                   onChange={(e) => setItemAvailable(e.target.checked)}
                   className="w-4 h-4 rounded-sm text-amber-500"
                 />
-                <label htmlFor="availCheck" className="text-xs font-semibold text-gray-700">
-                  Item is available for ordering
+                <label htmlFor="availCheck" className="font-semibold text-gray-700 dark:text-zinc-300">
+                  Item is available for ordering (In Stock)
                 </label>
               </div>
 
-              <div className="flex justify-end gap-2 pt-3">
+              {/* Customization & Option Sets Editor */}
+              <div className="pt-3 border-t border-gray-200 dark:border-zinc-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-gray-900 dark:text-white">
+                      Customization & Option Sets ({itemSets.length})
+                    </label>
+                    <p className="text-[11px] text-gray-400">
+                      Configure choices (e.g. Drink, Side, Flavor). Bulk price adjustments apply to base price only.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const newSet: MenuSet = {
+                        id: `set_${Date.now().toString(36)}`,
+                        name: '',
+                        required: false,
+                        maxSelect: 1,
+                        sortOrder: itemSets.length,
+                        choices: [
+                          { id: `c_${Date.now().toString(36)}_1`, name: '', price: 0, available: true }
+                        ]
+                      };
+                      setItemSets((prev) => [...prev, newSet]);
+                    }}
+                    className="px-2.5 py-1 rounded-xl text-xs font-bold bg-amber-400 hover:bg-amber-500 text-black flex items-center gap-1 shadow-2xs transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Set</span>
+                  </button>
+                </div>
+
+                {itemSets.length === 0 ? (
+                  <div className="p-3 text-center text-[11px] text-gray-400 bg-gray-50 dark:bg-zinc-800/40 rounded-xl border border-dashed border-gray-200 dark:border-zinc-700">
+                    No sets added. This item has no selectable options (customer orders base item).
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {itemSets.map((s, sIdx) => (
+                      <div
+                        key={s.id || sIdx}
+                        className="p-3.5 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-gray-50/80 dark:bg-zinc-850/60 space-y-3"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 space-y-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300">
+                                Set #{sIdx + 1}
+                              </span>
+                              <input
+                                type="text"
+                                value={s.name}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setItemSets((prev) =>
+                                    prev.map((item, idx) =>
+                                      idx === sIdx ? { ...item, name: val } : item
+                                    )
+                                  );
+                                }}
+                                placeholder="Set Name (e.g. Choose Size, Drink, Flavor)"
+                                className="flex-1 px-2.5 py-1 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                                required
+                              />
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-4 text-[11px] text-gray-600 dark:text-zinc-400">
+                              <label className="flex items-center gap-1.5 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(s.required)}
+                                  onChange={(e) => {
+                                    const val = e.target.checked;
+                                    setItemSets((prev) =>
+                                      prev.map((item, idx) =>
+                                        idx === sIdx ? { ...item, required: val } : item
+                                      )
+                                    );
+                                  }}
+                                  className="w-3.5 h-3.5 rounded text-amber-500"
+                                />
+                                <span>Required choice</span>
+                              </label>
+
+                              <div className="flex items-center gap-1.5">
+                                <span>Max select:</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={s.maxSelect || 1}
+                                  onChange={(e) => {
+                                    const val = Math.max(1, Number(e.target.value) || 1);
+                                    setItemSets((prev) =>
+                                      prev.map((item, idx) =>
+                                        idx === sIdx ? { ...item, maxSelect: val } : item
+                                      )
+                                    );
+                                  }}
+                                  className="w-14 px-2 py-0.5 rounded border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-center"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setItemSets((prev) => prev.filter((_, idx) => idx !== sIdx));
+                            }}
+                            className="p-1 text-gray-400 hover:text-red-500 rounded-md"
+                            title="Delete Set"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+
+                        {/* Choices list for this set */}
+                        <div className="space-y-1.5 pt-2 border-t border-gray-200/60 dark:border-zinc-800">
+                          <div className="text-[10px] font-bold uppercase text-gray-400">
+                            Choices / Options ({s.choices.length})
+                          </div>
+                          {s.choices.map((c, cIdx) => (
+                            <div
+                              key={c.id || cIdx}
+                              className="flex items-center gap-2 p-1.5 rounded-lg bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-750"
+                            >
+                              <input
+                                type="text"
+                                value={c.name}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setItemSets((prev) =>
+                                    prev.map((item, idx) => {
+                                      if (idx !== sIdx) return item;
+                                      const newChoices = [...item.choices];
+                                      newChoices[cIdx] = { ...newChoices[cIdx], name: val };
+                                      return { ...item, choices: newChoices };
+                                    })
+                                  );
+                                }}
+                                placeholder="Choice name (e.g. Regular, Spicy)"
+                                className="flex-1 px-2 py-1 rounded border border-gray-200 dark:border-zinc-700 bg-transparent text-xs text-gray-900 dark:text-white"
+                                required
+                              />
+
+                              <div className="flex items-center gap-1">
+                                <span className="text-[11px] text-gray-400">₱</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.5"
+                                  value={c.price}
+                                  onChange={(e) => {
+                                    const val = Math.max(0, Number(e.target.value) || 0);
+                                    setItemSets((prev) =>
+                                      prev.map((item, idx) => {
+                                        if (idx !== sIdx) return item;
+                                        const newChoices = [...item.choices];
+                                        newChoices[cIdx] = { ...newChoices[cIdx], price: val };
+                                        return { ...item, choices: newChoices };
+                                      })
+                                    );
+                                  }}
+                                  placeholder="0"
+                                  className="w-16 px-2 py-1 rounded border border-gray-200 dark:border-zinc-700 bg-transparent text-xs font-bold text-gray-900 dark:text-white"
+                                />
+                                {Number(c.price) === 0 ? (
+                                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                                    Free
+                                  </span>
+                                ) : null}
+                              </div>
+
+                              <label
+                                className="flex items-center gap-1 text-[11px] text-gray-500 cursor-pointer ml-1"
+                                title="Available in stock"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={c.available !== false}
+                                  onChange={(e) => {
+                                    const val = e.target.checked;
+                                    setItemSets((prev) =>
+                                      prev.map((item, idx) => {
+                                        if (idx !== sIdx) return item;
+                                        const newChoices = [...item.choices];
+                                        newChoices[cIdx] = { ...newChoices[cIdx], available: val };
+                                        return { ...item, choices: newChoices };
+                                      })
+                                    );
+                                  }}
+                                  className="w-3.5 h-3.5 rounded text-amber-500"
+                                />
+                                <span className="hidden sm:inline">In stock</span>
+                              </label>
+
+                              <button
+                                type="button"
+                                disabled={s.choices.length <= 1}
+                                onClick={() => {
+                                  setItemSets((prev) =>
+                                    prev.map((item, idx) => {
+                                      if (idx !== sIdx) return item;
+                                      return {
+                                        ...item,
+                                        choices: item.choices.filter((_, ci) => ci !== cIdx)
+                                      };
+                                    })
+                                  );
+                                }}
+                                className="p-1 text-gray-400 hover:text-red-500 disabled:opacity-30"
+                                title="Remove Choice"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ))}
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setItemSets((prev) =>
+                                prev.map((item, idx) => {
+                                  if (idx !== sIdx) return item;
+                                  return {
+                                    ...item,
+                                    choices: [
+                                      ...item.choices,
+                                      {
+                                        id: `c_${idx}_${item.choices.length + 1}_${Date.now().toString(36)}`,
+                                        name: '',
+                                        price: 0,
+                                        available: true
+                                      }
+                                    ]
+                                  };
+                                })
+                              );
+                            }}
+                            className="text-[11px] font-bold text-amber-600 hover:text-amber-700 dark:text-amber-400 flex items-center gap-1 pt-1"
+                          >
+                            <Plus className="w-3 h-3" />
+                            <span>Add Choice to Set</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-gray-100 dark:border-zinc-800">
                 <button
                   type="button"
                   onClick={() => setItemModalOpen(false)}
-                  className="px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-xl"
+                  className="px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-100 dark:text-zinc-400 dark:hover:bg-zinc-800 rounded-xl"
                 >
                   Cancel
                 </button>
@@ -3677,7 +4065,7 @@ export const Merchants: React.FC = () => {
                   className="delivio-btn-yellow px-5 py-2 text-xs font-bold rounded-xl flex items-center gap-1.5"
                 >
                   {savingItem && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                  Save Item
+                  Save Menu Item
                 </button>
               </div>
             </form>

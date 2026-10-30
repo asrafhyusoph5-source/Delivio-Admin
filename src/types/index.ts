@@ -66,6 +66,9 @@ export interface OrderItem {
   name: string;
   qty: number;
   price: number;
+  basePrice?: number;
+  selections?: any[];
+  selectedSets?: any;
   notes?: string;
   [key: string]: any;
 }
@@ -272,6 +275,22 @@ export interface Merchant {
   createdAt?: any;
 }
 
+export interface MenuChoice {
+  id: string;
+  name: string;
+  price: number;
+  available: boolean;
+}
+
+export interface MenuSet {
+  id: string;
+  name: string;
+  required: boolean;
+  maxSelect: number;
+  sortOrder: number;
+  choices: MenuChoice[];
+}
+
 export interface MenuItem {
   id: string;
   categoryId?: string;
@@ -280,7 +299,11 @@ export interface MenuItem {
   description?: string;
   imageUrl?: string;
   available: boolean;
+  hasSets?: boolean;
+  sets?: MenuSet[];
   createdAt?: any;
+  updatedAt?: any;
+  [key: string]: any;
 }
 
 export interface MenuCategory {
@@ -572,7 +595,7 @@ export interface PlatformSettings {
   updatedAt?: any;
 }
 
-export type InboxCategory = 'promo' | 'order' | 'wallet' | 'safety' | 'system' | 'admin';
+export type InboxCategory = 'update' | 'order' | 'wallet' | 'promo' | 'system' | 'admin' | 'safety';
 
 export interface InboxLink {
   merchantId?: string | null;
@@ -586,12 +609,15 @@ export interface InboxMessage {
   category: InboxCategory;
   imageUrl?: string | null;
   link?: InboxLink | null;
-  audience?: 'all_customers' | 'all_riders' | null;
+  audience?: 'all_customers' | 'all_riders' | 'all_merchants' | null;
   customerId?: string | null;
   riderId?: string | null;
+  merchantId?: string | null;
   customerName?: string | null;
   customerEmail?: string | null;
   riderName?: string | null;
+  merchantName?: string | null;
+  merchantEmail?: string | null;
   createdAt: any;
   createdBy?: string | null;
   createdByName?: string | null;

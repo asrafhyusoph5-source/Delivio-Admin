@@ -199,6 +199,89 @@ export const EditedByMerchantBadge: React.FC<{ order: Order }> = ({ order }) => 
   );
 };
 
+export const OrderItemSelectionsView: React.FC<{ item: any }> = ({ item }) => {
+  const selections: Array<{ label: string; price?: number }> = [];
+
+  if (Array.isArray(item.selections)) {
+    item.selections.forEach((s: any) => {
+      if (typeof s === 'string') {
+        selections.push({ label: s });
+      } else if (s && typeof s === 'object') {
+        const choiceName = s.choiceName || s.name || s.label || s.title || '';
+        const setName = s.setName || s.group || s.set || '';
+        const label = setName && choiceName && setName !== choiceName ? `${setName}: ${choiceName}` : choiceName || setName;
+        const p = typeof s.price === 'number' ? s.price : undefined;
+        if (label) selections.push({ label, price: p });
+      }
+    });
+  } else if (Array.isArray(item.selectedSets)) {
+    item.selectedSets.forEach((s: any) => {
+      if (s && typeof s === 'object') {
+        const choiceName = s.choiceName || s.name || s.choice || '';
+        const setName = s.setName || s.name || '';
+        const label = setName && choiceName && setName !== choiceName ? `${setName}: ${choiceName}` : choiceName || setName;
+        const p = typeof s.price === 'number' ? s.price : undefined;
+        if (label) selections.push({ label, price: p });
+      }
+    });
+  } else if (item.selectedSets && typeof item.selectedSets === 'object') {
+    Object.entries(item.selectedSets).forEach(([key, val]: [string, any]) => {
+      if (Array.isArray(val)) {
+        val.forEach((v: any) => {
+          if (typeof v === 'string') selections.push({ label: `${key}: ${v}` });
+          else if (v && typeof v === 'object') {
+            const cName = v.choiceName || v.name || v.label || '';
+            selections.push({ label: `${key}: ${cName}`, price: typeof v.price === 'number' ? v.price : undefined });
+          }
+        });
+      } else if (typeof val === 'string') {
+        selections.push({ label: `${key}: ${val}` });
+      } else if (val && typeof val === 'object') {
+        const cName = val.choiceName || val.name || '';
+        selections.push({ label: `${key}: ${cName}`, price: typeof val.price === 'number' ? val.price : undefined });
+      }
+    });
+  } else if (Array.isArray(item.choices)) {
+    item.choices.forEach((c: any) => {
+      if (typeof c === 'string') selections.push({ label: c });
+      else if (c && typeof c === 'object') {
+        selections.push({ label: c.name || c.choiceName || '', price: typeof c.price === 'number' ? c.price : undefined });
+      }
+    });
+  }
+
+  const hasBasePrice = typeof item.basePrice === 'number' && item.basePrice > 0;
+  const unitPrice = Number(item.price || 0);
+
+  if (selections.length === 0 && !hasBasePrice) return null;
+
+  return (
+    <div className="mt-1 pl-2 border-l-2 border-amber-300 dark:border-amber-600/70 space-y-0.5 text-[11px]">
+      {hasBasePrice && (
+        <div className="text-gray-500 dark:text-zinc-400 font-medium">
+          Base: <span className="font-mono text-gray-800 dark:text-zinc-200">₱{Number(item.basePrice).toFixed(2)}</span>
+          {unitPrice !== Number(item.basePrice) && (
+            <span className="ml-1.5 text-gray-400 dark:text-zinc-500">
+              (Item price: <span className="font-mono text-gray-800 dark:text-zinc-200 font-semibold">₱{unitPrice.toFixed(2)}</span>)
+            </span>
+          )}
+        </div>
+      )}
+      {selections.map((sel, sIdx) => (
+        <div key={sIdx} className="text-gray-700 dark:text-zinc-300 flex items-center gap-1.5 flex-wrap">
+          <span className="w-1 h-1 rounded-full bg-amber-500 shrink-0" />
+          <span className="font-medium">{sel.label}</span>
+          {typeof sel.price === 'number' && (
+            <span className="font-mono text-[10px] text-amber-700 dark:text-amber-400 font-bold">
+              {sel.price === 0 ? '(Free)' : `(+₱${sel.price.toFixed(2)})`}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+};
+
 export const OrderMerchantEditComparison: React.FC<{ order: Order }> = ({ order }) => {
   const isEdited = Boolean(
     order.editedByMerchant ||
@@ -299,6 +382,7 @@ export const OrderMerchantEditComparison: React.FC<{ order: Order }> = ({ order 
                         {item.qty}x {item.name}
                       </div>
                       {item.notes && <p className="text-[10px] text-gray-400 italic">Note: {item.notes}</p>}
+                      <OrderItemSelectionsView item={item} />
                     </div>
                     <span className="font-bold text-gray-600 dark:text-zinc-400 ml-2">
                       ₱{(Number(item.price || 0) * Number(item.qty || 1)).toFixed(2)}
@@ -338,6 +422,7 @@ export const OrderMerchantEditComparison: React.FC<{ order: Order }> = ({ order 
                           )}
                         </div>
                         {item.notes && <p className="text-[10px] text-gray-400 italic">Note: {item.notes}</p>}
+                        <OrderItemSelectionsView item={item} />
                       </div>
                       <span className="font-bold text-gray-900 dark:text-white ml-2">
                         ₱{(Number(item.price || 0) * Number(item.qty || 1)).toFixed(2)}
@@ -1690,19 +1775,27 @@ export const LiveOrders: React.FC = () => {
                     {(selectedOrder.items || []).map((it, idx) => (
                       <div
                         key={idx}
-                        className="p-3 flex items-center justify-between text-xs bg-white dark:bg-zinc-900"
+                        className="p-3 flex items-start justify-between text-xs bg-white dark:bg-zinc-900"
                       >
-                        <div>
+                        <div className="flex-1 pr-3">
                           <span className="font-bold text-gray-900 dark:text-white">
                             {it.qty}x {it.name}
                           </span>
                           {it.notes && (
                             <p className="text-[11px] text-gray-400 italic mt-0.5">Note: {it.notes}</p>
                           )}
+                          <OrderItemSelectionsView item={it} />
                         </div>
-                        <span className="font-bold text-gray-900 dark:text-white">
-                          ₱{(Number(it.price || 0) * Number(it.qty || 1)).toFixed(2)}
-                        </span>
+                        <div className="text-right shrink-0">
+                          <span className="font-bold text-gray-900 dark:text-white block">
+                            ₱{(Number(it.price || 0) * Number(it.qty || 1)).toFixed(2)}
+                          </span>
+                          {Number(it.qty) > 1 && (
+                            <span className="text-[10px] text-gray-400 block">
+                              @ ₱{Number(it.price || 0).toFixed(2)}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     ))}
 
