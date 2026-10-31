@@ -286,14 +286,25 @@ export interface MenuSet {
   id: string;
   name: string;
   required: boolean;
+  minSelect?: number;
   maxSelect: number;
   sortOrder: number;
   choices: MenuChoice[];
 }
 
+export interface Subcategory {
+  id: string;
+  name: string;
+  sortOrder?: number;
+  createdAt?: any;
+  updatedAt?: any;
+}
+
 export interface MenuItem {
   id: string;
   categoryId?: string;
+  subcategoryId?: string | null;
+  subcategoryName?: string | null;
   name: string;
   price: number;
   description?: string;

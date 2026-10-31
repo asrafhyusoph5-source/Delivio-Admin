@@ -30,6 +30,7 @@ import type {
   MenuCategory,
   MenuChoice,
   MenuSet,
+  Subcategory,
   Order,
   ChangeRequest,
   EditHistoryEntry,
@@ -74,6 +75,8 @@ import {
   ShieldAlert,
   Ban,
   Play,
+  FolderTree,
+  Check,
   Sun,
   Moon
 } from 'lucide-react';
@@ -498,9 +501,21 @@ export const Merchants: React.FC = () => {
   const [itemDesc, setItemDesc] = useState('');
   const [itemImageUrl, setItemImageUrl] = useState('');
   const [itemCategory, setItemCategory] = useState('');
+  const [itemSubcategoryId, setItemSubcategoryId] = useState<string>('');
   const [itemAvailable, setItemAvailable] = useState(true);
   const [itemSets, setItemSets] = useState<MenuSet[]>([]);
   const [savingItem, setSavingItem] = useState(false);
+
+  // Subcategories (Category Classes)
+  const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
+  const [manageSubcategoriesOpen, setManageSubcategoriesOpen] = useState(false);
+  const [quickAddSubOpen, setQuickAddSubOpen] = useState(false);
+  const [newSubcategoryName, setNewSubcategoryName] = useState('');
+  const [addingSubcategory, setAddingSubcategory] = useState(false);
+  const [editingSubcategoryId, setEditingSubcategoryId] = useState<string | null>(null);
+  const [editingSubcategoryName, setEditingSubcategoryName] = useState('');
+  const [savingSubcategoryEdit, setSavingSubcategoryEdit] = useState(false);
+  const [deletingSubcategoryId, setDeletingSubcategoryId] = useState<string | null>(null);
 
   // Bulk Price Modal
   const [bulkPriceModalOpen, setBulkPriceModalOpen] = useState(false);
@@ -1176,16 +1191,33 @@ export const Merchants: React.FC = () => {
     }
   };
 
-  // Fetch Menu Categories & Items
+  // Fetch Menu Categories, Subcategories & Items
   const fetchMenuData = async (merchantId: string) => {
     try {
       setLoadingMenu(true);
-      // Categories
+      // Categories (Platform Catalog Categories)
       const catRef = collection(db, 'merchants', merchantId, 'categories');
       const catSnap = await getDocs(catRef);
       const catList: MenuCategory[] = [];
       catSnap.forEach((d) => catList.push({ id: d.id, ...d.data() } as MenuCategory));
       setCategories(catList);
+
+      // Subcategories (Category Classes: merchants/{id}/subcategories)
+      const subRef = collection(db, 'merchants', merchantId, 'subcategories');
+      const subSnap = await getDocs(subRef);
+      const subList: Subcategory[] = [];
+      subSnap.forEach((d) => {
+        const dt = d.data();
+        subList.push({
+          id: d.id,
+          name: dt.name || '',
+          sortOrder: typeof dt.sortOrder === 'number' ? dt.sortOrder : 0,
+          createdAt: dt.createdAt,
+          updatedAt: dt.updatedAt
+        });
+      });
+      subList.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+      setSubcategories(subList);
 
       // Items
       const itemsRef = collection(db, 'merchants', merchantId, 'items');
@@ -1197,13 +1229,23 @@ export const Merchants: React.FC = () => {
         itemsList.push({
           id: d.id,
           categoryId: dt.categoryId,
+          subcategoryId: dt.subcategoryId || null,
+          subcategoryName: dt.subcategoryName || null,
           name: dt.name || 'Item',
           price: Number(dt.price) || 0,
           description: dt.description || '',
           imageUrl: dt.imageUrl || '',
           available: dt.available !== false,
           hasSets: hasSetsVal,
-          sets: dt.sets || [],
+          sets: (dt.sets || []).map((s: any, idx: number) => ({
+            id: s.id || `set_${idx}`,
+            name: s.name || '',
+            required: Boolean(s.required),
+            minSelect: typeof s.minSelect === 'number' ? s.minSelect : (s.required ? 1 : 0),
+            maxSelect: Math.max(1, Number(s.maxSelect) || 1),
+            sortOrder: typeof s.sortOrder === 'number' ? s.sortOrder : idx,
+            choices: s.choices || []
+          })),
           createdAt: dt.createdAt,
           updatedAt: dt.updatedAt
         });
@@ -1766,6 +1808,176 @@ export const Merchants: React.FC = () => {
     }
   };
 
+  // Subcategories (Category Classes) Handlers
+  const handleQuickAddSubcategory = async () => {
+    if (!selectedMerchant) return;
+    const trimmed = newSubcategoryName.trim();
+    if (!trimmed) {
+      showError('Please enter a Category Class name.');
+      return;
+    }
+    if (subcategories.some((s) => s.name.toLowerCase() === trimmed.toLowerCase())) {
+      showError(`Category Class "${trimmed}" already exists.`);
+      return;
+    }
+    try {
+      setAddingSubcategory(true);
+      const subCol = collection(db, 'merchants', selectedMerchant.id, 'subcategories');
+      const newDoc = await addDoc(subCol, {
+        name: trimmed,
+        sortOrder: subcategories.length,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now()
+      });
+      const newSub: Subcategory = {
+        id: newDoc.id,
+        name: trimmed,
+        sortOrder: subcategories.length,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now()
+      };
+      setSubcategories((prev) => [...prev, newSub]);
+      setItemSubcategoryId(newDoc.id);
+      setNewSubcategoryName('');
+      setQuickAddSubOpen(false);
+      showSuccess(`Category Class "${trimmed}" created.`);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setAddingSubcategory(false);
+    }
+  };
+
+  const handleAddSubcategoryFromManage = async () => {
+    if (!selectedMerchant) return;
+    const trimmed = newSubcategoryName.trim();
+    if (!trimmed) {
+      showError('Please enter a Category Class name.');
+      return;
+    }
+    if (subcategories.some((s) => s.name.toLowerCase() === trimmed.toLowerCase())) {
+      showError(`Category Class "${trimmed}" already exists.`);
+      return;
+    }
+    try {
+      setAddingSubcategory(true);
+      const subCol = collection(db, 'merchants', selectedMerchant.id, 'subcategories');
+      const newDoc = await addDoc(subCol, {
+        name: trimmed,
+        sortOrder: subcategories.length,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now()
+      });
+      const newSub: Subcategory = {
+        id: newDoc.id,
+        name: trimmed,
+        sortOrder: subcategories.length,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now()
+      };
+      setSubcategories((prev) => [...prev, newSub]);
+      setNewSubcategoryName('');
+      showSuccess(`Category Class "${trimmed}" created.`);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setAddingSubcategory(false);
+    }
+  };
+
+  const handleRenameSubcategory = async (subId: string) => {
+    if (!selectedMerchant) return;
+    const trimmed = editingSubcategoryName.trim();
+    if (!trimmed) {
+      showError('Category Class name cannot be empty.');
+      return;
+    }
+    try {
+      setSavingSubcategoryEdit(true);
+      const subDoc = doc(db, 'merchants', selectedMerchant.id, 'subcategories', subId);
+      await updateDoc(subDoc, {
+        name: trimmed,
+        updatedAt: Timestamp.now()
+      });
+
+      // Update all associated items in Firestore
+      const affectedItems = menuItems.filter((i) => i.subcategoryId === subId);
+      if (affectedItems.length > 0) {
+        const batch = writeBatch(db);
+        affectedItems.forEach((item) => {
+          const itemRef = doc(db, 'merchants', selectedMerchant.id, 'items', item.id);
+          batch.update(itemRef, {
+            subcategoryName: trimmed,
+            updatedAt: Timestamp.now()
+          });
+        });
+        await batch.commit();
+      }
+
+      setSubcategories((prev) =>
+        prev.map((s) => (s.id === subId ? { ...s, name: trimmed, updatedAt: Timestamp.now() } : s))
+      );
+      setMenuItems((prev) =>
+        prev.map((i) => (i.subcategoryId === subId ? { ...i, subcategoryName: trimmed } : i))
+      );
+      setEditingSubcategoryId(null);
+      setEditingSubcategoryName('');
+      showSuccess(`Category Class renamed to "${trimmed}".`);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSavingSubcategoryEdit(false);
+    }
+  };
+
+  const handleDeleteSubcategory = async (sub: Subcategory) => {
+    if (!selectedMerchant) return;
+    const affectedItems = menuItems.filter(
+      (i) => i.subcategoryId === sub.id || (i.subcategoryName && i.subcategoryName.toLowerCase() === sub.name.toLowerCase())
+    );
+    const confirmMsg = affectedItems.length > 0
+      ? `Delete Category Class "${sub.name}"? ${affectedItems.length} product(s) will be moved to "Other".`
+      : `Delete Category Class "${sub.name}"?`;
+    if (!confirm(confirmMsg)) return;
+
+    try {
+      setDeletingSubcategoryId(sub.id);
+      const subDoc = doc(db, 'merchants', selectedMerchant.id, 'subcategories', sub.id);
+      await deleteDoc(subDoc);
+
+      // Delete moves products to "Other"
+      if (affectedItems.length > 0) {
+        const batch = writeBatch(db);
+        affectedItems.forEach((item) => {
+          const itemRef = doc(db, 'merchants', selectedMerchant.id, 'items', item.id);
+          batch.update(itemRef, {
+            subcategoryId: null,
+            subcategoryName: 'Other',
+            updatedAt: Timestamp.now()
+          });
+        });
+        await batch.commit();
+      }
+
+      setSubcategories((prev) => prev.filter((s) => s.id !== sub.id));
+      setMenuItems((prev) =>
+        prev.map((i) =>
+          affectedItems.some((a) => a.id === i.id)
+            ? { ...i, subcategoryId: null, subcategoryName: 'Other' }
+            : i
+        )
+      );
+      if (itemSubcategoryId === sub.id) {
+        setItemSubcategoryId('');
+      }
+      showSuccess(`Category Class "${sub.name}" deleted. ${affectedItems.length} product(s) moved to "Other".`);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setDeletingSubcategoryId(null);
+    }
+  };
+
   // Menu: Add / Edit Item
   const handleSaveItem = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1775,13 +1987,22 @@ export const Merchants: React.FC = () => {
       const itemsCol = collection(db, 'merchants', selectedMerchant.id, 'items');
       let updatedItems: MenuItem[] = [];
 
+      // Determine subcategory (Category Class)
+      const selectedSub = subcategories.find((s) => s.id === itemSubcategoryId);
+      const subcategoryIdVal = selectedSub ? selectedSub.id : null;
+      const subcategoryNameVal = selectedSub
+        ? selectedSub.name
+        : itemSubcategoryId === 'other'
+        ? 'Other'
+        : null;
+
       // Validate sets if any
       const sanitizedSets: MenuSet[] = [];
       for (let sIdx = 0; sIdx < itemSets.length; sIdx++) {
         const s = itemSets[sIdx];
         const sName = (s.name || '').trim();
         if (!sName) {
-          showError(`Option Set #${sIdx + 1} requires a name.`);
+          showError(`Option Set #${sIdx + 1} requires a Set Name from Category Class.`);
           setSavingItem(false);
           return;
         }
@@ -1790,6 +2011,27 @@ export const Merchants: React.FC = () => {
           setSavingItem(false);
           return;
         }
+
+        const isRequired = Boolean(s.required);
+        const minVal = Math.max(0, Number(s.minSelect) || (isRequired ? 1 : 0));
+        const maxVal = Math.max(1, Number(s.maxSelect) || 1);
+
+        if (maxVal < 1) {
+          showError(`Maximum for set "${sName}" must be at least 1.`);
+          setSavingItem(false);
+          return;
+        }
+        if (minVal > maxVal) {
+          showError(`Maximum (${maxVal}) must be greater than or equal to Minimum (${minVal}) for set "${sName}".`);
+          setSavingItem(false);
+          return;
+        }
+        if (isRequired && minVal < 1) {
+          showError(`Set "${sName}" is marked as Required, so Minimum must be at least 1.`);
+          setSavingItem(false);
+          return;
+        }
+
         const validChoices: MenuChoice[] = [];
         for (let cIdx = 0; cIdx < s.choices.length; cIdx++) {
           const c = s.choices[cIdx];
@@ -1810,8 +2052,9 @@ export const Merchants: React.FC = () => {
         sanitizedSets.push({
           id: s.id || `set_${sIdx}_${Date.now().toString(36)}`,
           name: sName,
-          required: Boolean(s.required),
-          maxSelect: Math.max(1, Number(s.maxSelect) || 1),
+          required: isRequired,
+          minSelect: minVal,
+          maxSelect: maxVal,
           sortOrder: typeof s.sortOrder === 'number' ? s.sortOrder : sIdx,
           choices: validChoices
         });
@@ -1819,7 +2062,7 @@ export const Merchants: React.FC = () => {
       const hasSets = sanitizedSets.length > 0;
 
       if (editingItem) {
-        // Edit - never overwrite sets/hasSets unless modified via form
+        // Edit - never overwrite sets/hasSets/subcategories unless modified via form
         const itemDoc = doc(db, 'merchants', selectedMerchant.id, 'items', editingItem.id);
         const updatePayload: Record<string, any> = {
           name: itemName.trim(),
@@ -1827,6 +2070,8 @@ export const Merchants: React.FC = () => {
           description: itemDesc.trim(),
           imageUrl: itemImageUrl.trim(),
           categoryId: itemCategory,
+          subcategoryId: subcategoryIdVal,
+          subcategoryName: subcategoryNameVal,
           available: itemAvailable,
           hasSets,
           sets: sanitizedSets,
@@ -1842,6 +2087,8 @@ export const Merchants: React.FC = () => {
                 description: itemDesc.trim(),
                 imageUrl: itemImageUrl.trim(),
                 categoryId: itemCategory,
+                subcategoryId: subcategoryIdVal,
+                subcategoryName: subcategoryNameVal,
                 available: itemAvailable,
                 hasSets,
                 sets: sanitizedSets
@@ -1857,6 +2104,8 @@ export const Merchants: React.FC = () => {
           description: itemDesc.trim(),
           imageUrl: itemImageUrl.trim(),
           categoryId: itemCategory,
+          subcategoryId: subcategoryIdVal,
+          subcategoryName: subcategoryNameVal,
           available: itemAvailable,
           hasSets,
           sets: sanitizedSets,
@@ -1869,6 +2118,8 @@ export const Merchants: React.FC = () => {
           description: itemDesc.trim(),
           imageUrl: itemImageUrl.trim(),
           categoryId: itemCategory,
+          subcategoryId: subcategoryIdVal,
+          subcategoryName: subcategoryNameVal,
           available: itemAvailable,
           hasSets,
           sets: sanitizedSets,
@@ -3315,6 +3566,13 @@ export const Merchants: React.FC = () => {
                         </div>
                         <div className="flex items-center gap-2">
                           <button
+                            onClick={() => setManageSubcategoriesOpen(true)}
+                            className="px-3 py-1.5 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs font-bold text-gray-700 dark:text-zinc-300 hover:bg-gray-50 flex items-center gap-1.5"
+                          >
+                            <FolderTree className="w-3.5 h-3.5 text-amber-500" />
+                            <span>Category Classes ({subcategories.length})</span>
+                          </button>
+                          <button
                             onClick={() => setBulkPriceModalOpen(true)}
                             className="px-3 py-1.5 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs font-bold text-gray-700 dark:text-zinc-300 hover:bg-gray-50"
                           >
@@ -3328,6 +3586,7 @@ export const Merchants: React.FC = () => {
                               setItemDesc('');
                               setItemImageUrl('');
                               setItemCategory(merchantAllowedCategories[0]);
+                              setItemSubcategoryId(subcategories.length > 0 ? subcategories[0].id : '');
                               setItemAvailable(true);
                               setItemSets([]);
                               setItemModalOpen(true);
@@ -3492,14 +3751,89 @@ export const Merchants: React.FC = () => {
                       </div>
                     )}
 
-                    {/* Menu Items Grid */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      {displayedItems.length === 0 ? (
-                        <div className="col-span-2 p-8 text-center text-xs text-gray-400 bg-gray-50 dark:bg-zinc-850 rounded-2xl border border-gray-200 dark:border-zinc-800">
-                          No menu items found in this category filter.
-                        </div>
-                      ) : (
-                        displayedItems.map((item) => (
+                    {/* Menu Items Grouped by Category Class */}
+                    {(() => {
+                      const groupedBySubcategory: {
+                        id: string;
+                        name: string;
+                        items: MenuItem[];
+                      }[] = [];
+
+                      subcategories.forEach((sub) => {
+                        const matched = displayedItems.filter(
+                          (item) =>
+                            item.subcategoryId === sub.id ||
+                            (item.subcategoryName &&
+                              item.subcategoryName.toLowerCase() === sub.name.toLowerCase())
+                        );
+                        groupedBySubcategory.push({
+                          id: sub.id,
+                          name: sub.name,
+                          items: matched
+                        });
+                      });
+
+                      const subIds = new Set(subcategories.map((s) => s.id));
+                      const subNames = new Set(subcategories.map((s) => s.name.toLowerCase()));
+                      const otherItems = displayedItems.filter(
+                        (item) =>
+                          (!item.subcategoryId && (!item.subcategoryName || item.subcategoryName === 'Other')) ||
+                          (item.subcategoryId && !subIds.has(item.subcategoryId)) ||
+                          (item.subcategoryName && !subNames.has(item.subcategoryName.toLowerCase()))
+                      );
+
+                      if (otherItems.length > 0 || subcategories.length === 0) {
+                        groupedBySubcategory.push({
+                          id: 'other',
+                          name: 'Other',
+                          items: otherItems
+                        });
+                      }
+
+                      const visibleGroups = groupedBySubcategory.filter((g) => g.items.length > 0);
+
+                      if (displayedItems.length === 0) {
+                        return (
+                          <div className="p-8 text-center text-xs text-gray-400 bg-gray-50 dark:bg-zinc-850 rounded-2xl border border-gray-200 dark:border-zinc-800">
+                            No menu items found in this category filter.
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div className="space-y-6">
+                          {visibleGroups.map((group) => (
+                            <div
+                              key={group.id}
+                              className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/70 shadow-xs space-y-3"
+                            >
+                              <div className="flex items-center justify-between pb-2 border-b border-gray-100 dark:border-zinc-800">
+                                <div className="flex items-center gap-2">
+                                  <div className="w-7 h-7 rounded-lg bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 flex items-center justify-center font-bold text-xs">
+                                    <Layers className="w-3.5 h-3.5" />
+                                  </div>
+                                  <div>
+                                    <h4 className="font-bold text-sm text-gray-900 dark:text-white flex items-center gap-2">
+                                      <span>{group.name}</span>
+                                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400">
+                                        {group.items.length} {group.items.length === 1 ? 'item' : 'items'}
+                                      </span>
+                                    </h4>
+                                  </div>
+                                </div>
+
+                                {group.id !== 'other' && (
+                                  <button
+                                    onClick={() => setManageSubcategoriesOpen(true)}
+                                    className="text-[11px] font-semibold text-gray-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors"
+                                  >
+                                    Manage Class
+                                  </button>
+                                )}
+                              </div>
+
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                {group.items.map((item) => (
                           <div
                             key={item.id}
                             className="p-3.5 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 flex gap-3 text-xs shadow-xs"
@@ -3533,6 +3867,11 @@ export const Merchants: React.FC = () => {
                                       >
                                         {item.categoryId || 'No Category'}
                                       </span>
+                                      {item.subcategoryName && item.subcategoryName !== 'Other' && (
+                                        <span className="inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                                          {item.subcategoryName}
+                                        </span>
+                                      )}
                                       {(item.hasSets || (item.sets && item.sets.length > 0)) && (
                                         <span
                                           className="inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-purple-100 text-purple-800 dark:bg-purple-950/70 dark:text-purple-300 border border-purple-200 dark:border-purple-800"
@@ -3575,10 +3914,32 @@ export const Merchants: React.FC = () => {
                                       setItemDesc(item.description || '');
                                       setItemImageUrl(item.imageUrl || '');
                                       setItemCategory(item.categoryId || merchantAllowedCategories[0]);
+                                      setItemSubcategoryId(
+                                        item.subcategoryId ||
+                                          (item.subcategoryName === 'Other' ? 'other' : '')
+                                      );
                                       setItemAvailable(item.available);
                                       setItemSets(
                                         item.sets && Array.isArray(item.sets)
-                                          ? JSON.parse(JSON.stringify(item.sets))
+                                          ? JSON.parse(JSON.stringify(item.sets)).map(
+                                              (s: any, idx: number) => ({
+                                                id: s.id || `set_${idx}`,
+                                                name: s.name || '',
+                                                required: Boolean(s.required),
+                                                minSelect:
+                                                  typeof s.minSelect === 'number'
+                                                    ? s.minSelect
+                                                    : s.required
+                                                    ? 1
+                                                    : 0,
+                                                maxSelect: Math.max(1, Number(s.maxSelect) || 1),
+                                                sortOrder:
+                                                  typeof s.sortOrder === 'number'
+                                                    ? s.sortOrder
+                                                    : idx,
+                                                choices: s.choices || []
+                                              })
+                                            )
                                           : []
                                       );
                                       setItemModalOpen(true);
@@ -3599,12 +3960,16 @@ export const Merchants: React.FC = () => {
                               </div>
                             </div>
                           </div>
-                        ))
-                      )}
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                );
-              })()}
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+        );
+      })()}
 
               {/* TAB 5: ORDERS & EARNINGS */}
               {activeTab === 'orders' && (
@@ -4032,6 +4397,82 @@ export const Merchants: React.FC = () => {
                 </div>
               </div>
 
+              {/* Category Class (Subcategory) */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400">
+                    Category Class
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setQuickAddSubOpen(!quickAddSubOpen)}
+                      className="text-[11px] font-bold text-amber-600 hover:text-amber-700 dark:text-amber-400 flex items-center gap-0.5"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>Add</span>
+                    </button>
+                    <span className="text-gray-300 dark:text-zinc-700">|</span>
+                    <button
+                      type="button"
+                      onClick={() => setManageSubcategoriesOpen(true)}
+                      className="text-[11px] font-bold text-gray-500 hover:text-gray-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+                    >
+                      Manage
+                    </button>
+                  </div>
+                </div>
+
+                <select
+                  value={itemSubcategoryId}
+                  onChange={(e) => setItemSubcategoryId(e.target.value)}
+                  className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium"
+                >
+                  <option value="">None / Other</option>
+                  {subcategories.map((sub) => (
+                    <option key={sub.id} value={sub.id}>
+                      {sub.name}
+                    </option>
+                  ))}
+                </select>
+
+                {quickAddSubOpen && (
+                  <div className="mt-2 p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={newSubcategoryName}
+                      onChange={(e) => setNewSubcategoryName(e.target.value)}
+                      placeholder="New Category Class name..."
+                      className="flex-1 px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-850 text-gray-900 dark:text-white"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleQuickAddSubcategory();
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleQuickAddSubcategory}
+                      disabled={addingSubcategory || !newSubcategoryName.trim()}
+                      className="px-3 py-1 bg-amber-400 hover:bg-amber-500 text-black text-xs font-bold rounded-lg disabled:opacity-50"
+                    >
+                      {addingSubcategory ? 'Saving...' : 'Save'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setQuickAddSubOpen(false);
+                        setNewSubcategoryName('');
+                      }}
+                      className="p-1 text-gray-400 hover:text-gray-600 rounded"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+
               <div>
                 <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
                   Description
@@ -4087,8 +4528,9 @@ export const Merchants: React.FC = () => {
                     onClick={() => {
                       const newSet: MenuSet = {
                         id: `set_${Date.now().toString(36)}`,
-                        name: '',
+                        name: subcategories.length > 0 ? subcategories[0].name : '',
                         required: false,
+                        minSelect: 0,
                         maxSelect: 1,
                         sortOrder: itemSets.length,
                         choices: [
@@ -4121,8 +4563,7 @@ export const Merchants: React.FC = () => {
                               <span className="text-[10px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300">
                                 Set #{sIdx + 1}
                               </span>
-                              <input
-                                type="text"
+                              <select
                                 value={s.name}
                                 onChange={(e) => {
                                   const val = e.target.value;
@@ -4132,10 +4573,19 @@ export const Merchants: React.FC = () => {
                                     )
                                   );
                                 }}
-                                placeholder="Set Name (e.g. Choose Size, Drink, Flavor)"
                                 className="flex-1 px-2.5 py-1 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
                                 required
-                              />
+                              >
+                                <option value="">-- Select Set Name (Category Class) --</option>
+                                {subcategories.map((sub) => (
+                                  <option key={sub.id} value={sub.name}>
+                                    {sub.name}
+                                  </option>
+                                ))}
+                                {s.name && !subcategories.some((sub) => sub.name === s.name) && (
+                                  <option value={s.name}>{s.name} (Custom)</option>
+                                )}
+                              </select>
                             </div>
 
                             <div className="flex flex-wrap items-center gap-4 text-[11px] text-gray-600 dark:text-zinc-400">
@@ -4147,17 +4597,41 @@ export const Merchants: React.FC = () => {
                                     const val = e.target.checked;
                                     setItemSets((prev) =>
                                       prev.map((item, idx) =>
-                                        idx === sIdx ? { ...item, required: val } : item
+                                        idx === sIdx
+                                          ? {
+                                              ...item,
+                                              required: val,
+                                              minSelect: val ? Math.max(1, item.minSelect || 1) : (item.minSelect ?? 0)
+                                            }
+                                          : item
                                       )
                                     );
                                   }}
                                   className="w-3.5 h-3.5 rounded text-amber-500"
                                 />
-                                <span>Required choice</span>
+                                <span>Required</span>
                               </label>
 
                               <div className="flex items-center gap-1.5">
-                                <span>Max select:</span>
+                                <span>Minimum:</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={s.minSelect ?? (s.required ? 1 : 0)}
+                                  onChange={(e) => {
+                                    const val = Math.max(0, Number(e.target.value) || 0);
+                                    setItemSets((prev) =>
+                                      prev.map((item, idx) =>
+                                        idx === sIdx ? { ...item, minSelect: val } : item
+                                      )
+                                    );
+                                  }}
+                                  className="w-14 px-2 py-0.5 rounded border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-center"
+                                />
+                              </div>
+
+                              <div className="flex items-center gap-1.5">
+                                <span>Maximum:</span>
                                 <input
                                   type="number"
                                   min="1"
@@ -4341,6 +4815,195 @@ export const Merchants: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Manage Category Classes Modal */}
+      {manageSubcategoriesOpen && selectedMerchant && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="w-full max-w-lg bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-2xl space-y-5">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100 dark:border-zinc-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-amber-100 dark:bg-amber-950/60 flex items-center justify-center text-amber-600">
+                  <FolderTree className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-gray-900 dark:text-white">
+                    Manage Category Classes
+                  </h3>
+                  <p className="text-[11px] text-gray-500">
+                    {selectedMerchant.name} subcategories & option set classes
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setManageSubcategoriesOpen(false);
+                  setEditingSubcategoryId(null);
+                  setEditingSubcategoryName('');
+                  setNewSubcategoryName('');
+                }}
+                className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Add New Category Class */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400">
+                Add Category Class
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={newSubcategoryName}
+                  onChange={(e) => setNewSubcategoryName(e.target.value)}
+                  placeholder="e.g. Sides, Flavors, Beverages, Add-ons..."
+                  className="flex-1 px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddSubcategoryFromManage();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={handleAddSubcategoryFromManage}
+                  disabled={addingSubcategory || !newSubcategoryName.trim()}
+                  className="delivio-btn-yellow px-4 py-2 text-xs font-bold rounded-xl flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {addingSubcategory ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                  <span>Add Class</span>
+                </button>
+              </div>
+            </div>
+
+            {/* List of Subcategories */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs font-bold text-gray-700 dark:text-zinc-300">
+                <span>Existing Category Classes ({subcategories.length})</span>
+                <span className="text-[11px] font-normal text-gray-400">Delete moves products to "Other"</span>
+              </div>
+
+              <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
+                {subcategories.length === 0 ? (
+                  <div className="p-4 text-center text-xs text-gray-400 border border-dashed border-gray-200 dark:border-zinc-800 rounded-2xl">
+                    No Category Classes yet. Add one above to organize items and sets.
+                  </div>
+                ) : (
+                  subcategories.map((sub, sIdx) => {
+                    const count = menuItems.filter(
+                      (i) => i.subcategoryId === sub.id || (i.subcategoryName && i.subcategoryName.toLowerCase() === sub.name.toLowerCase())
+                    ).length;
+                    const isEditing = editingSubcategoryId === sub.id;
+
+                    return (
+                      <div
+                        key={sub.id}
+                        className="p-3 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-gray-50/70 dark:bg-zinc-850/60 flex items-center justify-between gap-3"
+                      >
+                        {isEditing ? (
+                          <div className="flex-1 flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={editingSubcategoryName}
+                              onChange={(e) => setEditingSubcategoryName(e.target.value)}
+                              className="flex-1 px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleRenameSubcategory(sub.id);
+                                }
+                              }}
+                              autoFocus
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleRenameSubcategory(sub.id)}
+                              disabled={savingSubcategoryEdit || !editingSubcategoryName.trim()}
+                              className="px-2.5 py-1 bg-amber-400 hover:bg-amber-500 text-black text-xs font-bold rounded-lg disabled:opacity-50"
+                            >
+                              {savingSubcategoryEdit ? 'Saving...' : 'Save'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingSubcategoryId(null);
+                                setEditingSubcategoryName('');
+                              }}
+                              className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 rounded-lg"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <span className="w-6 h-6 rounded-lg bg-gray-200 dark:bg-zinc-700 text-[11px] font-bold text-gray-700 dark:text-zinc-300 flex items-center justify-center shrink-0">
+                                {sIdx + 1}
+                              </span>
+                              <div className="min-w-0">
+                                <div className="font-bold text-xs text-gray-900 dark:text-white truncate">
+                                  {sub.name}
+                                </div>
+                                <div className="text-[11px] text-gray-400">
+                                  {count} product{count === 1 ? '' : 's'} assigned
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingSubcategoryId(sub.id);
+                                  setEditingSubcategoryName(sub.name);
+                                }}
+                                className="px-2 py-1 text-xs font-semibold text-gray-600 hover:text-gray-900 dark:text-zinc-400 dark:hover:text-white rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-800"
+                              >
+                                Rename
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteSubcategory(sub)}
+                                disabled={deletingSubcategoryId === sub.id}
+                                className="p-1.5 text-gray-400 hover:text-red-500 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-40"
+                                title={`Delete Class (moves ${count} items to "Other")`}
+                              >
+                                {deletingSubcategoryId === sub.id ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-gray-100 dark:border-zinc-800 flex justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setManageSubcategoriesOpen(false);
+                  setEditingSubcategoryId(null);
+                  setEditingSubcategoryName('');
+                  setNewSubcategoryName('');
+                }}
+                className="px-4 py-2 text-xs font-bold text-gray-700 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-xl"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}
