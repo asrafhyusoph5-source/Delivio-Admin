@@ -43,6 +43,7 @@ import {
   Percent
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
+import { CityServicesMatrix } from './ServicesByCity';
 
 const DELIVERY_SERVICES: DeliveryServiceType[] = [
   'food',
@@ -73,8 +74,8 @@ export const DeliveryRates: React.FC = () => {
   const [loadingRates, setLoadingRates] = useState(false);
   const [ratesConfig, setRatesConfig] = useState<DeliveryRatesConfig | null>(null);
 
-  // Tab between "Delivery Rates" and "Taxi Fares"
-  const [activeMainTab, setActiveMainTab] = useState<'delivery' | 'taxi'>('delivery');
+  // Tab between "Delivery Rates", "Taxi Fares", and "City Services"
+  const [activeMainTab, setActiveMainTab] = useState<'delivery' | 'taxi' | 'services'>('delivery');
 
   // Selected Service sub-tab for Delivery Rates config
   const [activeServiceTab, setActiveServiceTab] = useState<DeliveryServiceType>('food');
@@ -674,6 +675,18 @@ export const DeliveryRates: React.FC = () => {
         >
           <Car className="w-4 h-4" />
           <span>Taxi Fares (Per Vehicle)</span>
+        </button>
+
+        <button
+          onClick={() => setActiveMainTab('services')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-extrabold transition-all ${
+            activeMainTab === 'services'
+              ? 'bg-amber-400 text-black shadow-xs'
+              : 'bg-white dark:bg-zinc-900 text-gray-600 dark:text-zinc-400 hover:bg-gray-100 border border-gray-200 dark:border-zinc-800'
+          }`}
+        >
+          <Layers className="w-4 h-4" />
+          <span>City Services</span>
         </button>
       </div>
 
@@ -1534,6 +1547,25 @@ export const DeliveryRates: React.FC = () => {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* 3. CITY SERVICES TAB */}
+      {activeMainTab === 'services' && (
+        <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-6 shadow-xs space-y-5">
+          <div className="border-b border-gray-100 dark:border-zinc-800 pb-3">
+            <h3 className="font-extrabold text-base text-gray-900 dark:text-white flex items-center gap-2">
+              <Layers className="w-5 h-5 text-amber-500" />
+              <span>
+                Operational Services for {cities.find((c) => c.id === activeCityId)?.name || activeCityId}
+              </span>
+            </h3>
+            <p className="text-xs text-gray-500 dark:text-zinc-400 mt-0.5">
+              Manage city-level service availability for Food, Convenience, Parcel Express, Pabili, and Taxi rides. Toggling off a service automatically closes affected stores and locks driver dispatches in this city.
+            </p>
+          </div>
+
+          <CityServicesMatrix filterCityId={activeCityId} />
         </div>
       )}
 

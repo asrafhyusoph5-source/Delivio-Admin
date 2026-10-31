@@ -25,6 +25,7 @@ import { Notifications } from './pages/Notifications';
 import { Reports } from './pages/Reports';
 import { AuditLog } from './pages/AuditLog';
 import { Settings } from './pages/Settings';
+import { ServicesByCity } from './pages/ServicesByCity';
 
 export default function App() {
   return (
@@ -49,6 +50,7 @@ export default function App() {
                     <Route path="riders" element={<Riders />} />
                     <Route path="applications" element={<Applications />} />
                     <Route path="rates" element={<DeliveryRates />} />
+                    <Route path="services-by-city" element={<ServicesByCity />} />
                     <Route path="banners" element={<BannersPromos />} />
                     <Route path="inbox" element={<Inbox />} />
                     <Route path="tiers" element={<TiersCoins />} />

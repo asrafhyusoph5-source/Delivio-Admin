@@ -358,6 +358,45 @@ export interface City {
     lng: number;
   };
   radiusKm: number;
+  services?: Record<string, boolean>; // e.g. { food: true, convenience: true, parcel: true, pabili: true, taxi: true }
+  servicesUpdatedAt?: any;
+  servicesUpdatedBy?: string;
+  createdAt?: any;
+}
+
+export interface Review {
+  id: string;
+  orderId?: string;
+  orderNumber?: string;
+  customerId?: string;
+  customerName?: string;
+  customerPhotoUrl?: string;
+  merchantId?: string;
+  merchantName?: string;
+  riderId?: string;
+  riderName?: string;
+  ratingMerchant?: number;
+  ratingRider?: number;
+  rating?: number;
+  commentMerchant?: string;
+  commentRider?: string;
+  comment?: string;
+  notes?: string;
+  tags?: string[];
+  createdAt?: any;
+}
+
+export interface OfferLogEntry {
+  id: string;
+  orderId?: string;
+  serviceType?: string;
+  status?: 'accepted' | 'declined' | 'missed' | 'cancelled' | 'canceled' | 'rejected' | string;
+  action?: string;
+  distanceKm?: number;
+  fareAmount?: number;
+  rejectionReason?: string;
+  cancellationReason?: string;
+  timestamp?: any;
   createdAt?: any;
 }
 

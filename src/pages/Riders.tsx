@@ -22,7 +22,17 @@ import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
-import type { Rider, Order, OrderServiceType, EditHistoryEntry, TierEvent, UserProfile, WalletTransaction } from '../types';
+import type {
+  Rider,
+  Order,
+  OrderServiceType,
+  EditHistoryEntry,
+  TierEvent,
+  UserProfile,
+  WalletTransaction,
+  Review,
+  OfferLogEntry
+} from '../types';
 import {
   VehicleType,
   VEHICLE_TYPES,
@@ -56,7 +66,8 @@ import {
   Unlink,
   User,
   Users,
-  Wallet
+  Wallet,
+  RotateCw
 } from 'lucide-react';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
@@ -81,8 +92,27 @@ export const Riders: React.FC = () => {
   // Selected Rider & Tabs
   const [selectedRider, setSelectedRider] = useState<Rider | null>(null);
   const [activeTab, setActiveTab] = useState<
-    'details' | 'status' | 'services' | 'orders' | 'cash' | 'wallet' | 'tiers' | 'inbox' | 'history'
+    'details' | 'status' | 'services' | 'performance' | 'orders' | 'cash' | 'wallet' | 'tiers' | 'inbox' | 'history'
   >('details');
+
+  // Performance & Offer Log states
+  const [offerLogEntries, setOfferLogEntries] = useState<OfferLogEntry[]>([]);
+  const [loadingOfferLog, setLoadingOfferLog] = useState(false);
+  const [perfPeriodFilter, setPerfPeriodFilter] = useState<'7d' | '30d' | 'all'>('7d');
+
+  // Driver Reviews states
+  const [driverReviews, setDriverReviews] = useState<Review[]>([]);
+  const [loadingDriverReviews, setLoadingDriverReviews] = useState(false);
+
+  // Platform Services switches
+  const [platformServices, setPlatformServices] = useState<Record<string, boolean>>({
+    food: true,
+    convenience: true,
+    parcel: true,
+    pabili: true,
+    request_rider: true,
+    taxi: true
+  });
 
   // Edit details form state
   const [name, setName] = useState('');
@@ -205,9 +235,47 @@ export const Riders: React.FC = () => {
     }
   };
 
+  // Helper to determine if services for this driver are off in their city
+  const getDriverServiceOffStatus = (driver: Rider): { isOff: boolean; cityName: string } => {
+    const city = cities.find((c) => c.id === driver.cityId);
+    const cityName = city?.name || 'City';
+    if (!city || !city.services) return { isOff: false, cityName };
+
+    const vType = (driver.vehicleType || 'motorcycle') as VehicleType;
+    const supported = SERVICES_BY_VEHICLE[vType] || ['parcel', 'taxi'];
+    const driverServices = (driver.allowedServices && driver.allowedServices.length > 0)
+      ? driver.allowedServices
+      : supported;
+
+    const isAnyOff = driverServices.some(
+      (srv) => city.services?.[srv] === false || platformServices[srv] === false
+    );
+
+    return { isOff: isAnyOff, cityName };
+  };
+
   useEffect(() => {
     fetchRiders();
-  }, []);
+    const fetchPlatform = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', 'platform'));
+        if (snap.exists() && snap.data().services) {
+          const s = snap.data().services;
+          setPlatformServices({
+            food: s.food !== false,
+            convenience: s.convenience !== false,
+            parcel: s.parcel !== false,
+            pabili: s.pabili !== false,
+            request_rider: s.request_rider !== false,
+            taxi: s.taxi !== false
+          });
+        }
+      } catch (e) {
+        console.warn('Failed to load platform services:', e);
+      }
+    };
+    fetchPlatform();
+  }, [selectedCityId]);
 
   // Sync rider details when selected
   useEffect(() => {
@@ -335,10 +403,142 @@ export const Riders: React.FC = () => {
       } else {
         setLinkedCustomer(null);
       }
+
+      // 7. Offer Log for acceptance & cancellation rates
+      try {
+        setLoadingOfferLog(true);
+        const offerSnap = await getDocs(
+          query(collection(db, 'riders', riderId, 'offerLog'), limit(300))
+        );
+        const offers: OfferLogEntry[] = [];
+        offerSnap.forEach((d) => offers.push({ id: d.id, ...d.data() } as OfferLogEntry));
+        offers.sort((a, b) => {
+          const tA = (a.createdAt?.seconds || a.timestamp?.seconds || 0);
+          const tB = (b.createdAt?.seconds || b.timestamp?.seconds || 0);
+          return tB - tA;
+        });
+        setOfferLogEntries(offers);
+      } catch (e) {
+        console.error('Failed to load offerLog:', e);
+      } finally {
+        setLoadingOfferLog(false);
+      }
+
+      // 8. Reviews list (reviews where riderId == driver id; sort in code)
+      try {
+        setLoadingDriverReviews(true);
+        const revSnap = await getDocs(
+          query(collection(db, 'reviews'), where('riderId', '==', riderId), limit(100))
+        );
+        const revList: Review[] = [];
+        revSnap.forEach((d) => revList.push({ id: d.id, ...d.data() } as Review));
+        revList.sort((a, b) => {
+          const tA = (a.createdAt?.seconds || 0);
+          const tB = (b.createdAt?.seconds || 0);
+          return tB - tA;
+        });
+        setDriverReviews(revList);
+      } catch (e) {
+        console.error('Failed to load driver reviews:', e);
+      } finally {
+        setLoadingDriverReviews(false);
+      }
     } catch (err) {
       console.error('Failed to load rider sub data:', err);
     }
   };
+
+  // Performance calculations: acceptance & cancellation rates overall & per service with period filter
+  const performanceMetrics = useMemo(() => {
+    const now = Date.now();
+    let filtered = offerLogEntries;
+    if (perfPeriodFilter === '7d') {
+      const cutoff = now - 7 * 86400000;
+      filtered = offerLogEntries.filter((e) => {
+        const timeMs = (e.createdAt?.seconds || e.timestamp?.seconds || 0) * 1000;
+        return timeMs === 0 || timeMs >= cutoff;
+      });
+    } else if (perfPeriodFilter === '30d') {
+      const cutoff = now - 30 * 86400000;
+      filtered = offerLogEntries.filter((e) => {
+        const timeMs = (e.createdAt?.seconds || e.timestamp?.seconds || 0) * 1000;
+        return timeMs === 0 || timeMs >= cutoff;
+      });
+    }
+
+    const isAccepted = (e: OfferLogEntry) =>
+      e.status === 'accepted' || e.action === 'accept' || e.action === 'accepted';
+    const isCancelled = (e: OfferLogEntry) =>
+      e.status === 'cancelled' ||
+      e.status === 'canceled' ||
+      e.action === 'cancel' ||
+      e.action === 'cancelled' ||
+      e.action === 'canceled';
+
+    const totalOffers = filtered.length;
+    const acceptedOffers = filtered.filter(isAccepted).length;
+    const cancelledOffers = filtered.filter(isCancelled).length;
+
+    const overallAcceptanceRate =
+      totalOffers > 0 ? (acceptedOffers / totalOffers) * 100 : 100;
+    const overallCancellationRate =
+      acceptedOffers > 0
+        ? (cancelledOffers / acceptedOffers) * 100
+        : totalOffers > 0
+        ? (cancelledOffers / totalOffers) * 100
+        : 0;
+
+    const servicesList: OrderServiceType[] = [
+      'food',
+      'convenience',
+      'parcel',
+      'pabili',
+      'request_rider',
+      'taxi'
+    ];
+
+    const perService = servicesList.map((srv) => {
+      const srvEntries = filtered.filter((e) => e.serviceType === srv);
+      const sTotal = srvEntries.length;
+      const sAccepted = srvEntries.filter(isAccepted).length;
+      const sCancelled = srvEntries.filter(isCancelled).length;
+      const sAcceptanceRate = sTotal > 0 ? (sAccepted / sTotal) * 100 : null;
+      const sCancellationRate =
+        sAccepted > 0
+          ? (sCancelled / sAccepted) * 100
+          : sTotal > 0
+          ? (sCancelled / sTotal) * 100
+          : null;
+
+      return {
+        service: srv,
+        total: sTotal,
+        accepted: sAccepted,
+        cancelled: sCancelled,
+        acceptanceRate: sAcceptanceRate,
+        cancellationRate: sCancellationRate
+      };
+    });
+
+    const ratings = driverReviews
+      .map((r) => Number(r.ratingRider ?? r.rating))
+      .filter((n) => !isNaN(n) && n > 0);
+    const avgRating =
+      ratings.length > 0
+        ? (ratings.reduce((acc, curr) => acc + curr, 0) / ratings.length).toFixed(1)
+        : (selectedRider?.rating ? Number(selectedRider.rating).toFixed(1) : '5.0');
+
+    return {
+      totalOffers,
+      acceptedOffers,
+      cancelledOffers,
+      overallAcceptanceRate,
+      overallCancellationRate,
+      perService,
+      avgRating,
+      reviewCount: driverReviews.length
+    };
+  }, [offerLogEntries, perfPeriodFilter, driverReviews, selectedRider]);
 
   // Filter riders
   const filteredRiders = useMemo(() => {
@@ -1261,26 +1461,38 @@ export const Riders: React.FC = () => {
                     </div>
                   </div>
 
-                  <span
-                    className={`text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1.5 ${
-                      r.status === 'suspended'
-                        ? 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
-                        : r.isOnline
-                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                        : 'bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-400'
-                    }`}
-                  >
+                  <div className="flex flex-col items-end gap-1">
                     <span
-                      className={`w-1.5 h-1.5 rounded-full ${
+                      className={`text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1.5 ${
                         r.status === 'suspended'
-                          ? 'bg-red-500'
+                          ? 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
                           : r.isOnline
-                          ? 'bg-emerald-500 animate-pulse'
-                          : 'bg-gray-400'
+                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                          : 'bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-400'
                       }`}
-                    />
-                    {r.status === 'suspended' ? 'Suspended' : r.isOnline ? 'Online' : 'Offline'}
-                  </span>
+                    >
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          r.status === 'suspended'
+                            ? 'bg-red-500'
+                            : r.isOnline
+                            ? 'bg-emerald-500 animate-pulse'
+                            : 'bg-gray-400'
+                        }`}
+                      />
+                      {r.status === 'suspended' ? 'Suspended' : r.isOnline ? 'Online' : 'Offline'}
+                    </span>
+                    {(() => {
+                      const offStatus = getDriverServiceOffStatus(r);
+                      if (!offStatus.isOff) return null;
+                      return (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-extrabold bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300 border border-red-300">
+                          <AlertTriangle className="w-2.5 h-2.5 text-red-500" />
+                          <span>Service off in {offStatus.cityName}</span>
+                        </span>
+                      );
+                    })()}
+                  </div>
                 </div>
 
                 {/* Vehicle & Plate details */}
@@ -1426,19 +1638,31 @@ export const Riders: React.FC = () => {
                             </div>
                           </td>
                           <td className="px-4 py-3">
-                            <div className="flex items-center gap-1.5">
-                              <span
-                                className={`w-2 h-2 rounded-full ${
-                                  r.isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'
-                                }`}
-                              />
-                              <span className="font-bold">
-                                {r.status === 'suspended'
-                                  ? 'Suspended'
-                                  : r.isOnline
-                                  ? 'Online'
-                                  : 'Offline'}
-                              </span>
+                            <div className="flex flex-col gap-1">
+                              <div className="flex items-center gap-1.5">
+                                <span
+                                  className={`w-2 h-2 rounded-full ${
+                                    r.isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'
+                                  }`}
+                                />
+                                <span className="font-bold">
+                                  {r.status === 'suspended'
+                                    ? 'Suspended'
+                                    : r.isOnline
+                                    ? 'Online'
+                                    : 'Offline'}
+                                </span>
+                              </div>
+                              {(() => {
+                                const offStatus = getDriverServiceOffStatus(r);
+                                if (!offStatus.isOff) return null;
+                                return (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-md text-[9px] font-extrabold bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300 border border-red-300 w-fit">
+                                    <AlertTriangle className="w-2.5 h-2.5 text-red-500" />
+                                    <span>Service off in {offStatus.cityName}</span>
+                                  </span>
+                                );
+                              })()}
                             </div>
                           </td>
                           <td className="px-4 py-3">
@@ -1519,6 +1743,7 @@ export const Riders: React.FC = () => {
                 { id: 'details', label: 'Details' },
                 { id: 'status', label: 'Status' },
                 { id: 'services', label: 'Services' },
+                { id: 'performance', label: 'Performance' },
                 { id: 'orders', label: `Orders (${riderOrders.length})` },
                 { id: 'cash', label: 'Cash Collection' },
                 {
@@ -1801,6 +2026,302 @@ export const Riders: React.FC = () => {
                   </div>
                 );
               })()}
+
+              {/* TAB: PERFORMANCE & REVIEWS */}
+              {activeTab === 'performance' && (
+                <div className="space-y-6">
+                  {/* Period Filter & Actions Bar */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-gray-50 dark:bg-zinc-850/60 border border-gray-200 dark:border-zinc-800">
+                    <div>
+                      <span className="text-[10px] uppercase font-bold text-gray-400 block tracking-wider">
+                        Performance Metrics Period
+                      </span>
+                      <h4 className="font-extrabold text-sm text-gray-900 dark:text-white">
+                        Dispatch Offer & Delivery Reliability
+                      </h4>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 self-start sm:self-auto">
+                      {(
+                        [
+                          { id: '7d', label: '7 Days' },
+                          { id: '30d', label: '30 Days' },
+                          { id: 'all', label: 'All Time' }
+                        ] as const
+                      ).map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => setPerfPeriodFilter(p.id)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                            perfPeriodFilter === p.id
+                              ? 'bg-amber-400 text-black shadow-xs font-black'
+                              : 'bg-white dark:bg-zinc-900 text-gray-600 dark:text-zinc-400 border border-gray-200 dark:border-zinc-800 hover:bg-gray-100'
+                          }`}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+
+                      <button
+                        type="button"
+                        onClick={() => fetchRiderSubData(selectedRider.id)}
+                        className="p-1.5 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-gray-500 hover:text-gray-900 dark:hover:text-white ml-1"
+                        title="Refresh metrics"
+                      >
+                        <RotateCw className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Summary Metric Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {/* Acceptance Rate Card */}
+                    <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-2xs space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold uppercase text-gray-400 tracking-wider">
+                          Acceptance Rate
+                        </span>
+                        <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                      </div>
+                      <div className="text-2xl font-black text-gray-900 dark:text-white">
+                        {performanceMetrics.overallAcceptanceRate.toFixed(1)}%
+                      </div>
+                      <div className="flex items-center justify-between text-[11px] text-gray-500">
+                        <span>
+                          {performanceMetrics.acceptedOffers} accepted of {performanceMetrics.totalOffers} offers
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 rounded-full bg-gray-100 dark:bg-zinc-800 overflow-hidden">
+                        <div
+                          className="h-full bg-emerald-500 rounded-full transition-all duration-300"
+                          style={{ width: `${Math.min(100, performanceMetrics.overallAcceptanceRate)}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Cancellation Rate Card */}
+                    <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-2xs space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold uppercase text-gray-400 tracking-wider">
+                          Cancellation Rate
+                        </span>
+                        <AlertTriangle className="w-4 h-4 text-amber-500" />
+                      </div>
+                      <div className="text-2xl font-black text-gray-900 dark:text-white">
+                        {performanceMetrics.overallCancellationRate.toFixed(1)}%
+                      </div>
+                      <div className="flex items-center justify-between text-[11px] text-gray-500">
+                        <span>
+                          {performanceMetrics.cancelledOffers} cancelled in period
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 rounded-full bg-gray-100 dark:bg-zinc-800 overflow-hidden">
+                        <div
+                          className="h-full bg-red-500 rounded-full transition-all duration-300"
+                          style={{ width: `${Math.min(100, performanceMetrics.overallCancellationRate)}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Customer Rating Card */}
+                    <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-2xs space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold uppercase text-gray-400 tracking-wider">
+                          Driver Rating
+                        </span>
+                        <Star className="w-4 h-4 fill-amber-400 text-amber-400" />
+                      </div>
+                      <div className="text-2xl font-black text-amber-500 flex items-center gap-1.5">
+                        <span>{performanceMetrics.avgRating}</span>
+                        <div className="flex items-center gap-0.5 text-amber-400 text-xs">
+                          {[1, 2, 3, 4, 5].map((s) => (
+                            <Star
+                              key={s}
+                              className={`w-3.5 h-3.5 ${
+                                s <= Math.round(Number(performanceMetrics.avgRating))
+                                  ? 'fill-amber-400 text-amber-400'
+                                  : 'text-gray-300 dark:text-zinc-700'
+                              }`}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                      <div className="text-[11px] text-gray-500">
+                        From {performanceMetrics.reviewCount} customer rating{performanceMetrics.reviewCount !== 1 ? 's' : ''}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Per-Service Breakdown Table */}
+                  <div className="space-y-3">
+                    <h4 className="font-extrabold text-xs uppercase tracking-wider text-gray-500 dark:text-zinc-400">
+                      Performance by Service Type
+                    </h4>
+
+                    <div className="overflow-x-auto rounded-2xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 shadow-2xs">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-gray-50/80 dark:bg-zinc-850/80 border-b border-gray-200 dark:border-zinc-800 text-[11px] font-extrabold uppercase text-gray-500 dark:text-zinc-400">
+                            <th className="py-3 px-4">Service</th>
+                            <th className="py-3 px-4">Offers</th>
+                            <th className="py-3 px-4">Accepted</th>
+                            <th className="py-3 px-4">Cancelled</th>
+                            <th className="py-3 px-4">Acceptance Rate</th>
+                            <th className="py-3 px-4 text-right">Cancellation Rate</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100 dark:divide-zinc-800">
+                          {performanceMetrics.perService.map((item) => {
+                            const isVehicleCapable = (SERVICES_BY_VEHICLE[selectedRider.vehicleType as VehicleType] || []).includes(item.service);
+                            return (
+                              <tr
+                                key={item.service}
+                                className="hover:bg-gray-50/60 dark:hover:bg-zinc-850/40 transition-colors"
+                              >
+                                <td className="py-3 px-4 font-bold text-gray-900 dark:text-white capitalize flex items-center gap-2">
+                                  <span>{item.service.replace('_', ' ')}</span>
+                                  {!isVehicleCapable && (
+                                    <span className="text-[10px] text-gray-400 font-normal">
+                                      (Not vehicle supported)
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-3 px-4 font-mono text-gray-700 dark:text-zinc-300">
+                                  {item.total}
+                                </td>
+                                <td className="py-3 px-4 font-mono text-emerald-600 font-bold">
+                                  {item.accepted}
+                                </td>
+                                <td className="py-3 px-4 font-mono text-red-500 font-bold">
+                                  {item.cancelled}
+                                </td>
+                                <td className="py-3 px-4">
+                                  {item.acceptanceRate !== null ? (
+                                    <span
+                                      className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${
+                                        item.acceptanceRate >= 80
+                                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                          : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                                      }`}
+                                    >
+                                      {item.acceptanceRate.toFixed(1)}%
+                                    </span>
+                                  ) : (
+                                    <span className="text-gray-400">—</span>
+                                  )}
+                                </td>
+                                <td className="py-3 px-4 text-right">
+                                  {item.cancellationRate !== null ? (
+                                    <span
+                                      className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${
+                                        item.cancellationRate <= 5
+                                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                          : 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
+                                      }`}
+                                    >
+                                      {item.cancellationRate.toFixed(1)}%
+                                    </span>
+                                  ) : (
+                                    <span className="text-gray-400">—</span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Reviews List */}
+                  <div className="space-y-3 pt-2 border-t border-gray-200 dark:border-zinc-800">
+                    <div className="flex items-center justify-between">
+                      <h4 className="font-extrabold text-xs uppercase tracking-wider text-gray-500 dark:text-zinc-400">
+                        Customer Ratings & Reviews ({driverReviews.length})
+                      </h4>
+                      <span className="text-xs text-gray-400">
+                        Average: <strong className="text-amber-500">{performanceMetrics.avgRating} / 5.0</strong>
+                      </span>
+                    </div>
+
+                    {loadingDriverReviews ? (
+                      <div className="py-10 flex flex-col items-center justify-center gap-2 text-gray-400 text-xs">
+                        <Loader2 className="w-5 h-5 animate-spin text-amber-500" />
+                        <span>Loading driver reviews...</span>
+                      </div>
+                    ) : driverReviews.length === 0 ? (
+                      <div className="py-10 text-center bg-gray-50 dark:bg-zinc-850/40 rounded-2xl border border-dashed border-gray-200 dark:border-zinc-800 p-6 space-y-1.5">
+                        <Star className="w-8 h-8 text-gray-300 dark:text-zinc-700 mx-auto" />
+                        <p className="text-xs font-bold text-gray-600 dark:text-zinc-400">
+                          No reviews recorded yet
+                        </p>
+                        <p className="text-[11px] text-gray-400">
+                          Customer ratings submitted on orders and taxi trips will be displayed here.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {driverReviews.map((rev) => {
+                          const rRating = Number(rev.ratingRider ?? rev.rating) || 5;
+                          const revDate = rev.createdAt?.seconds ? new Date(rev.createdAt.seconds * 1000) : null;
+                          const dateStr = revDate ? formatRelativeTime(revDate) : 'Recently';
+
+                          return (
+                            <div
+                              key={rev.id}
+                              className="p-3.5 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-2xs space-y-2 text-xs"
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex items-center gap-2.5">
+                                  <div className="w-8 h-8 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 font-bold flex items-center justify-center shrink-0 overflow-hidden text-xs">
+                                    {rev.customerPhotoUrl ? (
+                                      <img
+                                        src={rev.customerPhotoUrl}
+                                        alt={rev.customerName || 'Customer'}
+                                        className="w-full h-full object-cover"
+                                      />
+                                    ) : (
+                                      <span>{(rev.customerName || 'C').charAt(0).toUpperCase()}</span>
+                                    )}
+                                  </div>
+                                  <div>
+                                    <div className="font-extrabold text-gray-900 dark:text-white">
+                                      {rev.customerName || 'Delivio Customer'}
+                                    </div>
+                                    <div className="text-[10px] text-gray-400">{dateStr}</div>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-1 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 px-2 py-0.5 rounded-lg">
+                                  <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                                  <span className="font-black text-amber-900 dark:text-amber-300 text-xs">
+                                    {rRating.toFixed(1)}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <p className="text-gray-700 dark:text-zinc-300 text-xs leading-relaxed">
+                                {rev.commentRider || rev.comment || (
+                                  <span className="italic text-gray-400">No written feedback provided</span>
+                                )}
+                              </p>
+
+                              {rev.orderNumber && (
+                                <div className="pt-1 border-t border-gray-100 dark:border-zinc-800 text-[10px] text-gray-400">
+                                  <span className="font-mono bg-gray-100 dark:bg-zinc-800 px-1.5 py-0.5 rounded">
+                                    Trip / Order #{rev.orderNumber}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* TAB 4: ORDERS & EARNINGS */}
               {activeTab === 'orders' && (

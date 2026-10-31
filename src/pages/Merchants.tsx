@@ -23,7 +23,7 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
-import { formatTimestamp } from '../utils/date';
+import { formatTimestamp, formatRelativeTime } from '../utils/date';
 import type {
   Merchant,
   MenuItem,
@@ -35,7 +35,8 @@ import type {
   EditHistoryEntry,
   WalletTransaction,
   MerchantWeeklyHours,
-  MerchantOperatingDay
+  MerchantOperatingDay,
+  Review
 } from '../types';
 import { FOOD_CATEGORIES, CONVENIENCE_CATEGORIES } from '../constants';
 import {
@@ -43,6 +44,7 @@ import {
   Store,
   MapPin,
   Phone,
+  Star,
   Mail,
   DollarSign,
   Percent,
@@ -131,7 +133,9 @@ export function formatInPlatformTz(date: Date, platformTimezone: string = 'Asia/
 
 export function effectiveOpen(
   shop: Merchant,
-  platformTimezone: string = 'Asia/Manila'
+  platformTimezone: string = 'Asia/Manila',
+  serviceOn: boolean = true,
+  cityName?: string
 ): {
   isOpen: boolean;
   reason: string;
@@ -140,6 +144,14 @@ export function effectiveOpen(
 } {
   const now = new Date();
   const tz = platformTimezone || 'Asia/Manila';
+
+  // 0. false if service is off in its city / platform
+  if (serviceOn === false) {
+    return {
+      isOpen: false,
+      reason: `Service off in ${cityName || 'city'}`
+    };
+  }
 
   // 1. false if status != "active"
   if (shop.status !== 'active') {
@@ -372,8 +384,22 @@ export const Merchants: React.FC = () => {
   const [merchants, setMerchants] = useState<Merchant[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Platform Timezone
+  // Platform Timezone & Services
   const [platformTimezone, setPlatformTimezone] = useState('Asia/Manila');
+  const [platformServices, setPlatformServices] = useState<Record<string, boolean>>({
+    food: true,
+    convenience: true,
+    parcel: true,
+    pabili: true,
+    taxi: true
+  });
+
+  const isMerchantServiceOn = (shop: Merchant): boolean => {
+    const globalOn = platformServices[shop.type] !== false;
+    const city = cities.find((c) => c.id === shop.cityId);
+    const cityOn = city?.services?.[shop.type] !== false;
+    return globalOn && cityOn;
+  };
 
   // Filters
   const [searchQuery, setSearchQuery] = useState(initialSearch);
@@ -384,7 +410,11 @@ export const Merchants: React.FC = () => {
 
   // Selected Merchant for detail
   const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(null);
-  const [activeTab, setActiveTab] = useState<'details' | 'status' | 'location' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'status' | 'location' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet' | 'reviews'>('details');
+
+  // Reviews State
+  const [merchantReviews, setMerchantReviews] = useState<Review[]>([]);
+  const [loadingMerchantReviews, setLoadingMerchantReviews] = useState(false);
 
   // Operating Hours & AutoSchedule
   const [merchantHours, setMerchantHours] = useState<MerchantWeeklyHours>(DEFAULT_WEEKLY_HOURS);
@@ -559,15 +589,27 @@ export const Merchants: React.FC = () => {
 
   useEffect(() => {
     fetchMerchants();
-    // Load platform timezone
+    // Load platform timezone and service switches
     const fetchPlatformSettings = async () => {
       try {
         const snap = await getDoc(doc(db, 'settings', 'platform'));
-        if (snap.exists() && snap.data().timezone) {
-          setPlatformTimezone(snap.data().timezone);
+        if (snap.exists()) {
+          const dt = snap.data();
+          if (dt.timezone) {
+            setPlatformTimezone(dt.timezone);
+          }
+          if (dt.services) {
+            setPlatformServices({
+              food: dt.services.food !== false,
+              convenience: dt.services.convenience !== false,
+              parcel: dt.services.parcel !== false,
+              pabili: dt.services.pabili !== false,
+              taxi: dt.services.taxi !== false
+            });
+          }
         }
       } catch (err) {
-        console.warn('Could not load platform timezone:', err);
+        console.warn('Could not load platform settings:', err);
       }
     };
     fetchPlatformSettings();
@@ -601,9 +643,57 @@ export const Merchants: React.FC = () => {
     fetchOrdersAndPayouts(selectedMerchant.id);
     // Fetch Change Requests
     fetchChangeRequests(selectedMerchant.id);
+    // Fetch Reviews
+    fetchMerchantReviews(selectedMerchant.id);
     // Fetch Edit History
     fetchEditHistory(selectedMerchant.id);
   }, [selectedMerchant]);
+
+  // Fetch Merchant Reviews (reviews where merchantId == shop id; sort in code)
+  const fetchMerchantReviews = async (merchantId: string) => {
+    try {
+      setLoadingMerchantReviews(true);
+      const q = query(
+        collection(db, 'reviews'),
+        where('merchantId', '==', merchantId),
+        limit(100)
+      );
+      const snap = await getDocs(q);
+      const list: Review[] = [];
+      snap.forEach((dSnap) => {
+        list.push({ id: dSnap.id, ...dSnap.data() } as Review);
+      });
+      // Sort in code by createdAt desc
+      list.sort((a, b) => {
+        const tA = parseDate(a.createdAt)?.getTime() || 0;
+        const tB = parseDate(b.createdAt)?.getTime() || 0;
+        return tB - tA;
+      });
+      setMerchantReviews(list);
+    } catch (err) {
+      console.error('Error fetching merchant reviews:', err);
+    } finally {
+      setLoadingMerchantReviews(false);
+    }
+  };
+
+  // Review statistics: average, count, star distribution
+  const reviewStats = useMemo(() => {
+    const count = merchantReviews.length;
+    const ratings = merchantReviews
+      .map((r) => Number(r.ratingMerchant ?? r.rating))
+      .filter((n) => !isNaN(n) && n > 0);
+    const avg =
+      ratings.length > 0
+        ? (ratings.reduce((acc, curr) => acc + curr, 0) / ratings.length).toFixed(1)
+        : '0.0';
+    const dist: Record<number, number> = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
+    ratings.forEach((val) => {
+      const star = Math.min(5, Math.max(1, Math.round(val)));
+      dist[star] = (dist[star] || 0) + 1;
+    });
+    return { count, avg, dist, totalRated: ratings.length };
+  }, [merchantReviews]);
 
   // Fetch Merchant Wallet and linked customer
   const fetchMerchantWallet = async (merchant: Merchant) => {
@@ -2042,7 +2132,9 @@ export const Merchants: React.FC = () => {
         if (!m.cuisineTags || !m.cuisineTags.includes(categoryFilter)) return false;
       }
       if (statusFilter !== 'all' && m.status !== statusFilter) return false;
-      const eff = effectiveOpen(m, platformTimezone);
+      const sOn = isMerchantServiceOn(m);
+      const cObj = cities.find((c) => c.id === m.cityId);
+      const eff = effectiveOpen(m, platformTimezone, sOn, cObj?.name);
       if (openFilter === 'open' && !eff.isOpen) return false;
       if (openFilter === 'closed' && eff.isOpen) return false;
       if (searchQuery.trim()) {
@@ -2054,7 +2146,7 @@ export const Merchants: React.FC = () => {
       }
       return true;
     });
-  }, [merchants, selectedCityId, typeFilter, categoryFilter, statusFilter, openFilter, searchQuery, platformTimezone]);
+  }, [merchants, selectedCityId, typeFilter, categoryFilter, statusFilter, openFilter, searchQuery, platformTimezone, platformServices, cities]);
 
   return (
     <div className="space-y-6">
@@ -2229,10 +2321,12 @@ export const Merchants: React.FC = () => {
                       </td>
                       <td className="px-4 py-3">
                         {(() => {
-                          const eff = effectiveOpen(m, platformTimezone);
+                          const sOn = isMerchantServiceOn(m);
+                          const cObj = cities.find((c) => c.id === m.cityId);
+                          const eff = effectiveOpen(m, platformTimezone, sOn, cObj?.name);
                           const isSuspended = m.status === 'suspended';
                           return (
-                            <div className="flex flex-col gap-0.5">
+                            <div className="flex flex-col gap-1">
                               <div className="flex items-center gap-1.5" title={eff.reason}>
                                 <span
                                   className={`w-2 h-2 rounded-full shrink-0 ${
@@ -2255,6 +2349,12 @@ export const Merchants: React.FC = () => {
                                   {isSuspended ? 'Suspended' : eff.isOpen ? 'Open' : 'Closed'}
                                 </span>
                               </div>
+                              {!sOn && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-md text-[9px] font-extrabold bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300 border border-red-300 w-fit">
+                                  <AlertTriangle className="w-2.5 h-2.5 text-red-500" />
+                                  <span>Service off in {cObj?.name || 'city'}</span>
+                                </span>
+                              )}
                               <span
                                 className="text-[10px] text-gray-500 dark:text-zinc-400 truncate max-w-[200px]"
                                 title={eff.reason}
@@ -2350,20 +2450,30 @@ export const Merchants: React.FC = () => {
                   <h3 className="font-extrabold text-lg text-gray-900 dark:text-white flex items-center gap-2 flex-wrap">
                     <span>{selectedMerchant.name}</span>
                     {(() => {
-                      const eff = effectiveOpen(selectedMerchant, platformTimezone);
+                      const sOn = isMerchantServiceOn(selectedMerchant);
+                      const cObj = cities.find((c) => c.id === selectedMerchant.cityId);
+                      const eff = effectiveOpen(selectedMerchant, platformTimezone, sOn, cObj?.name);
                       return (
-                        <span
-                          title={eff.reason}
-                          className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1.5 ${
-                            eff.isOpen
-                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300'
-                              : 'bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-300 border border-gray-300'
-                          }`}
-                        >
-                          <span className={`w-1.5 h-1.5 rounded-full ${eff.isOpen ? 'bg-emerald-500' : 'bg-gray-400'}`} />
-                          <span>{eff.isOpen ? 'Open' : 'Closed'}</span>
-                          <span className="font-normal opacity-80">({eff.reason})</span>
-                        </span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span
+                            title={eff.reason}
+                            className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1.5 ${
+                              eff.isOpen
+                                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300'
+                                : 'bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-300 border border-gray-300'
+                            }`}
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full ${eff.isOpen ? 'bg-emerald-500' : 'bg-gray-400'}`} />
+                            <span>{eff.isOpen ? 'Open' : 'Closed'}</span>
+                            <span className="font-normal opacity-80">({eff.reason})</span>
+                          </span>
+                          {!sOn && (
+                            <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300 border border-red-300 flex items-center gap-1">
+                              <AlertTriangle className="w-3 h-3 text-red-500" />
+                              <span>Service off in {cObj?.name || 'city'}</span>
+                            </span>
+                          )}
+                        </div>
                       );
                     })()}
                   </h3>
@@ -2419,6 +2529,7 @@ export const Merchants: React.FC = () => {
                 { id: 'wallet', label: 'Wallet' },
                 { id: 'location', label: 'Location Map' },
                 { id: 'menu', label: `Menu (${menuItems.length})` },
+                { id: 'reviews', label: `Reviews (${merchantReviews.length})` },
                 { id: 'orders', label: 'Orders & Payouts' },
                 { id: 'changes', label: `Change Requests (${changeRequests.length})` },
                 { id: 'history', label: 'Edit History' }
@@ -3678,6 +3789,167 @@ export const Merchants: React.FC = () => {
                       </div>
                     ))
                   )}
+                </div>
+              )}
+
+              {/* TAB: REVIEWS */}
+              {activeTab === 'reviews' && (
+                <div className="space-y-5">
+                  {/* Rating Header Overview */}
+                  <div className="bg-gray-50 dark:bg-zinc-850/60 rounded-2xl p-5 border border-gray-200 dark:border-zinc-800">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
+                      <div className="flex items-center gap-4">
+                        <div className="w-20 h-20 rounded-2xl bg-amber-400 flex flex-col items-center justify-center text-black shrink-0 shadow-md shadow-amber-400/20">
+                          <span className="text-3xl font-black leading-none">{reviewStats.avg}</span>
+                          <div className="flex items-center gap-0.5 mt-1">
+                            {[1, 2, 3, 4, 5].map((s) => (
+                              <Star
+                                key={s}
+                                className={`w-3 h-3 ${
+                                  s <= Math.round(Number(reviewStats.avg))
+                                    ? 'fill-black text-black'
+                                    : 'text-black/30'
+                                }`}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                        <div>
+                          <h4 className="font-extrabold text-base text-gray-900 dark:text-white">
+                            Merchant Rating
+                          </h4>
+                          <p className="text-xs text-gray-500 dark:text-zinc-400 mt-0.5">
+                            Based on {reviewStats.count} verified customer review{reviewStats.count !== 1 ? 's' : ''}
+                          </p>
+                          <div className="mt-1 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+                            <Store className="w-3 h-3" />
+                            <span>{selectedMerchant.name}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Star Distribution Breakdown */}
+                      <div className="flex-1 max-w-xs space-y-1.5 text-xs">
+                        {[5, 4, 3, 2, 1].map((stars) => {
+                          const count = reviewStats.dist[stars] || 0;
+                          const pct = reviewStats.totalRated > 0 ? (count / reviewStats.totalRated) * 100 : 0;
+                          return (
+                            <div key={stars} className="flex items-center gap-2">
+                              <span className="w-12 text-[11px] font-bold text-gray-600 dark:text-zinc-400 flex items-center gap-1">
+                                <span>{stars}</span>
+                                <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
+                              </span>
+                              <div className="flex-1 h-2 rounded-full bg-gray-200 dark:bg-zinc-700 overflow-hidden">
+                                <div
+                                  className="h-full bg-amber-400 rounded-full transition-all duration-300"
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                              <span className="w-8 text-[11px] text-right text-gray-400 font-mono">
+                                {count}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Reviews List */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="font-extrabold text-xs uppercase tracking-wider text-gray-500 dark:text-zinc-400">
+                        Customer Feedback ({merchantReviews.length})
+                      </h4>
+                      <button
+                        type="button"
+                        onClick={() => fetchMerchantReviews(selectedMerchant.id)}
+                        className="text-xs text-amber-600 hover:text-amber-700 font-bold flex items-center gap-1"
+                      >
+                        <RotateCw className="w-3 h-3" /> Refresh
+                      </button>
+                    </div>
+
+                    {loadingMerchantReviews ? (
+                      <div className="py-12 flex flex-col items-center justify-center gap-2 text-gray-400 text-xs">
+                        <Loader2 className="w-6 h-6 animate-spin text-amber-500" />
+                        <span>Loading customer reviews...</span>
+                      </div>
+                    ) : merchantReviews.length === 0 ? (
+                      <div className="py-12 text-center bg-gray-50 dark:bg-zinc-850/40 rounded-2xl border border-dashed border-gray-200 dark:border-zinc-800 p-6 space-y-2">
+                        <Star className="w-8 h-8 text-gray-300 dark:text-zinc-700 mx-auto" />
+                        <p className="text-xs font-bold text-gray-600 dark:text-zinc-400">
+                          No reviews recorded yet
+                        </p>
+                        <p className="text-[11px] text-gray-400 max-w-sm mx-auto">
+                          Customer reviews submitted after completed food & convenience orders will appear here.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {merchantReviews.map((rev) => {
+                          const mRating = Number(rev.ratingMerchant ?? rev.rating) || 5;
+                          const revDate = parseDate(rev.createdAt);
+                          const dateStr = revDate ? formatRelativeTime(revDate) : 'Recently';
+
+                          return (
+                            <div
+                              key={rev.id}
+                              className="p-4 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-2xs space-y-2.5 text-xs"
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex items-center gap-2.5">
+                                  <div className="w-8 h-8 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 font-bold flex items-center justify-center shrink-0 overflow-hidden text-xs">
+                                    {rev.customerPhotoUrl ? (
+                                      <img
+                                        src={rev.customerPhotoUrl}
+                                        alt={rev.customerName || 'Customer'}
+                                        className="w-full h-full object-cover"
+                                      />
+                                    ) : (
+                                      <span>{(rev.customerName || 'C').charAt(0).toUpperCase()}</span>
+                                    )}
+                                  </div>
+                                  <div>
+                                    <div className="font-extrabold text-gray-900 dark:text-white">
+                                      {rev.customerName || 'Delivio Customer'}
+                                    </div>
+                                    <div className="text-[10px] text-gray-400">{dateStr}</div>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-1 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 px-2 py-0.5 rounded-lg">
+                                  <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                                  <span className="font-black text-amber-900 dark:text-amber-300 text-xs">
+                                    {mRating.toFixed(1)}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <p className="text-gray-700 dark:text-zinc-300 leading-relaxed text-xs">
+                                {rev.commentMerchant || rev.comment || (
+                                  <span className="italic text-gray-400">No written comment provided</span>
+                                )}
+                              </p>
+
+                              <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-gray-100 dark:border-zinc-800 text-[10px] text-gray-400">
+                                {rev.orderNumber && (
+                                  <span className="font-mono bg-gray-100 dark:bg-zinc-800 px-1.5 py-0.5 rounded">
+                                    Order #{rev.orderNumber}
+                                  </span>
+                                )}
+                                {rev.tags && rev.tags.length > 0 && rev.tags.map((tag, tIdx) => (
+                                  <span key={tIdx} className="bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 px-1.5 py-0.5 rounded font-medium">
+                                    #{tag}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

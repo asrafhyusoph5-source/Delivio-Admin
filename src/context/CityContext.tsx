@@ -36,6 +36,9 @@ export const CityProvider: React.FC<{ children: React.ReactNode }> = ({ children
           status: data.status || 'active',
           center: data.center || { lat: 9.7392, lng: 118.7353 }, // default Puerto Princesa fallback
           radiusKm: Number(data.radiusKm) || 15,
+          services: data.services || {},
+          servicesUpdatedAt: data.servicesUpdatedAt || null,
+          servicesUpdatedBy: data.servicesUpdatedBy || null,
           createdAt: data.createdAt || null
         });
       });

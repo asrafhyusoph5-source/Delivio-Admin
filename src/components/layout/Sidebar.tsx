@@ -19,7 +19,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Sparkles,
-  ArrowLeftRight
+  ArrowLeftRight,
+  Layers
 } from 'lucide-react';
 import { useBadgeCounts } from '../../context/BadgeCountsContext';
 
@@ -65,6 +66,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-red-500'
     },
     { name: 'Rates & Fares', path: '/rates', icon: Coins },
+    { name: 'Services by City', path: '/services-by-city', icon: Layers },
     {
       name: 'Banners & Promos',
       path: '/banners',
