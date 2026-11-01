@@ -90,6 +90,7 @@ export interface OrderFees {
   discount: number;
   total: number;
   tip?: number;
+  lateTip?: number;
 }
 
 export interface Order {
@@ -99,6 +100,7 @@ export interface Order {
   fulfillmentType?: 'delivery' | 'pickup' | 'scheduled' | string;
   isPickup?: boolean;
   scheduledFor?: any;
+  lateTip?: number;
   customerId: string;
   customerName: string;
   customerPhone?: string;
@@ -132,6 +134,7 @@ export interface Order {
     commissionPercent: number;
     tip: number;
     net: number;
+    lateTip?: number;
   };
   status: OrderStatus;
   statusHistory: OrderStatusHistoryItem[];
@@ -290,6 +293,7 @@ export interface MenuSet {
   maxSelect: number;
   sortOrder: number;
   choices: MenuChoice[];
+  customName?: boolean;
 }
 
 export interface Subcategory {
@@ -381,6 +385,8 @@ export interface Review {
   orderNumber?: string;
   customerId?: string;
   customerName?: string;
+  customerEmail?: string;
+  customerPhone?: string;
   customerPhotoUrl?: string;
   merchantId?: string;
   merchantName?: string;
@@ -673,5 +679,60 @@ export interface InboxMessage {
   createdByName?: string | null;
   sentBy?: string | null;
   sentById?: string | null;
+}
+
+export type SupportTicketStatus = 'open' | 'accepted' | 'in_progress' | 'resolved';
+
+export interface SupportTicket {
+  id: string;
+  title: string;
+  reason: string; // Missing Order, Not My Order, I Did Not Receive My Order, Wrong or Damaged Items, Order Is Late, Rider or Driver Issue, Payment or Refund Problem, Other
+  status: SupportTicketStatus;
+  customerId: string;
+  customerName: string;
+  customerEmail?: string;
+  customerPhone?: string;
+  orderId?: string;
+  orderNumber?: string;
+  serviceType?: OrderServiceType | string;
+  unreadByAdmin?: boolean;
+  unreadByCustomer?: boolean;
+  lastMessageAt?: any;
+  lastMessagePreview?: string;
+  acceptedAt?: any;
+  acceptedBy?: string;
+  resolvedAt?: any;
+  resolvedBy?: string;
+  resolution?: string;
+  createdAt: any;
+  updatedAt?: any;
+}
+
+export interface SupportTicketMessage {
+  id: string;
+  senderType: 'admin' | 'customer' | 'rider' | 'system';
+  senderId: string;
+  senderName?: string;
+  text: string;
+  imageData?: string | null;
+  createdAt: any;
+}
+
+export interface RiderReview {
+  id: string;
+  orderId?: string;
+  orderNumber?: string;
+  merchantId?: string;
+  merchantName?: string;
+  riderId: string;
+  riderName?: string;
+  riderCode?: string;
+  rating: number; // 1 to 5
+  ratingMerchant?: number;
+  comment?: string;
+  commentMerchant?: string;
+  waitDurationMinutes?: number;
+  tags?: string[];
+  createdAt: any;
 }
 

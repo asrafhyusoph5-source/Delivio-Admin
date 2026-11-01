@@ -538,12 +538,14 @@ export const LiveOrders: React.FC = () => {
             parcel: data.parcel,
             pabili: data.pabili,
             finalReceiptTotal: data.finalReceiptTotal,
+            lateTip: Number(data.lateTip || data.fees?.lateTip || data.riderEarning?.lateTip || 0),
             fees: {
               subtotal: data.fees?.subtotal || 0,
               deliveryFee: data.fees?.deliveryFee || 0,
               serviceFee: data.fees?.serviceFee || 0,
               discount: data.fees?.discount || 0,
               tip: data.fees?.tip || 0,
+              lateTip: Number(data.fees?.lateTip || data.lateTip || 0),
               total: data.fees?.total || 0
             },
             fulfillmentType: data.fulfillmentType,
@@ -1402,10 +1404,19 @@ export const LiveOrders: React.FC = () => {
                         <PaymentChip order={order} />
                       </td>
                       <td className="px-4 py-3 font-semibold text-gray-700 dark:text-zinc-300">
-                        {Number(order.fees?.tip || 0) > 0 ? (
-                          <span className="text-emerald-600 dark:text-emerald-400 font-bold">
-                            ₱{Number(order.fees?.tip).toFixed(2)}
-                          </span>
+                        {Number(order.fees?.tip || 0) > 0 || Number(order.lateTip || order.fees?.lateTip || 0) > 0 ? (
+                          <div className="flex flex-col">
+                            {Number(order.fees?.tip || 0) > 0 && (
+                              <span className="text-emerald-600 dark:text-emerald-400 font-bold">
+                                ₱{Number(order.fees?.tip).toFixed(2)}
+                              </span>
+                            )}
+                            {Number(order.lateTip || order.fees?.lateTip || 0) > 0 && (
+                              <span className="text-[10px] text-amber-600 dark:text-amber-400 font-bold">
+                                +₱{Number(order.lateTip || order.fees?.lateTip).toFixed(2)} late tip
+                              </span>
+                            )}
+                          </div>
                         ) : (
                           <span className="text-gray-400">₱0.00</span>
                         )}
@@ -1861,6 +1872,12 @@ export const LiveOrders: React.FC = () => {
                   <div className="flex justify-between text-emerald-600 font-semibold">
                     <span>Driver Tip (Direct to Driver)</span>
                     <span>+₱{Number(selectedOrder.fees?.tip).toFixed(2)}</span>
+                  </div>
+                )}
+                {Number(selectedOrder.lateTip || selectedOrder.fees?.lateTip || 0) > 0 && (
+                  <div className="flex justify-between text-amber-600 font-semibold">
+                    <span>Late Tip (Post-Delivery Tip)</span>
+                    <span>+₱{Number(selectedOrder.lateTip || selectedOrder.fees?.lateTip).toFixed(2)}</span>
                   </div>
                 )}
                 <div className="pt-2 border-t border-gray-200 dark:border-zinc-800 flex justify-between text-base font-black text-gray-900 dark:text-white">

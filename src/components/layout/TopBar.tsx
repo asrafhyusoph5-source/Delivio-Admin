@@ -13,7 +13,8 @@ import {
   FileCheck,
   Store,
   Tag,
-  ExternalLink
+  ExternalLink,
+  Headphones
 } from 'lucide-react';
 import { useCity } from '../../context/CityContext';
 import { useTheme } from '../../context/ThemeContext';
@@ -39,7 +40,8 @@ export const TopBar: React.FC<TopBarProps> = ({
     recentUnreadNotifications,
     totalPendingAppsCount,
     pendingPromoRequestsCount,
-    pendingChangeRequestsCount
+    pendingChangeRequestsCount,
+    openTicketsCount
   } = useBadgeCounts();
 
   const navigate = useNavigate();
@@ -97,7 +99,8 @@ export const TopBar: React.FC<TopBarProps> = ({
     unreadNotificationsCount +
     totalPendingAppsCount +
     pendingPromoRequestsCount +
-    pendingChangeRequestsCount;
+    pendingChangeRequestsCount +
+    openTicketsCount;
 
   const currentCityName =
     selectedCityId === 'all'
@@ -235,6 +238,26 @@ export const TopBar: React.FC<TopBarProps> = ({
 
               {/* Actionable alerts cards */}
               <div className="p-2 space-y-1.5 max-h-80 overflow-y-auto">
+                {openTicketsCount > 0 && (
+                  <div
+                    onClick={() => {
+                      setShowNotifications(false);
+                      navigate('/support');
+                    }}
+                    className="flex items-start gap-3 p-2.5 rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200/50 dark:border-red-900/30 cursor-pointer hover:bg-red-100/60 transition-colors"
+                  >
+                    <Headphones className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+                    <div className="flex-1 text-xs">
+                      <p className="font-bold text-red-900 dark:text-red-300">
+                        {openTicketsCount} Open Support Ticket(s)
+                      </p>
+                      <p className="text-red-700/80 dark:text-red-400/80 mt-0.5">
+                        Customer inquiries & order dispute tickets requiring action.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 {totalPendingAppsCount > 0 && (
                   <div
                     onClick={() => {

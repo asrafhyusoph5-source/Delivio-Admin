@@ -20,7 +20,8 @@ import {
   ChevronRight,
   Sparkles,
   ArrowLeftRight,
-  Layers
+  Layers,
+  Headphones
 } from 'lucide-react';
 import { useBadgeCounts } from '../../context/BadgeCountsContext';
 
@@ -41,7 +42,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
     totalPendingAppsCount,
     pendingPromoRequestsCount,
     pendingTierEventsCount,
-    pendingChangeRequestsCount
+    pendingChangeRequestsCount,
+    openTicketsCount
   } = useBadgeCounts();
 
   const navItems = [
@@ -75,6 +77,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-purple-500'
     },
     { name: 'Inbox', path: '/inbox', icon: Mail },
+    {
+      name: 'Support',
+      path: '/support',
+      icon: Headphones,
+      badge: openTicketsCount > 0 ? openTicketsCount : undefined,
+      badgeColor: 'bg-red-500'
+    },
     {
       name: 'Tiers & Coins',
       path: '/tiers',

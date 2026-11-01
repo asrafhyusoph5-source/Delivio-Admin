@@ -132,6 +132,7 @@ export const Riders: React.FC = () => {
 
   // Orders & Earnings
   const [riderOrders, setRiderOrders] = useState<Order[]>([]);
+  const [userDirectoryCache, setUserDirectoryCache] = useState<Record<string, { name?: string; email?: string; phone?: string; photoUrl?: string }>>({});
 
   // Cash Remittance
   const [remitAmount, setRemitAmount] = useState<number>(0);
@@ -305,6 +306,7 @@ export const Riders: React.FC = () => {
       const ords: Order[] = [];
       ordSnap.forEach((d) => {
         const dt = d.data();
+        const lateTipVal = Number(dt.lateTip || dt.fees?.lateTip || dt.riderEarning?.lateTip || 0);
         ords.push({
           id: d.id,
           orderNumber: dt.orderNumber || d.id.substring(0, 8),
@@ -317,6 +319,7 @@ export const Riders: React.FC = () => {
           riderEarning: dt.riderEarning,
           codCollected: dt.codCollected || 0,
           paymentMethod: dt.paymentMethod,
+          lateTip: lateTipVal,
           createdAt: dt.createdAt
         });
       });
@@ -431,13 +434,40 @@ export const Riders: React.FC = () => {
           query(collection(db, 'reviews'), where('riderId', '==', riderId), limit(100))
         );
         const revList: Review[] = [];
-        revSnap.forEach((d) => revList.push({ id: d.id, ...d.data() } as Review));
+        const custIdsToLookup = new Set<string>();
+        revSnap.forEach((d) => {
+          const revData = d.data();
+          revList.push({ id: d.id, ...revData } as Review);
+          if (revData.customerId) custIdsToLookup.add(revData.customerId);
+        });
         revList.sort((a, b) => {
           const tA = (a.createdAt?.seconds || 0);
           const tB = (b.createdAt?.seconds || 0);
           return tB - tA;
         });
         setDriverReviews(revList);
+
+        if (custIdsToLookup.size > 0) {
+          custIdsToLookup.forEach(async (cid) => {
+            try {
+              const uSnap = await getDoc(doc(db, 'users', cid));
+              if (uSnap.exists()) {
+                const uDt = uSnap.data();
+                setUserDirectoryCache((prev) => ({
+                  ...prev,
+                  [cid]: {
+                    name: uDt.name,
+                    email: uDt.email,
+                    phone: uDt.phone,
+                    photoUrl: uDt.photoUrl
+                  }
+                }));
+              }
+            } catch (e) {
+              // Ignore lookup errors
+            }
+          });
+        }
       } catch (e) {
         console.error('Failed to load driver reviews:', e);
       } finally {
@@ -1288,7 +1318,11 @@ export const Riders: React.FC = () => {
 
   // Financial calculations
   const totalNetEarnings = useMemo(() => {
-    return riderOrders.reduce((acc, o) => acc + (Number(o.riderEarning?.net) || 0), 0);
+    return riderOrders.reduce((acc, o) => {
+      const baseNet = Number(o.riderEarning?.net) || 0;
+      const lateTip = Number(o.lateTip || o.fees?.lateTip || o.riderEarning?.lateTip || 0);
+      return acc + baseNet + lateTip;
+    }, 0);
   }, [riderOrders]);
 
   const totalCodCollected = useMemo(() => {
@@ -2267,6 +2301,12 @@ export const Riders: React.FC = () => {
                           const revDate = rev.createdAt?.seconds ? new Date(rev.createdAt.seconds * 1000) : null;
                           const dateStr = revDate ? formatRelativeTime(revDate) : 'Recently';
 
+                          const cached = rev.customerId ? userDirectoryCache[rev.customerId] : null;
+                          const custName = cached?.name || rev.customerName || 'Delivio Customer';
+                          const custEmail = cached?.email || rev.customerEmail;
+                          const custPhone = cached?.phone || rev.customerPhone;
+                          const custPhoto = cached?.photoUrl || rev.customerPhotoUrl;
+
                           return (
                             <div
                               key={rev.id}
@@ -2275,21 +2315,30 @@ export const Riders: React.FC = () => {
                               <div className="flex items-start justify-between gap-2">
                                 <div className="flex items-center gap-2.5">
                                   <div className="w-8 h-8 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 font-bold flex items-center justify-center shrink-0 overflow-hidden text-xs">
-                                    {rev.customerPhotoUrl ? (
+                                    {custPhoto ? (
                                       <img
-                                        src={rev.customerPhotoUrl}
-                                        alt={rev.customerName || 'Customer'}
+                                        src={custPhoto}
+                                        alt={custName}
                                         className="w-full h-full object-cover"
                                       />
                                     ) : (
-                                      <span>{(rev.customerName || 'C').charAt(0).toUpperCase()}</span>
+                                      <span>{custName.charAt(0).toUpperCase()}</span>
                                     )}
                                   </div>
                                   <div>
-                                    <div className="font-extrabold text-gray-900 dark:text-white">
-                                      {rev.customerName || 'Delivio Customer'}
+                                    <div className="font-extrabold text-gray-900 dark:text-white flex items-center gap-1.5 flex-wrap">
+                                      <span>{custName}</span>
+                                      {rev.customerId && (
+                                        <span className="font-mono text-[10px] text-gray-400 font-normal">
+                                          ({rev.customerId.substring(0, 8)}...)
+                                        </span>
+                                      )}
                                     </div>
-                                    <div className="text-[10px] text-gray-400">{dateStr}</div>
+                                    <div className="flex items-center gap-2 text-[10px] text-gray-400">
+                                      <span>{dateStr}</span>
+                                      {custEmail && <span>• {custEmail}</span>}
+                                      {custPhone && <span>• {custPhone}</span>}
+                                    </div>
                                   </div>
                                 </div>
 
@@ -2308,8 +2357,8 @@ export const Riders: React.FC = () => {
                               </p>
 
                               {rev.orderNumber && (
-                                <div className="pt-1 border-t border-gray-100 dark:border-zinc-800 text-[10px] text-gray-400">
-                                  <span className="font-mono bg-gray-100 dark:bg-zinc-800 px-1.5 py-0.5 rounded">
+                                <div className="pt-1 border-t border-gray-100 dark:border-zinc-800 text-[10px] text-gray-400 flex items-center gap-2">
+                                  <span className="font-mono font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 px-1.5 py-0.5 rounded">
                                     Trip / Order #{rev.orderNumber}
                                   </span>
                                 </div>
@@ -2375,10 +2424,15 @@ export const Riders: React.FC = () => {
                           </p>
                         </div>
                         <div className="text-right">
-                          <span className="font-bold text-emerald-600">
-                            +₱{Number(ord.riderEarning?.net || 0).toFixed(2)}
+                          <span className="font-bold text-emerald-600 block">
+                            +₱{Number((ord.riderEarning?.net || 0) + (ord.lateTip || 0)).toFixed(2)}
                           </span>
-                          <div className="text-[10px] text-gray-400">
+                          {Number(ord.lateTip || 0) > 0 && (
+                            <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400 block">
+                              Includes ₱{Number(ord.lateTip).toFixed(2)} Late Tip
+                            </span>
+                          )}
+                          <div className="text-[10px] text-gray-400 mt-0.5">
                             {formatRelativeTime(ord.createdAt)}
                           </div>
                         </div>

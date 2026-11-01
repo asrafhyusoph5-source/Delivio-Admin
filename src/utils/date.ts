@@ -83,3 +83,16 @@ export function formatRelativeTime(ts: any): string {
   const diffDays = Math.floor(diffHours / 24);
   return `${diffDays}d ago`;
 }
+
+export function parseDate(ts: any): Date | null {
+  if (!ts) return null;
+  if (typeof ts?.toDate === 'function') return ts.toDate();
+  if (ts instanceof Date) return ts;
+  if (typeof ts === 'number') return new Date(ts);
+  if (typeof ts === 'string') {
+    const d = new Date(ts);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  if (ts?.seconds) return new Date(ts.seconds * 1000);
+  return null;
+}

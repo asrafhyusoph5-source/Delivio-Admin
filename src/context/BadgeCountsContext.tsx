@@ -13,6 +13,7 @@ interface BadgeCountsContextType {
   pendingTierEventsCount: number;
   activeOrdersCount: number;
   onlineRidersCount: number;
+  openTicketsCount: number;
   recentUnreadNotifications: AdminNotification[];
 }
 
@@ -29,6 +30,7 @@ export const BadgeCountsProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [pendingTierEventsCount, setPendingTierEventsCount] = useState(0);
   const [activeOrdersCount, setActiveOrdersCount] = useState(0);
   const [onlineRidersCount, setOnlineRidersCount] = useState(0);
+  const [openTicketsCount, setOpenTicketsCount] = useState(0);
   const [recentUnreadNotifications, setRecentUnreadNotifications] = useState<AdminNotification[]>([]);
 
   useEffect(() => {
@@ -143,6 +145,19 @@ export const BadgeCountsProvider: React.FC<{ children: React.ReactNode }> = ({ c
       (err) => console.error('Error listening to online riders:', err)
     );
 
+    // 8. Open support tickets where status == 'open'
+    const qSupportTickets = query(
+      collection(db, 'supportTickets'),
+      where('status', '==', 'open')
+    );
+    const unsubSupport = onSnapshot(
+      qSupportTickets,
+      (snap) => {
+        setOpenTicketsCount(snap.size);
+      },
+      (err) => console.error('Error listening to support tickets:', err)
+    );
+
     return () => {
       unsubMerchantApps();
       unsubRiderApps();
@@ -151,6 +166,7 @@ export const BadgeCountsProvider: React.FC<{ children: React.ReactNode }> = ({ c
       unsubChange();
       unsubTier();
       unsubRiders();
+      unsubSupport();
     };
   }, [currentUser, adminProfile]);
 
@@ -166,6 +182,7 @@ export const BadgeCountsProvider: React.FC<{ children: React.ReactNode }> = ({ c
         pendingTierEventsCount,
         activeOrdersCount,
         onlineRidersCount,
+        openTicketsCount,
         recentUnreadNotifications
       }}
     >

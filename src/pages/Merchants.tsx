@@ -37,7 +37,8 @@ import type {
   WalletTransaction,
   MerchantWeeklyHours,
   MerchantOperatingDay,
-  Review
+  Review,
+  RiderReview
 } from '../types';
 import { FOOD_CATEGORIES, CONVENIENCE_CATEGORIES } from '../constants';
 import {
@@ -415,9 +416,13 @@ export const Merchants: React.FC = () => {
   const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(null);
   const [activeTab, setActiveTab] = useState<'details' | 'status' | 'location' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet' | 'reviews'>('details');
 
-  // Reviews State
+  // Reviews State (two tabs: from customers, from drivers)
   const [merchantReviews, setMerchantReviews] = useState<Review[]>([]);
   const [loadingMerchantReviews, setLoadingMerchantReviews] = useState(false);
+  const [reviewsTab, setReviewsTab] = useState<'customers' | 'drivers'>('customers');
+  const [driverRiderReviews, setDriverRiderReviews] = useState<RiderReview[]>([]);
+  const [loadingDriverReviews, setLoadingDriverReviews] = useState(false);
+  const [userDirectoryCache, setUserDirectoryCache] = useState<Record<string, { name?: string; email?: string; phone?: string; photoUrl?: string; riderCode?: string; vehicleModel?: string; plate?: string }>>({});
 
   // Operating Hours & AutoSchedule
   const [merchantHours, setMerchantHours] = useState<MerchantWeeklyHours>(DEFAULT_WEEKLY_HOURS);
@@ -664,39 +669,115 @@ export const Merchants: React.FC = () => {
     fetchEditHistory(selectedMerchant.id);
   }, [selectedMerchant]);
 
-  // Fetch Merchant Reviews (reviews where merchantId == shop id; sort in code)
+  // Fetch Merchant Reviews (reviews from customers, and driver ratings from riderReviews; sort in code)
   const fetchMerchantReviews = async (merchantId: string) => {
     try {
       setLoadingMerchantReviews(true);
-      const q = query(
+      setLoadingDriverReviews(true);
+
+      const userIdsToLookup = new Set<string>();
+
+      // 1. Customer reviews from 'reviews' where merchantId == merchantId
+      const qCust = query(
         collection(db, 'reviews'),
         where('merchantId', '==', merchantId),
         limit(100)
       );
-      const snap = await getDocs(q);
-      const list: Review[] = [];
-      snap.forEach((dSnap) => {
-        list.push({ id: dSnap.id, ...dSnap.data() } as Review);
+      const snapCust = await getDocs(qCust);
+      const custList: Review[] = [];
+      snapCust.forEach((dSnap) => {
+        const dt = dSnap.data();
+        custList.push({ id: dSnap.id, ...dt } as Review);
+        if (dt.customerId) userIdsToLookup.add(dt.customerId);
       });
-      // Sort in code by createdAt desc
-      list.sort((a, b) => {
+      custList.sort((a, b) => {
         const tA = parseDate(a.createdAt)?.getTime() || 0;
         const tB = parseDate(b.createdAt)?.getTime() || 0;
         return tB - tA;
       });
-      setMerchantReviews(list);
+      setMerchantReviews(custList);
+
+      // 2. Driver reviews of shops from 'riderReviews' where merchantId == merchantId
+      const qDriver = query(
+        collection(db, 'riderReviews'),
+        where('merchantId', '==', merchantId),
+        limit(100)
+      );
+      const snapDriver = await getDocs(qDriver);
+      const driverList: RiderReview[] = [];
+      snapDriver.forEach((dSnap) => {
+        const dt = dSnap.data();
+        driverList.push({ id: dSnap.id, ...dt } as RiderReview);
+        if (dt.riderId) userIdsToLookup.add(dt.riderId);
+      });
+      driverList.sort((a, b) => {
+        const tA = parseDate(a.createdAt)?.getTime() || 0;
+        const tB = parseDate(b.createdAt)?.getTime() || 0;
+        return tB - tA;
+      });
+      setDriverRiderReviews(driverList);
+
+      // 3. User lookup for customer & driver identity
+      if (userIdsToLookup.size > 0) {
+        setUserDirectoryCache((prevCache) => {
+          const nextCache = { ...prevCache };
+          userIdsToLookup.forEach(async (uid) => {
+            if (!nextCache[uid]) {
+              try {
+                // Try users collection
+                const uDoc = await getDoc(doc(db, 'users', uid));
+                if (uDoc.exists()) {
+                  const uData = uDoc.data();
+                  setUserDirectoryCache((curr) => ({
+                    ...curr,
+                    [uid]: {
+                      name: uData.name,
+                      email: uData.email,
+                      phone: uData.phone,
+                      photoUrl: uData.photoUrl
+                    }
+                  }));
+                } else {
+                  // Try riders collection
+                  const rDoc = await getDoc(doc(db, 'riders', uid));
+                  if (rDoc.exists()) {
+                    const rData = rDoc.data();
+                    setUserDirectoryCache((curr) => ({
+                      ...curr,
+                      [uid]: {
+                        name: rData.name,
+                        email: rData.email,
+                        phone: rData.phone,
+                        photoUrl: rData.photoUrl,
+                        riderCode: rData.riderCode,
+                        vehicleModel: rData.vehicleModel,
+                        plate: rData.plate
+                      }
+                    }));
+                  }
+                }
+              } catch (e) {
+                // Ignore lookup errors
+              }
+            }
+          });
+          return nextCache;
+        });
+      }
     } catch (err) {
       console.error('Error fetching merchant reviews:', err);
     } finally {
       setLoadingMerchantReviews(false);
+      setLoadingDriverReviews(false);
     }
   };
 
-  // Review statistics: average, count, star distribution
+  // Review statistics: average, count, star distribution (based on selected reviewsTab)
   const reviewStats = useMemo(() => {
-    const count = merchantReviews.length;
-    const ratings = merchantReviews
-      .map((r) => Number(r.ratingMerchant ?? r.rating))
+    const list = reviewsTab === 'customers' ? merchantReviews : driverRiderReviews;
+    const count = list.length;
+    const ratings = list
+      .map((r: any) => Number(r.ratingMerchant ?? r.rating))
       .filter((n) => !isNaN(n) && n > 0);
     const avg =
       ratings.length > 0
@@ -708,7 +789,7 @@ export const Merchants: React.FC = () => {
       dist[star] = (dist[star] || 0) + 1;
     });
     return { count, avg, dist, totalRated: ratings.length };
-  }, [merchantReviews]);
+  }, [merchantReviews, driverRiderReviews, reviewsTab]);
 
   // Fetch Merchant Wallet and linked customer
   const fetchMerchantWallet = async (merchant: Merchant) => {
@@ -1240,6 +1321,7 @@ export const Merchants: React.FC = () => {
           sets: (dt.sets || []).map((s: any, idx: number) => ({
             id: s.id || `set_${idx}`,
             name: s.name || '',
+            customName: Boolean(s.customName || s.name === 'Others'),
             required: Boolean(s.required),
             minSelect: typeof s.minSelect === 'number' ? s.minSelect : (s.required ? 1 : 0),
             maxSelect: Math.max(1, Number(s.maxSelect) || 1),
@@ -2049,9 +2131,11 @@ export const Merchants: React.FC = () => {
             available: c.available !== false
           });
         }
+        const isOthersOrCustom = Boolean(s.customName || sName.toLowerCase() === 'others');
         sanitizedSets.push({
           id: s.id || `set_${sIdx}_${Date.now().toString(36)}`,
           name: sName,
+          customName: isOthersOrCustom,
           required: isRequired,
           minSelect: minVal,
           maxSelect: maxVal,
@@ -4157,9 +4241,45 @@ export const Merchants: React.FC = () => {
                 </div>
               )}
 
-              {/* TAB: REVIEWS */}
+              {/* TAB: REVIEWS (Customer and Driver Reviews) */}
               {activeTab === 'reviews' && (
                 <div className="space-y-5">
+                  {/* Sub-tab Selector */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 p-1 bg-gray-100 dark:bg-zinc-800 rounded-xl w-fit">
+                      <button
+                        type="button"
+                        onClick={() => setReviewsTab('customers')}
+                        className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                          reviewsTab === 'customers'
+                            ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-white shadow-xs'
+                            : 'text-gray-500 hover:text-gray-700 dark:text-zinc-400'
+                        }`}
+                      >
+                        From Customers ({merchantReviews.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReviewsTab('drivers')}
+                        className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                          reviewsTab === 'drivers'
+                            ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-white shadow-xs'
+                            : 'text-gray-500 hover:text-gray-700 dark:text-zinc-400'
+                        }`}
+                      >
+                        From Drivers ({driverRiderReviews.length})
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => fetchMerchantReviews(selectedMerchant.id)}
+                      className="text-xs text-amber-600 hover:text-amber-700 font-bold flex items-center gap-1 self-start sm:self-auto"
+                    >
+                      <RotateCw className="w-3.5 h-3.5" /> Refresh Reviews
+                    </button>
+                  </div>
+
                   {/* Rating Header Overview */}
                   <div className="bg-gray-50 dark:bg-zinc-850/60 rounded-2xl p-5 border border-gray-200 dark:border-zinc-800">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
@@ -4181,10 +4301,10 @@ export const Merchants: React.FC = () => {
                         </div>
                         <div>
                           <h4 className="font-extrabold text-base text-gray-900 dark:text-white">
-                            Merchant Rating
+                            {reviewsTab === 'customers' ? 'Customer Rating' : 'Driver Partner Rating'}
                           </h4>
                           <p className="text-xs text-gray-500 dark:text-zinc-400 mt-0.5">
-                            Based on {reviewStats.count} verified customer review{reviewStats.count !== 1 ? 's' : ''}
+                            Based on {reviewStats.count} verified {reviewsTab === 'customers' ? 'customer' : 'driver'} review{reviewStats.count !== 1 ? 's' : ''}
                           </p>
                           <div className="mt-1 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">
                             <Store className="w-3 h-3" />
@@ -4221,100 +4341,210 @@ export const Merchants: React.FC = () => {
                   </div>
 
                   {/* Reviews List */}
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
+                  {reviewsTab === 'customers' ? (
+                    <div className="space-y-3">
                       <h4 className="font-extrabold text-xs uppercase tracking-wider text-gray-500 dark:text-zinc-400">
-                        Customer Feedback ({merchantReviews.length})
+                        Customer Reviews ({merchantReviews.length})
                       </h4>
-                      <button
-                        type="button"
-                        onClick={() => fetchMerchantReviews(selectedMerchant.id)}
-                        className="text-xs text-amber-600 hover:text-amber-700 font-bold flex items-center gap-1"
-                      >
-                        <RotateCw className="w-3 h-3" /> Refresh
-                      </button>
-                    </div>
 
-                    {loadingMerchantReviews ? (
-                      <div className="py-12 flex flex-col items-center justify-center gap-2 text-gray-400 text-xs">
-                        <Loader2 className="w-6 h-6 animate-spin text-amber-500" />
-                        <span>Loading customer reviews...</span>
-                      </div>
-                    ) : merchantReviews.length === 0 ? (
-                      <div className="py-12 text-center bg-gray-50 dark:bg-zinc-850/40 rounded-2xl border border-dashed border-gray-200 dark:border-zinc-800 p-6 space-y-2">
-                        <Star className="w-8 h-8 text-gray-300 dark:text-zinc-700 mx-auto" />
-                        <p className="text-xs font-bold text-gray-600 dark:text-zinc-400">
-                          No reviews recorded yet
-                        </p>
-                        <p className="text-[11px] text-gray-400 max-w-sm mx-auto">
-                          Customer reviews submitted after completed food & convenience orders will appear here.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="space-y-3">
-                        {merchantReviews.map((rev) => {
-                          const mRating = Number(rev.ratingMerchant ?? rev.rating) || 5;
-                          const revDate = parseDate(rev.createdAt);
-                          const dateStr = revDate ? formatRelativeTime(revDate) : 'Recently';
+                      {loadingMerchantReviews ? (
+                        <div className="py-12 flex flex-col items-center justify-center gap-2 text-gray-400 text-xs">
+                          <Loader2 className="w-6 h-6 animate-spin text-amber-500" />
+                          <span>Loading customer reviews...</span>
+                        </div>
+                      ) : merchantReviews.length === 0 ? (
+                        <div className="py-12 text-center bg-gray-50 dark:bg-zinc-850/40 rounded-2xl border border-dashed border-gray-200 dark:border-zinc-800 p-6 space-y-2">
+                          <Star className="w-8 h-8 text-gray-300 dark:text-zinc-700 mx-auto" />
+                          <p className="text-xs font-bold text-gray-600 dark:text-zinc-400">
+                            No customer reviews recorded yet
+                          </p>
+                          <p className="text-[11px] text-gray-400 max-w-sm mx-auto">
+                            Customer ratings and comments submitted on completed orders will appear here.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {merchantReviews.map((rev) => {
+                            const mRating = Number(rev.ratingMerchant ?? rev.rating) || 5;
+                            const revDate = parseDate(rev.createdAt);
+                            const dateStr = revDate ? formatRelativeTime(revDate) : 'Recently';
+                            const cached = rev.customerId ? userDirectoryCache[rev.customerId] : null;
+                            const custName = cached?.name || rev.customerName || 'Delivio Customer';
+                            const custEmail = cached?.email || rev.customerEmail;
+                            const custPhone = cached?.phone || rev.customerPhone;
+                            const custPhoto = cached?.photoUrl || rev.customerPhotoUrl;
 
-                          return (
-                            <div
-                              key={rev.id}
-                              className="p-4 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-2xs space-y-2.5 text-xs"
-                            >
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="flex items-center gap-2.5">
-                                  <div className="w-8 h-8 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 font-bold flex items-center justify-center shrink-0 overflow-hidden text-xs">
-                                    {rev.customerPhotoUrl ? (
-                                      <img
-                                        src={rev.customerPhotoUrl}
-                                        alt={rev.customerName || 'Customer'}
-                                        className="w-full h-full object-cover"
-                                      />
-                                    ) : (
-                                      <span>{(rev.customerName || 'C').charAt(0).toUpperCase()}</span>
-                                    )}
-                                  </div>
-                                  <div>
-                                    <div className="font-extrabold text-gray-900 dark:text-white">
-                                      {rev.customerName || 'Delivio Customer'}
+                            return (
+                              <div
+                                key={rev.id}
+                                className="p-4 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-2xs space-y-2.5 text-xs"
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="flex items-center gap-2.5">
+                                    <div className="w-9 h-9 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 font-bold flex items-center justify-center shrink-0 overflow-hidden text-xs">
+                                      {custPhoto ? (
+                                        <img
+                                          src={custPhoto}
+                                          alt={custName}
+                                          className="w-full h-full object-cover"
+                                        />
+                                      ) : (
+                                        <span>{custName.charAt(0).toUpperCase()}</span>
+                                      )}
                                     </div>
-                                    <div className="text-[10px] text-gray-400">{dateStr}</div>
+                                    <div>
+                                      <div className="font-extrabold text-gray-900 dark:text-white flex items-center gap-1.5 flex-wrap">
+                                        <span>{custName}</span>
+                                        {rev.customerId && (
+                                          <span className="font-mono text-[10px] text-gray-400 font-normal">
+                                            ({rev.customerId.substring(0, 8)}...)
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="flex items-center gap-2 text-[10px] text-gray-400">
+                                        <span>{dateStr}</span>
+                                        {custEmail && <span>• {custEmail}</span>}
+                                        {custPhone && <span>• {custPhone}</span>}
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-1 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 px-2 py-0.5 rounded-lg shrink-0">
+                                    <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                                    <span className="font-black text-amber-900 dark:text-amber-300 text-xs">
+                                      {mRating.toFixed(1)}
+                                    </span>
                                   </div>
                                 </div>
 
-                                <div className="flex items-center gap-1 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 px-2 py-0.5 rounded-lg">
-                                  <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                                  <span className="font-black text-amber-900 dark:text-amber-300 text-xs">
-                                    {mRating.toFixed(1)}
-                                  </span>
+                                <p className="text-gray-700 dark:text-zinc-300 leading-relaxed text-xs">
+                                  {rev.commentMerchant || rev.comment || (
+                                    <span className="italic text-gray-400">No written comment provided</span>
+                                  )}
+                                </p>
+
+                                <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-gray-100 dark:border-zinc-800 text-[10px] text-gray-400">
+                                  {rev.orderNumber && (
+                                    <span className="font-mono font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 px-2 py-0.5 rounded">
+                                      Order #{rev.orderNumber}
+                                    </span>
+                                  )}
+                                  {rev.tags && rev.tags.length > 0 && rev.tags.map((tag, tIdx) => (
+                                    <span key={tIdx} className="bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 px-1.5 py-0.5 rounded font-medium">
+                                      #{tag}
+                                    </span>
+                                  ))}
                                 </div>
                               </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <h4 className="font-extrabold text-xs uppercase tracking-wider text-gray-500 dark:text-zinc-400">
+                        Driver Partner Reviews ({driverRiderReviews.length})
+                      </h4>
 
-                              <p className="text-gray-700 dark:text-zinc-300 leading-relaxed text-xs">
-                                {rev.commentMerchant || rev.comment || (
-                                  <span className="italic text-gray-400">No written comment provided</span>
-                                )}
-                              </p>
+                      {loadingDriverReviews ? (
+                        <div className="py-12 flex flex-col items-center justify-center gap-2 text-gray-400 text-xs">
+                          <Loader2 className="w-6 h-6 animate-spin text-amber-500" />
+                          <span>Loading driver partner reviews...</span>
+                        </div>
+                      ) : driverRiderReviews.length === 0 ? (
+                        <div className="py-12 text-center bg-gray-50 dark:bg-zinc-850/40 rounded-2xl border border-dashed border-gray-200 dark:border-zinc-800 p-6 space-y-2">
+                          <Star className="w-8 h-8 text-gray-300 dark:text-zinc-700 mx-auto" />
+                          <p className="text-xs font-bold text-gray-600 dark:text-zinc-400">
+                            No driver partner reviews recorded yet
+                          </p>
+                          <p className="text-[11px] text-gray-400 max-w-sm mx-auto">
+                            Reviews and feedback submitted by delivery drivers regarding kitchen wait times and pickup experience will appear here.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {driverRiderReviews.map((rev) => {
+                            const dRating = Number(rev.ratingMerchant ?? rev.rating) || 5;
+                            const revDate = parseDate(rev.createdAt);
+                            const dateStr = revDate ? formatRelativeTime(revDate) : 'Recently';
+                            const cached = rev.riderId ? userDirectoryCache[rev.riderId] : null;
+                            const driverName = cached?.name || rev.riderName || 'Delivio Driver';
+                            const driverCode = cached?.riderCode || rev.riderCode;
+                            const driverPhone = cached?.phone;
+                            const driverVehicle = cached?.vehicleModel
+                              ? `${cached.vehicleModel}${cached.plate ? ` (${cached.plate})` : ''}`
+                              : null;
+                            const driverPhoto = cached?.photoUrl;
 
-                              <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-gray-100 dark:border-zinc-800 text-[10px] text-gray-400">
-                                {rev.orderNumber && (
-                                  <span className="font-mono bg-gray-100 dark:bg-zinc-800 px-1.5 py-0.5 rounded">
-                                    Order #{rev.orderNumber}
-                                  </span>
-                                )}
-                                {rev.tags && rev.tags.length > 0 && rev.tags.map((tag, tIdx) => (
-                                  <span key={tIdx} className="bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 px-1.5 py-0.5 rounded font-medium">
-                                    #{tag}
-                                  </span>
-                                ))}
+                            return (
+                              <div
+                                key={rev.id}
+                                className="p-4 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-2xs space-y-2.5 text-xs"
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="flex items-center gap-2.5">
+                                    <div className="w-9 h-9 rounded-full bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 font-bold flex items-center justify-center shrink-0 overflow-hidden text-xs">
+                                      {driverPhoto ? (
+                                        <img
+                                          src={driverPhoto}
+                                          alt={driverName}
+                                          className="w-full h-full object-cover"
+                                        />
+                                      ) : (
+                                        <span>{driverName.charAt(0).toUpperCase()}</span>
+                                      )}
+                                    </div>
+                                    <div>
+                                      <div className="font-extrabold text-gray-900 dark:text-white flex items-center gap-2 flex-wrap">
+                                        <span>{driverName}</span>
+                                        {driverCode && (
+                                          <span className="font-mono text-[10px] font-bold px-1.5 py-0.2 bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 rounded">
+                                            {driverCode}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="flex items-center gap-2 text-[10px] text-gray-400">
+                                        <span>{dateStr}</span>
+                                        {driverPhone && <span>• {driverPhone}</span>}
+                                        {driverVehicle && <span>• {driverVehicle}</span>}
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-1 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/60 px-2 py-0.5 rounded-lg shrink-0">
+                                    <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                                    <span className="font-black text-emerald-900 dark:text-emerald-300 text-xs">
+                                      {dRating.toFixed(1)}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <p className="text-gray-700 dark:text-zinc-300 leading-relaxed text-xs">
+                                  {rev.comment || rev.commentMerchant || (
+                                    <span className="italic text-gray-400">No written feedback provided</span>
+                                  )}
+                                </p>
+
+                                <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-gray-100 dark:border-zinc-800 text-[10px] text-gray-400">
+                                  {rev.orderNumber && (
+                                    <span className="font-mono font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 px-2 py-0.5 rounded">
+                                      Trip / Order #{rev.orderNumber}
+                                    </span>
+                                  )}
+                                  {rev.waitDurationMinutes !== undefined && (
+                                    <span className="bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 px-1.5 py-0.5 rounded font-medium">
+                                      Wait: {rev.waitDurationMinutes} mins
+                                    </span>
+                                  )}
+                                </div>
                               </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -4567,9 +4797,10 @@ export const Merchants: React.FC = () => {
                                 value={s.name}
                                 onChange={(e) => {
                                   const val = e.target.value;
+                                  const isCustom = val.toLowerCase() === 'others' || (!subcategories.some((sub) => sub.name === val) && val !== '');
                                   setItemSets((prev) =>
                                     prev.map((item, idx) =>
-                                      idx === sIdx ? { ...item, name: val } : item
+                                      idx === sIdx ? { ...item, name: val, customName: isCustom } : item
                                     )
                                   );
                                 }}
@@ -4582,7 +4813,8 @@ export const Merchants: React.FC = () => {
                                     {sub.name}
                                   </option>
                                 ))}
-                                {s.name && !subcategories.some((sub) => sub.name === s.name) && (
+                                <option value="Others">Others (Custom Name)</option>
+                                {s.name && s.name !== 'Others' && !subcategories.some((sub) => sub.name === s.name) && (
                                   <option value={s.name}>{s.name} (Custom)</option>
                                 )}
                               </select>

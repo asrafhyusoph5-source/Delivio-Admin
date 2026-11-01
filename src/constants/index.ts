@@ -1,16 +1,12 @@
 import { OrderServiceType } from '../types';
 
 export const FOOD_CATEGORIES = [
-  'Fast Food',
-  'Filipino',
-  'Asian',
-  'Pizza & Pasta',
-  'Burgers & Sandwiches',
-  'Milk Tea & Coffee',
-  'Desserts & Pastries',
-  'Halal',
-  'Healthy & Vegetarian',
-  'Bar & Beverages'
+  'Dessert',
+  'Burgers',
+  'Pizza',
+  'Chicken',
+  'Drinks',
+  'Others'
 ] as const;
 
 export type FoodCategory = typeof FOOD_CATEGORIES[number];
@@ -157,4 +153,27 @@ export const DEFAULT_TAXI_RATES: Record<VehicleType, {
     commissionPercent: 15
   }
 };
+
+export const SUPPORT_TICKET_REASONS = [
+  'Missing Order',
+  'Not My Order',
+  'I Did Not Receive My Order',
+  'Wrong or Damaged Items',
+  'Order Is Late',
+  'Rider or Driver Issue',
+  'Payment or Refund Problem',
+  'Other'
+] as const;
+
+export type SupportTicketReason = typeof SUPPORT_TICKET_REASONS[number];
+
+export const SUPPORT_CANNED_REPLIES = [
+  'Hello! I am reviewing your order details and escalating this with the driver and merchant right now.',
+  'We have processed a full wallet refund for your order. The funds are now available in your Delivio Wallet.',
+  'We sincerely apologize for the delay. The driver is currently in transit to your drop-off location.',
+  'Thank you for providing the photos. We are issuing a credit for the missing/damaged items.',
+  'We have contacted the store and driver regarding your report. Your issue is being addressed immediately.',
+  'Your order has been cancelled and any paid amount has been returned to your wallet balance.',
+  'Thank you for reaching out to Delivio Support. This report has been investigated and resolved.'
+];
 

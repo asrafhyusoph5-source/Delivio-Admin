@@ -20,6 +20,7 @@ import { Applications } from './pages/Applications';
 import { DeliveryRates } from './pages/DeliveryRates';
 import { BannersPromos } from './pages/BannersPromos';
 import { Inbox } from './pages/Inbox';
+import { Support } from './pages/Support';
 import { TiersCoins } from './pages/TiersCoins';
 import { Notifications } from './pages/Notifications';
 import { Reports } from './pages/Reports';
@@ -53,6 +54,7 @@ export default function App() {
                     <Route path="services-by-city" element={<ServicesByCity />} />
                     <Route path="banners" element={<BannersPromos />} />
                     <Route path="inbox" element={<Inbox />} />
+                    <Route path="support" element={<Support />} />
                     <Route path="tiers" element={<TiersCoins />} />
                     <Route path="notifications" element={<Notifications />} />
                     <Route path="reports" element={<Reports />} />
