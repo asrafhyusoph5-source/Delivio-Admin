@@ -28,7 +28,8 @@ import {
   Award,
   FileCheck,
   RefreshCw,
-  Layers
+  Layers,
+  Zap
 } from 'lucide-react';
 import {
   AreaChart,
@@ -101,6 +102,7 @@ export const Dashboard: React.FC = () => {
           cityId: d.cityId || '',
           cancelReason: d.cancelReason,
           cancelFault: d.cancelFault,
+          deliveryOption: d.deliveryOption,
           createdAt: d.createdAt,
           deliveredAt: d.deliveredAt
         });
@@ -185,6 +187,7 @@ export const Dashboard: React.FC = () => {
             createdAt: data.createdAt,
             cityId: data.cityId || '',
             fees: data.fees,
+            deliveryOption: data.deliveryOption,
             isPickup: Boolean(data.isPickup || data.fulfillmentType === 'pickup' || data.serviceType === 'pickup'),
             fulfillmentType: data.fulfillmentType,
             customerName: data.customerName || 'Customer',
@@ -387,6 +390,42 @@ export const Dashboard: React.FC = () => {
       .sort((a, b) => b.count - a.count)
       .slice(0, 6);
   }, [orders, cities]);
+
+  // Orders by delivery option (Priority, Standard, Saver)
+  const deliveryOptionData = useMemo(() => {
+    let priority = 0;
+    let standard = 0;
+    let saver = 0;
+
+    filteredOrders.forEach((o) => {
+      if (o.isPickup || o.fulfillmentType === 'pickup') return;
+      const opt = (o.deliveryOption || 'standard').toLowerCase();
+      if (opt === 'priority') {
+        priority++;
+      } else if (opt === 'saver') {
+        saver++;
+      } else {
+        standard++;
+      }
+    });
+
+    const total = priority + standard + saver;
+
+    return {
+      total,
+      priority,
+      standard,
+      saver,
+      priorityPct: total > 0 ? Math.round((priority / total) * 100) : 0,
+      standardPct: total > 0 ? Math.round((standard / total) * 100) : 0,
+      saverPct: total > 0 ? Math.round((saver / total) * 100) : 0,
+      chartData: [
+        { name: 'Priority (Direct)', value: priority, color: '#f43f5e' },
+        { name: 'Standard (Pool)', value: standard, color: '#3b82f6' },
+        { name: 'Saver (Max Batch)', value: saver, color: '#10b981' }
+      ]
+    };
+  }, [filteredOrders]);
 
   // Orders waiting for driver over 5 minutes
   const waitingOrdersOver5Min = useMemo(() => {
@@ -815,6 +854,108 @@ export const Dashboard: React.FC = () => {
                 <span className="font-bold text-gray-900 dark:text-white">{item.value}</span>
               </div>
             ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Orders by Delivery Option Widget */}
+      <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-5 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h3 className="font-bold text-gray-900 dark:text-white text-base flex items-center gap-2">
+              <Zap className="w-5 h-5 text-amber-500 fill-amber-500" />
+              Orders by Delivery Option
+            </h3>
+            <p className="text-xs text-gray-500 dark:text-zinc-400">
+              Customer option selection breakdown across Priority (direct), Standard (pooled), and Saver (economy)
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5 self-start sm:self-auto px-3 py-1 rounded-full bg-gray-100 dark:bg-zinc-800 text-xs font-bold text-gray-700 dark:text-zinc-300">
+            <span>{deliveryOptionData.total} Total Delivery Orders</span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {/* Priority Card */}
+          <div className="p-4 rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/20 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="font-extrabold text-xs text-rose-900 dark:text-rose-200 flex items-center gap-1">
+                <Zap className="w-3.5 h-3.5 text-rose-600 fill-rose-500" />
+                Priority (Direct)
+              </span>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 dark:bg-rose-900/60 dark:text-rose-300 border border-rose-300 dark:border-rose-800">
+                {deliveryOptionData.priorityPct}%
+              </span>
+            </div>
+            <div className="text-2xl font-black text-rose-950 dark:text-rose-100">
+              {deliveryOptionData.priority} <span className="text-xs font-semibold text-rose-600 dark:text-rose-400">orders</span>
+            </div>
+            <p className="text-[11px] text-rose-700/80 dark:text-rose-400/80">
+              0 min hold • 1 max batch • Dedicated rider
+            </p>
+          </div>
+
+          {/* Standard Card */}
+          <div className="p-4 rounded-xl border border-blue-200 dark:border-blue-900/60 bg-blue-50/50 dark:bg-blue-950/20 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="font-extrabold text-xs text-blue-900 dark:text-blue-200 flex items-center gap-1">
+                <Clock className="w-3.5 h-3.5 text-blue-600" />
+                Standard (Pool)
+              </span>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-300 border border-blue-300 dark:border-blue-800">
+                {deliveryOptionData.standardPct}%
+              </span>
+            </div>
+            <div className="text-2xl font-black text-blue-950 dark:text-blue-100">
+              {deliveryOptionData.standard} <span className="text-xs font-semibold text-blue-600 dark:text-blue-400">orders</span>
+            </div>
+            <p className="text-[11px] text-blue-700/80 dark:text-blue-400/80">
+              5 min hold • 2 max batch • Balanced dispatch
+            </p>
+          </div>
+
+          {/* Saver Card */}
+          <div className="p-4 rounded-xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/50 dark:bg-emerald-950/20 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="font-extrabold text-xs text-emerald-900 dark:text-emerald-200 flex items-center gap-1">
+                <Layers className="w-3.5 h-3.5 text-emerald-600" />
+                Saver (Economy)
+              </span>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
+                {deliveryOptionData.saverPct}%
+              </span>
+            </div>
+            <div className="text-2xl font-black text-emerald-950 dark:text-emerald-100">
+              {deliveryOptionData.saver} <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">orders</span>
+            </div>
+            <p className="text-[11px] text-emerald-700/80 dark:text-emerald-400/80">
+              10 min hold • 3 max batch • Economy batching
+            </p>
+          </div>
+        </div>
+
+        {/* Option Distribution Bar */}
+        <div className="space-y-1.5 pt-1">
+          <div className="flex items-center justify-between text-[11px] font-semibold text-gray-500">
+            <span>Option Distribution</span>
+            <span>{deliveryOptionData.total} delivery orders</span>
+          </div>
+          <div className="h-3 w-full rounded-full bg-gray-100 dark:bg-zinc-800 overflow-hidden flex">
+            <div
+              style={{ width: `${deliveryOptionData.priorityPct}%` }}
+              className="bg-rose-500 h-full transition-all duration-300"
+              title={`Priority: ${deliveryOptionData.priorityPct}%`}
+            />
+            <div
+              style={{ width: `${deliveryOptionData.standardPct}%` }}
+              className="bg-blue-500 h-full transition-all duration-300"
+              title={`Standard: ${deliveryOptionData.standardPct}%`}
+            />
+            <div
+              style={{ width: `${deliveryOptionData.saverPct}%` }}
+              className="bg-emerald-500 h-full transition-all duration-300"
+              title={`Saver: ${deliveryOptionData.saverPct}%`}
+            />
           </div>
         </div>
       </div>

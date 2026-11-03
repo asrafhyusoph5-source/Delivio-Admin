@@ -101,6 +101,33 @@ export interface Order {
   isPickup?: boolean;
   scheduledFor?: any;
   lateTip?: number;
+  deliveryOption?: DeliveryOptionType | string;
+  holdUntil?: any;
+  holdMinutes?: number;
+  batchId?: string | null;
+  bookingRank?: number;
+  batchTotalBookings?: number;
+  splitOf?: string | null;
+  splitOut?: {
+    childOrderId: string;
+    items: any[];
+    at: any;
+    by: string;
+  } | string | null;
+  isSplitChild?: boolean;
+  excludeRiderIds?: string[];
+  sourceCustomerId?: string | null;
+  sourceMerchantId?: string | null;
+  riderFeeFixed?: number;
+  dispatch?: any;
+  searchRadiusKm?: number;
+  riderFeeEstimate?: {
+    pickupFee?: number;
+    bookingFee?: number;
+    specialRadiusExtra?: number;
+    total?: number;
+    [key: string]: any;
+  };
   customerId: string;
   customerName: string;
   customerPhone?: string;
@@ -134,7 +161,11 @@ export interface Order {
     commissionPercent: number;
     tip: number;
     net: number;
+    total?: number;
     lateTip?: number;
+    pickupFee?: number;
+    bookingFee?: number;
+    specialRadiusExtra?: number;
   };
   status: OrderStatus;
   statusHistory: OrderStatusHistoryItem[];
@@ -275,7 +306,17 @@ export interface Merchant {
   pauseUntilTime?: any;
   closedUntil?: any;
   openUntil?: any;
+  specialRadius?: MerchantSpecialRadius;
   createdAt?: any;
+}
+
+export interface MerchantSpecialRadius {
+  enabled: boolean;
+  radiusKm: number;
+  customerExtraFee: number; // ₱
+  riderExtraFee: number; // ₱
+  updatedAt?: any;
+  updatedBy?: string;
 }
 
 export interface MenuChoice {
@@ -458,6 +499,7 @@ export interface DeliveryRatesConfig {
   request_rider: ServiceRates;
   services?: Record<string, ServiceRates>;
   rideRates?: Record<string, TaxiVehicleFareConfig>;
+  riderPay?: RiderPayConfig;
   riderCommissionPercent: number;
   surcharges: {
     peak: {
@@ -470,6 +512,28 @@ export interface DeliveryRatesConfig {
     };
   };
   updatedAt?: any;
+}
+
+export interface RiderPayFareTier {
+  minFare: number;
+  includedKm: number;
+  perKmExtra: number;
+}
+
+export interface RiderPayPickupTier {
+  minFare: number;
+  freeKm: number;
+  perKmExtra: number;
+}
+
+export interface RiderPayConfig {
+  single: RiderPayFareTier;
+  double: {
+    first: RiderPayFareTier;
+    second: RiderPayFareTier;
+    third: RiderPayFareTier;
+  };
+  pickup: RiderPayPickupTier;
 }
 
 export interface ApplicationDocument {
@@ -685,18 +749,27 @@ export type SupportTicketStatus = 'open' | 'accepted' | 'in_progress' | 'resolve
 
 export interface SupportTicket {
   id: string;
+  reporterType?: 'customer' | 'rider';
+  riderId?: string;
+  riderName?: string;
+  riderPhone?: string;
   title: string;
-  reason: string; // Missing Order, Not My Order, I Did Not Receive My Order, Wrong or Damaged Items, Order Is Late, Rider or Driver Issue, Payment or Refund Problem, Other
+  reason: string;
+  reasonLabel?: string;
   status: SupportTicketStatus;
-  customerId: string;
-  customerName: string;
+  customerId?: string;
+  customerName?: string;
   customerEmail?: string;
   customerPhone?: string;
   orderId?: string;
   orderNumber?: string;
+  batchId?: string;
   serviceType?: OrderServiceType | string;
+  splitItems?: any[];
+  splitChildOrderId?: string;
   unreadByAdmin?: boolean;
   unreadByCustomer?: boolean;
+  unreadByRider?: boolean;
   lastMessageAt?: any;
   lastMessagePreview?: string;
   acceptedAt?: any;
@@ -734,5 +807,31 @@ export interface RiderReview {
   waitDurationMinutes?: number;
   tags?: string[];
   createdAt: any;
+}
+
+export type DeliveryOptionType = 'priority' | 'standard' | 'saver';
+
+export interface DispatchOptionConfig {
+  label: string;
+  enabled: boolean;
+  holdMinutes: number; // priority 0, standard 5, saver 10
+  maxBatch: number; // priority 1, standard 2, saver 3
+  feeAdjustType: 'flat' | 'percent';
+  feeAdjustValue: number; // priority +22, standard 0, saver -15
+}
+
+export interface DispatchSettings {
+  defaultOption: DeliveryOptionType;
+  options: {
+    priority: DispatchOptionConfig;
+    standard: DispatchOptionConfig;
+    saver: DispatchOptionConfig;
+  };
+  searchRadiusKm: number; // default 5
+  waveSeconds: number; // default 8
+  poolMaxPickupGapKm: number; // default 1.5
+  poolMaxDropoffGapKm: number; // default 3
+  updatedAt?: any;
+  updatedBy?: string;
 }
 

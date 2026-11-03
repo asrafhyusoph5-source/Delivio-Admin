@@ -27,7 +27,16 @@ import {
   Phone,
   Mail,
   MapPin,
-  Maximize2
+  Maximize2,
+  Layers,
+  Split,
+  PackageX,
+  CheckSquare,
+  Square,
+  Truck,
+  Users,
+  ShieldAlert,
+  ArrowRight
 } from 'lucide-react';
 import {
   db,
@@ -42,13 +51,19 @@ import {
   onSnapshot,
   Timestamp,
   runTransaction,
+  writeBatch,
   arrayUnion,
   increment
 } from '../firebase';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { useCity } from '../context/CityContext';
-import { SUPPORT_TICKET_REASONS, SUPPORT_CANNED_REPLIES } from '../constants';
+import {
+  SUPPORT_TICKET_REASONS,
+  SUPPORT_CANNED_REPLIES,
+  DRIVER_SUPPORT_REASONS,
+  DRIVER_CANNED_REPLIES
+} from '../constants';
 import { compressImageToDataUri } from '../utils/imageCompressor';
 import { formatRelativeTime, formatTimestamp, parseDate } from '../utils/date';
 import type { SupportTicket, SupportTicketMessage, Order, SupportTicketStatus } from '../types';
@@ -58,6 +73,9 @@ export const Support: React.FC = () => {
   const { showSuccess, showError } = useToast();
   const { selectedCityId } = useCity();
   const navigate = useNavigate();
+
+  // Audience toggle: Customers vs Drivers
+  const [supportAudience, setSupportAudience] = useState<'customer' | 'rider'>('customer');
 
   // Tickets state
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
@@ -74,6 +92,17 @@ export const Support: React.FC = () => {
   const [selectedTicket, setSelectedTicket] = useState<SupportTicket | null>(null);
   const [relatedOrder, setRelatedOrder] = useState<Order | null>(null);
   const [loadingOrder, setLoadingOrder] = useState(false);
+
+  // Split Delivery Child Order live tracking
+  const [splitChildOrder, setSplitChildOrder] = useState<Order | null>(null);
+  const [loadingChildOrder, setLoadingChildOrder] = useState(false);
+
+  // Split Delivery Modal
+  const [splitModalOpen, setSplitModalOpen] = useState(false);
+  const [selectedSplitItemIndices, setSelectedSplitItemIndices] = useState<number[]>([]);
+  const [splitRiderFee, setSplitRiderFee] = useState<number>(45);
+  const [splittingDelivery, setSplittingDelivery] = useState(false);
+  const [cancellingSplit, setCancellingSplit] = useState(false);
 
   // Chat thread
   const [messages, setMessages] = useState<SupportTicketMessage[]>([]);
@@ -116,20 +145,30 @@ export const Support: React.FC = () => {
         const list: SupportTicket[] = [];
         snapshot.forEach((d) => {
           const dt = d.data();
+          const isDriver = dt.reporterType === 'rider' || Boolean(dt.riderId && !dt.customerId);
           list.push({
             id: d.id,
-            title: dt.title || `Ticket #${d.id.slice(0, 6)}`,
+            reporterType: isDriver ? 'rider' : 'customer',
+            riderId: dt.riderId,
+            riderName: dt.riderName || (isDriver ? 'Driver' : undefined),
+            riderPhone: dt.riderPhone,
+            title: dt.title || (isDriver ? `Driver Report #${d.id.slice(0, 6)}` : `Ticket #${d.id.slice(0, 6)}`),
             reason: dt.reason || 'Other',
+            reasonLabel: dt.reasonLabel,
             status: dt.status || 'open',
             customerId: dt.customerId || '',
-            customerName: dt.customerName || 'Customer',
+            customerName: dt.customerName || (isDriver ? undefined : 'Customer'),
             customerEmail: dt.customerEmail,
             customerPhone: dt.customerPhone,
             orderId: dt.orderId,
             orderNumber: dt.orderNumber,
+            batchId: dt.batchId,
             serviceType: dt.serviceType,
+            splitItems: dt.splitItems || [],
+            splitChildOrderId: dt.splitChildOrderId,
             unreadByAdmin: Boolean(dt.unreadByAdmin),
             unreadByCustomer: Boolean(dt.unreadByCustomer),
+            unreadByRider: Boolean(dt.unreadByRider),
             lastMessageAt: dt.lastMessageAt || dt.createdAt,
             lastMessagePreview: dt.lastMessagePreview,
             acceptedAt: dt.acceptedAt,
@@ -142,7 +181,7 @@ export const Support: React.FC = () => {
           });
         });
 
-        // Sort in code by lastMessageAt or createdAt desc
+        // Sort in code by lastMessageAt or createdAt desc (no composite query required)
         list.sort((a, b) => {
           const tA = parseDate(a.lastMessageAt || a.createdAt)?.getTime() || 0;
           const tB = parseDate(b.lastMessageAt || b.createdAt)?.getTime() || 0;
@@ -156,10 +195,6 @@ export const Support: React.FC = () => {
         if (selectedTicketId) {
           const updated = list.find((t) => t.id === selectedTicketId);
           if (updated) setSelectedTicket(updated);
-        } else if (list.length > 0 && !selectedTicketId) {
-          // Auto-select first ticket on wide screens
-          setSelectedTicketId(list[0].id);
-          setSelectedTicket(list[0]);
         }
       },
       (err) => {
@@ -170,6 +205,33 @@ export const Support: React.FC = () => {
 
     return () => unsubscribe();
   }, [selectedTicketId]);
+
+  // Audience splits
+  const customerTickets = useMemo(() => tickets.filter((t) => t.reporterType !== 'rider'), [tickets]);
+  const driverTickets = useMemo(() => tickets.filter((t) => t.reporterType === 'rider'), [tickets]);
+  const currentAudienceTickets = supportAudience === 'rider' ? driverTickets : customerTickets;
+
+  const openCustomerTicketsCount = useMemo(
+    () => customerTickets.filter((t) => t.status === 'open').length,
+    [customerTickets]
+  );
+  const openDriverTicketsCount = useMemo(
+    () => driverTickets.filter((t) => t.status === 'open').length,
+    [driverTickets]
+  );
+
+  // Auto-select first ticket in current audience if none or wrong audience selected
+  useEffect(() => {
+    if (currentAudienceTickets.length > 0) {
+      if (!selectedTicket || selectedTicket.reporterType !== supportAudience) {
+        setSelectedTicketId(currentAudienceTickets[0].id);
+        setSelectedTicket(currentAudienceTickets[0]);
+      }
+    } else {
+      setSelectedTicketId(null);
+      setSelectedTicket(null);
+    }
+  }, [supportAudience, tickets]);
 
   // 2. Listen to messages for the selected ticket
   useEffect(() => {
@@ -245,10 +307,7 @@ export const Support: React.FC = () => {
         }
         // Fallback by orderNumber
         if (selectedTicket.orderNumber) {
-          const qOrder = query(
-            collection(db, 'orders'),
-            limit(1)
-          );
+          const qOrder = query(collection(db, 'orders'), limit(1));
           const snaps = await getDocs(qOrder);
           let found: Order | null = null;
           snaps.forEach((d) => {
@@ -269,54 +328,425 @@ export const Support: React.FC = () => {
     loadOrder();
   }, [selectedTicket?.orderId, selectedTicket?.orderNumber]);
 
-  // Reason counts
-  const reasonCounts = useMemo(() => {
+  // 4. Listen to child order live status (if split delivery created)
+  useEffect(() => {
+    const childId = selectedTicket?.splitChildOrderId || (relatedOrder?.splitOut as any)?.childOrderId;
+    if (!childId) {
+      setSplitChildOrder(null);
+      return;
+    }
+
+    setLoadingChildOrder(true);
+    const childRef = doc(db, 'orders', childId);
+    const unsubChild = onSnapshot(
+      childRef,
+      (snap) => {
+        if (snap.exists()) {
+          setSplitChildOrder({ id: snap.id, ...snap.data() } as Order);
+        } else {
+          setSplitChildOrder(null);
+        }
+        setLoadingChildOrder(false);
+      },
+      (err) => {
+        console.warn('Error loading split child order:', err);
+        setLoadingChildOrder(false);
+      }
+    );
+
+    return () => unsubChild();
+  }, [selectedTicket?.splitChildOrderId, relatedOrder?.splitOut]);
+
+  // Reason counts per audience
+  const customerReasonCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     SUPPORT_TICKET_REASONS.forEach((r) => {
       counts[r] = 0;
     });
-    tickets.forEach((t) => {
+    customerTickets.forEach((t) => {
       if (counts[t.reason] !== undefined) {
         counts[t.reason]++;
+      } else {
+        counts['Other'] = (counts['Other'] || 0) + 1;
       }
     });
     return counts;
-  }, [tickets]);
+  }, [customerTickets]);
 
-  // Filtered tickets list
-  const filteredTickets = useMemo(() => {
-    return tickets.filter((t) => {
-      // Reason filter
-      if (activeReasonTab !== 'all' && t.reason !== activeReasonTab) {
-        return false;
+  const driverReasonCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    DRIVER_SUPPORT_REASONS.forEach((r) => {
+      counts[r.id] = 0;
+    });
+    driverTickets.forEach((t) => {
+      const match = DRIVER_SUPPORT_REASONS.find(
+        (r) => r.id === t.reason || r.label === t.reason || r.id === t.reasonLabel || r.label === t.reasonLabel
+      );
+      if (match) {
+        counts[match.id]++;
+      } else {
+        counts['other'] = (counts['other'] || 0) + 1;
       }
+    });
+    return counts;
+  }, [driverTickets]);
+
+  // Filtered tickets list for active audience
+  const filteredTickets = useMemo(() => {
+    return currentAudienceTickets.filter((t) => {
+      // Reason filter
+      if (activeReasonTab !== 'all') {
+        if (supportAudience === 'customer') {
+          if (t.reason !== activeReasonTab) return false;
+        } else {
+          const match = DRIVER_SUPPORT_REASONS.find((r) => r.id === activeReasonTab);
+          const matches =
+            t.reason === activeReasonTab ||
+            (match && t.reason === match.label) ||
+            t.reasonLabel === activeReasonTab ||
+            (match && t.reasonLabel === match.label);
+          if (!matches) return false;
+        }
+      }
+
       // Status filter
       if (statusFilter !== 'all') {
         if (statusFilter === 'open' && t.status !== 'open') return false;
         if (statusFilter === 'in_progress' && t.status !== 'accepted' && t.status !== 'in_progress') return false;
         if (statusFilter === 'resolved' && t.status !== 'resolved') return false;
       }
+
       // Service filter
       if (serviceFilter !== 'all') {
         const srv = (t.serviceType || relatedOrder?.serviceType || '').toLowerCase();
         if (srv !== serviceFilter.toLowerCase()) return false;
       }
-      // Search
+
+      // Search query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const matchesTitle = t.title.toLowerCase().includes(q);
-        const matchesReason = t.reason.toLowerCase().includes(q);
-        const matchesCustomer = t.customerName.toLowerCase().includes(q);
+        const matchesReason = (t.reason || '').toLowerCase().includes(q);
+        const matchesReasonLabel = (t.reasonLabel || '').toLowerCase().includes(q);
+        const matchesCustomer = (t.customerName || '').toLowerCase().includes(q);
+        const matchesRider = (t.riderName || '').toLowerCase().includes(q);
         const matchesEmail = (t.customerEmail || '').toLowerCase().includes(q);
         const matchesOrder = (t.orderNumber || '').toLowerCase().includes(q);
+        const matchesBatch = (t.batchId || '').toLowerCase().includes(q);
         const matchesId = t.id.toLowerCase().includes(q);
-        if (!matchesTitle && !matchesReason && !matchesCustomer && !matchesEmail && !matchesOrder && !matchesId) {
+
+        if (
+          !matchesTitle &&
+          !matchesReason &&
+          !matchesReasonLabel &&
+          !matchesCustomer &&
+          !matchesRider &&
+          !matchesEmail &&
+          !matchesOrder &&
+          !matchesBatch &&
+          !matchesId
+        ) {
           return false;
         }
       }
       return true;
     });
-  }, [tickets, activeReasonTab, statusFilter, serviceFilter, searchQuery, relatedOrder]);
+  }, [
+    currentAudienceTickets,
+    activeReasonTab,
+    statusFilter,
+    serviceFilter,
+    searchQuery,
+    supportAudience,
+    relatedOrder
+  ]);
+
+  // Helper to get friendly reason label
+  const getTicketReasonDisplay = (ticket: SupportTicket) => {
+    if (ticket.reporterType === 'rider') {
+      const match = DRIVER_SUPPORT_REASONS.find(
+        (r) => r.id === ticket.reason || r.label === ticket.reason || r.id === ticket.reasonLabel
+      );
+      return match ? match.label : ticket.reasonLabel || ticket.reason;
+    }
+    return ticket.reason;
+  };
+
+  // Determine if Split Delivery button is available
+  const canSplitDelivery = useMemo(() => {
+    if (!selectedTicket) return false;
+    // food and convenience only
+    const srv = (selectedTicket.serviceType || relatedOrder?.serviceType || '').toLowerCase();
+    if (srv !== 'food' && srv !== 'convenience') return false;
+    // only on an accepted ticket
+    if (selectedTicket.status !== 'accepted' && selectedTicket.status !== 'in_progress') return false;
+    // tickets with reason cant_fit_bag or too_big
+    const r = (selectedTicket.reason || '').toLowerCase();
+    const rLabel = (selectedTicket.reasonLabel || '').toLowerCase();
+    const isSplitReason =
+      r === 'cant_fit_bag' ||
+      r === 'too_big' ||
+      r.includes('bag') ||
+      r.includes('heavy') ||
+      r.includes('big') ||
+      rLabel.includes('bag') ||
+      rLabel.includes('heavy');
+    if (!isSplitReason) return false;
+    // not already split
+    if (selectedTicket.splitChildOrderId || (relatedOrder?.splitOut as any)?.childOrderId) return false;
+    return true;
+  }, [selectedTicket, relatedOrder]);
+
+  // Candidate items available to split
+  const candidateItems = useMemo(() => {
+    if (relatedOrder?.items && relatedOrder.items.length > 0) {
+      return relatedOrder.items;
+    }
+    if (selectedTicket?.splitItems && selectedTicket.splitItems.length > 0) {
+      return selectedTicket.splitItems;
+    }
+    return [];
+  }, [relatedOrder, selectedTicket]);
+
+  // Open Split Delivery modal and preselect items
+  const handleOpenSplitModal = () => {
+    if (!selectedTicket) return;
+
+    // Default pre-select: if ticket has splitItems, select matching indexes; otherwise select all
+    if (selectedTicket.splitItems && selectedTicket.splitItems.length > 0 && candidateItems.length > 0) {
+      const preselected: number[] = [];
+      const reportedNames = selectedTicket.splitItems.map((i: any) => (i.name || '').toLowerCase().trim());
+      candidateItems.forEach((item, idx) => {
+        if (reportedNames.includes((item.name || '').toLowerCase().trim())) {
+          preselected.push(idx);
+        }
+      });
+      setSelectedSplitItemIndices(preselected.length > 0 ? preselected : [0]);
+    } else {
+      setSelectedSplitItemIndices(candidateItems.map((_, idx) => idx));
+    }
+
+    // Default rider fee: parent riderFeeEstimate total || deliveryFee || 45
+    const defaultFee =
+      relatedOrder?.riderFeeEstimate?.total ||
+      relatedOrder?.fees?.deliveryFee ||
+      45;
+    setSplitRiderFee(Number(defaultFee) > 0 ? Number(defaultFee) : 45);
+    setSplitModalOpen(true);
+  };
+
+  // Toggle item selection for split
+  const toggleSplitItem = (index: number) => {
+    setSelectedSplitItemIndices((prev) =>
+      prev.includes(index) ? prev.filter((i) => i !== index) : [...prev, index]
+    );
+  };
+
+  // Confirm and Execute Split Delivery in ONE atomic batch
+  const handleExecuteSplitDelivery = async () => {
+    if (!selectedTicket || !relatedOrder) {
+      showError('Unable to split delivery: Order details not found.');
+      return;
+    }
+
+    if (selectedSplitItemIndices.length === 0) {
+      showError('Please select at least one item to hand over to the second rider.');
+      return;
+    }
+
+    try {
+      setSplittingDelivery(true);
+      const now = Timestamp.now();
+      const adminName = adminProfile?.name || 'Delivio Support';
+      const adminId = adminProfile?.uid || 'admin';
+
+      const chosenItems = selectedSplitItemIndices.map((idx) => candidateItems[idx]).filter(Boolean);
+
+      // Create new child order in Firestore
+      const childOrderRef = doc(collection(db, 'orders'));
+      const childOrderId = childOrderRef.id;
+      const parentNum = relatedOrder.orderNumber || selectedTicket.orderNumber || childOrderId.slice(0, 6);
+      const childOrderNum = `${parentNum}-B`;
+
+      const batch = writeBatch(db);
+
+      // 1. Child order doc
+      const childOrderData = {
+        orderNumber: childOrderNum,
+        merchantName: relatedOrder.merchantName || '',
+        customerName: relatedOrder.customerName || selectedTicket.customerName || 'Customer',
+        customerPhone: relatedOrder.customerPhone || selectedTicket.customerPhone || '',
+        cityId: relatedOrder.cityId || selectedCityId || '',
+        serviceType: relatedOrder.serviceType || selectedTicket.serviceType || 'food',
+        pickup: relatedOrder.pickup || (relatedOrder.merchantAddress ? { address: relatedOrder.merchantAddress } : null),
+        dropoff: relatedOrder.dropoff || null,
+        fulfillment: 'delivery',
+        fulfillmentType: 'delivery',
+        items: chosenItems,
+        status: relatedOrder.status || 'Merchant accepted',
+        statusHistory: [
+          {
+            status: relatedOrder.status || 'Merchant accepted',
+            at: now,
+            note: `Split child order created from #${parentNum} by Support (${adminName})`
+          }
+        ],
+        customerId: null,
+        merchantId: null,
+        sourceCustomerId: relatedOrder.customerId || selectedTicket.customerId || null,
+        sourceMerchantId: relatedOrder.merchantId || null,
+        riderId: null,
+        riderName: null,
+        riderPhone: null,
+        isSplitChild: true,
+        splitOf: relatedOrder.id,
+        excludeRiderIds: relatedOrder.riderId
+          ? [relatedOrder.riderId]
+          : selectedTicket.riderId
+          ? [selectedTicket.riderId]
+          : [],
+        deliveryOption: 'priority',
+        dispatch: {
+          option: 'priority',
+          holdMinutes: 0,
+          maxBatch: 1,
+          poolable: false,
+          searchRadiusKm: relatedOrder.searchRadiusKm || 5
+        },
+        fees: {
+          subtotal: 0,
+          deliveryFee: Number(relatedOrder.fees?.deliveryFee || 0),
+          serviceFee: 0,
+          discount: 0,
+          total: 0
+        },
+        paymentMethod: 'split',
+        paymentStatus: 'paid',
+        cashToCollect: 0,
+        riderFeeFixed: Number(splitRiderFee) || 45,
+        createdAt: now,
+        updatedAt: now
+      };
+
+      batch.set(childOrderRef, childOrderData);
+
+      // 2. Update parent order with splitOut
+      const parentOrderRef = doc(db, 'orders', relatedOrder.id);
+      batch.update(parentOrderRef, {
+        splitOut: {
+          childOrderId,
+          items: chosenItems,
+          at: now,
+          by: adminName
+        },
+        updatedAt: now
+      });
+
+      // 3. Add system message in ticket conversation thread
+      const sysMsgRef = doc(collection(db, 'supportTickets', selectedTicket.id, 'messages'));
+      batch.set(sysMsgRef, {
+        senderType: 'system',
+        senderId: 'system',
+        senderName: 'System',
+        text: 'Another rider is being dispatched',
+        createdAt: now
+      });
+
+      // 4. Create inbox message for customer
+      const customerTargetId = relatedOrder.customerId || selectedTicket.customerId;
+      if (customerTargetId) {
+        const inboxRef = doc(collection(db, 'inbox'));
+        batch.set(inboxRef, {
+          customerId: customerTargetId,
+          category: 'order',
+          title: 'Two riders are delivering your order',
+          body: `Due to the size and weight of your order #${parentNum}, two riders are delivering your items safely and promptly.`,
+          imageUrl: null,
+          link: null,
+          createdAt: now,
+          createdBy: adminId,
+          createdByName: adminName
+        });
+      }
+
+      // 5. Link splitChildOrderId on supportTickets/{id}
+      const ticketRef = doc(db, 'supportTickets', selectedTicket.id);
+      batch.update(ticketRef, {
+        splitChildOrderId: childOrderId,
+        lastMessageAt: now,
+        lastMessagePreview: 'Split delivery: Another rider is being dispatched',
+        updatedAt: now
+      });
+
+      await batch.commit();
+
+      setSplitModalOpen(false);
+      showSuccess(`Split delivery initiated! Child Order #${childOrderNum} dispatched to secondary riders.`);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSplittingDelivery(false);
+    }
+  };
+
+  // Cancel Split Delivery (allowed before rider accepts)
+  const handleCancelSplitDelivery = async () => {
+    if (!splitChildOrder || !selectedTicket) return;
+    if (splitChildOrder.riderId) {
+      showError('Cannot cancel split delivery: A secondary rider has already accepted this booking.');
+      return;
+    }
+
+    try {
+      setCancellingSplit(true);
+      const now = Timestamp.now();
+      const adminName = adminProfile?.name || 'Delivio Support';
+      const batch = writeBatch(db);
+
+      // 1. Cancel child order
+      const childRef = doc(db, 'orders', splitChildOrder.id);
+      batch.update(childRef, {
+        status: 'Cancelled',
+        cancelReason: 'Split delivery cancelled by admin',
+        cancelledBy: 'admin',
+        updatedAt: now
+      });
+
+      // 2. Remove splitOut from parent order
+      if (relatedOrder?.id) {
+        const parentRef = doc(db, 'orders', relatedOrder.id);
+        batch.update(parentRef, {
+          splitOut: null,
+          updatedAt: now
+        });
+      }
+
+      // 3. Remove splitChildOrderId from ticket
+      const ticketRef = doc(db, 'supportTickets', selectedTicket.id);
+      batch.update(ticketRef, {
+        splitChildOrderId: null,
+        updatedAt: now
+      });
+
+      // 4. Post system chat message
+      const sysMsgRef = doc(collection(db, 'supportTickets', selectedTicket.id, 'messages'));
+      batch.set(sysMsgRef, {
+        senderType: 'system',
+        senderId: 'system',
+        senderName: 'System',
+        text: `Split delivery was cancelled by ${adminName}.`,
+        createdAt: now
+      });
+
+      await batch.commit();
+      setSplitChildOrder(null);
+      showSuccess('Split delivery successfully cancelled.');
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setCancellingSplit(false);
+    }
+  };
 
   // Accept Ticket
   const handleAcceptTicket = async () => {
@@ -344,7 +774,9 @@ export const Support: React.FC = () => {
         createdAt: now
       });
 
-      setSelectedTicket((prev) => (prev ? { ...prev, status: 'accepted', acceptedAt: now, acceptedBy: adminName } : null));
+      setSelectedTicket((prev) =>
+        prev ? { ...prev, status: 'accepted', acceptedAt: now, acceptedBy: adminName } : null
+      );
       showSuccess(`Ticket accepted by ${adminName}. Chat is now unlocked.`);
     } catch (err: any) {
       showError(err);
@@ -353,7 +785,7 @@ export const Support: React.FC = () => {
     }
   };
 
-  // Image Upload & Compression
+  // Image Upload & Compression (< 300 KB)
   const handlePhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -397,11 +829,14 @@ export const Support: React.FC = () => {
       // Update ticket
       const ticketRef = doc(db, 'supportTickets', selectedTicket.id);
       const previewText = trimmed || (attachedImageData ? '📷 Photo attachment' : '');
+      const isDriverTicket = selectedTicket.reporterType === 'rider';
+
       await updateDoc(ticketRef, {
         lastMessageAt: now,
         lastMessagePreview: previewText,
         unreadByAdmin: false,
-        unreadByCustomer: true,
+        unreadByCustomer: !isDriverTicket,
+        unreadByRider: isDriverTicket,
         status: selectedTicket.status === 'open' ? 'accepted' : selectedTicket.status,
         updatedAt: now
       });
@@ -452,9 +887,21 @@ export const Support: React.FC = () => {
         createdAt: now
       });
 
-      // Create an inbox message for the customer
-      if (selectedTicket.customerId) {
-        const inboxCol = collection(db, 'inbox');
+      // Create an inbox message for customer or driver
+      const inboxCol = collection(db, 'inbox');
+      if (selectedTicket.reporterType === 'rider' && selectedTicket.riderId) {
+        await addDoc(inboxCol, {
+          riderId: selectedTicket.riderId,
+          category: 'order',
+          title: 'Your driver report was resolved',
+          body: note,
+          imageUrl: null,
+          riderName: selectedTicket.riderName || 'Driver',
+          createdAt: now,
+          createdBy: adminId,
+          createdByName: adminName
+        });
+      } else if (selectedTicket.customerId) {
         await addDoc(inboxCol, {
           customerId: selectedTicket.customerId,
           category: 'order',
@@ -462,9 +909,6 @@ export const Support: React.FC = () => {
           body: note,
           imageUrl: null,
           link: selectedTicket.orderId ? { merchantId: null, category: null } : null,
-          audience: null,
-          riderId: null,
-          merchantId: null,
           customerName: selectedTicket.customerName,
           customerEmail: selectedTicket.customerEmail || null,
           createdAt: now,
@@ -486,7 +930,7 @@ export const Support: React.FC = () => {
       );
       setResolveModalOpen(false);
       setResolutionNote('');
-      showSuccess('Ticket marked as resolved and customer notified.');
+      showSuccess('Ticket marked as resolved and notification dispatched.');
     } catch (err: any) {
       showError(err);
     } finally {
@@ -660,7 +1104,6 @@ export const Support: React.FC = () => {
           createdAt: now
         });
 
-        // Also notify customer inbox
         const inboxCol = collection(db, 'inbox');
         await addDoc(inboxCol, {
           customerId: cid,
@@ -685,45 +1128,133 @@ export const Support: React.FC = () => {
     }
   };
 
-  // Demo Ticket Generator (helps immediately test the entire support workflow)
+  // Demo Ticket Generator (helps immediately test driver reports & split delivery)
   const handleCreateDemoTicket = async () => {
     try {
       const now = Timestamp.now();
-      const reasons = SUPPORT_TICKET_REASONS;
-      const randomReason = reasons[Math.floor(Math.random() * reasons.length)];
       const sampleOrderNum = `DLV-${Math.floor(100000 + Math.random() * 900000)}`;
 
-      const newTicketDoc = await addDoc(collection(db, 'supportTickets'), {
-        title: `${randomReason} - #${sampleOrderNum}`,
-        reason: randomReason,
-        status: 'open',
-        customerId: adminProfile?.uid || 'demo_customer_123',
-        customerName: 'Juan Dela Cruz',
-        customerEmail: 'juan.delacruz@example.com',
-        customerPhone: '+63 917 123 4567',
-        orderNumber: sampleOrderNum,
-        serviceType: 'food',
-        unreadByAdmin: true,
-        unreadByCustomer: false,
-        lastMessageAt: now,
-        lastMessagePreview: `Hi Delivio, I am reporting an issue: ${randomReason}. Please assist.`,
-        createdAt: now,
-        updatedAt: now
-      });
+      if (supportAudience === 'rider') {
+        // Create demo Driver report for bulky food items
+        const sampleDriverId = 'rider_sample_456';
+        const sampleRiderName = 'Angelo Bautista (Motorcycle)';
+        const sampleBatchId = `B-${Math.floor(1000 + Math.random() * 9000)}`;
 
-      // Add customer opening message
-      const msgsCol = collection(db, 'supportTickets', newTicketDoc.id, 'messages');
-      await addDoc(msgsCol, {
-        senderType: 'customer',
-        senderId: 'demo_customer_123',
-        senderName: 'Juan Dela Cruz',
-        text: `Hi Delivio Support! I ordered earlier today (Order #${sampleOrderNum}), but I have a concern regarding: ${randomReason}. Could you please help check this? Attached is the receipt and photo.`,
-        imageData: null,
-        createdAt: now
-      });
+        // Also create a sample parent order so split delivery works immediately!
+        const orderRef = doc(collection(db, 'orders'));
+        await addDoc(collection(db, 'orders'), {
+          orderNumber: sampleOrderNum,
+          serviceType: 'food',
+          fulfillmentType: 'delivery',
+          status: 'Ready',
+          statusHistory: [{ status: 'Ready', at: now, note: 'Order ready for dispatch' }],
+          customerId: 'demo_customer_123',
+          customerName: 'Maria Santos',
+          customerPhone: '+63 917 555 4321',
+          merchantId: 'merchant_sample_88',
+          merchantName: 'Shakey’s Pizza Parlor',
+          merchantAddress: 'Session Road, Baguio City',
+          riderId: sampleDriverId,
+          riderName: sampleRiderName,
+          riderPhone: '+63 918 888 1234',
+          cityId: selectedCityId || 'baguio',
+          deliveryOption: 'standard',
+          fees: {
+            subtotal: 1450,
+            deliveryFee: 65,
+            serviceFee: 15,
+            discount: 0,
+            total: 1530
+          },
+          riderFeeEstimate: {
+            pickupFee: 15,
+            bookingFee: 45,
+            total: 60
+          },
+          items: [
+            { id: '1', name: 'Grand Slam Party Pizza 28" Giant', qty: 2, price: 620 },
+            { id: '2', name: 'Crispy Fried Chicken Box (12 pcs)', qty: 1, price: 540 },
+            { id: '3', name: '2L Soda Bottled Drinks (Pack of 3)', qty: 1, price: 290 }
+          ],
+          paymentMethod: 'wallet',
+          paymentStatus: 'paid',
+          createdAt: now,
+          updatedAt: now
+        });
 
-      setSelectedTicketId(newTicketDoc.id);
-      showSuccess(`Demo ticket created (${randomReason}).`);
+        const newTicketDoc = await addDoc(collection(db, 'supportTickets'), {
+          reporterType: 'rider',
+          riderId: sampleDriverId,
+          riderName: sampleRiderName,
+          riderPhone: '+63 918 888 1234',
+          orderNumber: sampleOrderNum,
+          batchId: sampleBatchId,
+          serviceType: 'food',
+          reason: 'cant_fit_bag',
+          reasonLabel: "Can't fit on my bag",
+          title: `Can't fit on my bag - Order #${sampleOrderNum}`,
+          status: 'open',
+          splitItems: [
+            { name: 'Grand Slam Party Pizza 28" Giant', qty: 2, price: 620 }
+          ],
+          unreadByAdmin: true,
+          unreadByRider: false,
+          lastMessageAt: now,
+          lastMessagePreview: "The two 28-inch pizza boxes can't fit into my insulated delivery box. Requesting a split dispatch.",
+          createdAt: now,
+          updatedAt: now
+        });
+
+        // Add driver opening message
+        const msgsCol = collection(db, 'supportTickets', newTicketDoc.id, 'messages');
+        await addDoc(msgsCol, {
+          senderType: 'rider',
+          senderId: sampleDriverId,
+          senderName: sampleRiderName,
+          text: `Good day Delivio Ops! I am at Shakey's to pick up Order #${sampleOrderNum} (Batch #${sampleBatchId}). The merchant prepared two 28" giant pizza boxes that cannot fit into my delivery bag along with the chicken box. Can we please split this delivery with another rider?`,
+          imageData: null,
+          createdAt: now
+        });
+
+        setSelectedTicketId(newTicketDoc.id);
+        showSuccess(`Sample Driver report created (Can't fit on bag).`);
+      } else {
+        // Customer sample ticket
+        const reasons = SUPPORT_TICKET_REASONS;
+        const randomReason = reasons[Math.floor(Math.random() * reasons.length)];
+
+        const newTicketDoc = await addDoc(collection(db, 'supportTickets'), {
+          reporterType: 'customer',
+          title: `${randomReason} - #${sampleOrderNum}`,
+          reason: randomReason,
+          status: 'open',
+          customerId: adminProfile?.uid || 'demo_customer_123',
+          customerName: 'Juan Dela Cruz',
+          customerEmail: 'juan.delacruz@example.com',
+          customerPhone: '+63 917 123 4567',
+          orderNumber: sampleOrderNum,
+          serviceType: 'food',
+          unreadByAdmin: true,
+          unreadByCustomer: false,
+          lastMessageAt: now,
+          lastMessagePreview: `Hi Delivio, I am reporting an issue: ${randomReason}. Please assist.`,
+          createdAt: now,
+          updatedAt: now
+        });
+
+        const msgsCol = collection(db, 'supportTickets', newTicketDoc.id, 'messages');
+        await addDoc(msgsCol, {
+          senderType: 'customer',
+          senderId: 'demo_customer_123',
+          senderName: 'Juan Dela Cruz',
+          text: `Hi Delivio Support! I ordered earlier today (Order #${sampleOrderNum}), but I have a concern regarding: ${randomReason}. Could you please check?`,
+          imageData: null,
+          createdAt: now
+        });
+
+        setSelectedTicketId(newTicketDoc.id);
+        showSuccess(`Sample Customer ticket created (${randomReason}).`);
+      }
     } catch (err: any) {
       showError(err);
     }
@@ -741,20 +1272,82 @@ export const Support: React.FC = () => {
             <span>Support Inbox</span>
           </h1>
           <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
-            Resolve customer disputes, investigate missing items, review photos, and issue wallet refunds.
+            Resolve customer disputes and driver reports, coordinate live chats, split bulky deliveries, and issue refunds.
           </p>
         </div>
 
         <div className="flex items-center gap-2">
-          {tickets.length === 0 && !loading && (
-            <button
-              onClick={handleCreateDemoTicket}
-              className="delivio-btn-yellow px-3.5 py-2 text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-xs"
+          <button
+            onClick={handleCreateDemoTicket}
+            className="delivio-btn-yellow px-3.5 py-2 text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-xs"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>Create Sample {supportAudience === 'rider' ? 'Driver Report' : 'Customer Ticket'}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* AUDIENCE SWITCHER: CUSTOMERS | DRIVERS */}
+      <div className="flex items-center justify-between bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 p-1.5 rounded-2xl shadow-xs">
+        <div className="flex items-center gap-1.5 w-full sm:w-auto">
+          <button
+            onClick={() => {
+              setSupportAudience('customer');
+              setActiveReasonTab('all');
+            }}
+            className={`flex-1 sm:flex-none px-4 py-2 rounded-xl text-xs font-extrabold flex items-center justify-center gap-2 transition-all ${
+              supportAudience === 'customer'
+                ? 'bg-amber-400 text-black shadow-xs'
+                : 'text-gray-600 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-800'
+            }`}
+          >
+            <User className="w-4 h-4" />
+            <span>Customers</span>
+            <span
+              className={`px-1.5 py-0.5 rounded-full text-[10px] font-black ${
+                openCustomerTicketsCount > 0
+                  ? 'bg-red-500 text-white'
+                  : supportAudience === 'customer'
+                  ? 'bg-black/15 text-black'
+                  : 'bg-gray-200 dark:bg-zinc-700 text-gray-600 dark:text-zinc-300'
+              }`}
             >
-              <Sparkles className="w-4 h-4" />
-              <span>Create Sample Ticket</span>
-            </button>
-          )}
+              {customerTickets.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => {
+              setSupportAudience('rider');
+              setActiveReasonTab('all');
+            }}
+            className={`flex-1 sm:flex-none px-4 py-2 rounded-xl text-xs font-extrabold flex items-center justify-center gap-2 transition-all ${
+              supportAudience === 'rider'
+                ? 'bg-amber-400 text-black shadow-xs'
+                : 'text-gray-600 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-800'
+            }`}
+          >
+            <Car className="w-4 h-4" />
+            <span>Drivers</span>
+            <span
+              className={`px-1.5 py-0.5 rounded-full text-[10px] font-black ${
+                openDriverTicketsCount > 0
+                  ? 'bg-red-500 text-white'
+                  : supportAudience === 'rider'
+                  ? 'bg-black/15 text-black'
+                  : 'bg-gray-200 dark:bg-zinc-700 text-gray-600 dark:text-zinc-300'
+              }`}
+            >
+              {driverTickets.length}
+            </span>
+          </button>
+        </div>
+
+        <div className="hidden sm:flex items-center gap-3 text-xs text-gray-400 px-3">
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-red-500" />
+            <strong>{openCustomerTicketsCount + openDriverTicketsCount}</strong> Open tickets requiring attention
+          </span>
         </div>
       </div>
 
@@ -764,45 +1357,69 @@ export const Support: React.FC = () => {
         <div className="lg:col-span-5 flex flex-col bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl overflow-hidden shadow-xs">
           {/* Reason Tabs with Counts */}
           <div className="p-3 border-b border-gray-100 dark:border-zinc-800 bg-gray-50/50 dark:bg-zinc-850/50">
-            <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">
-              Filter By Report Reason
+            <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">
+              <span>{supportAudience === 'rider' ? 'Driver Report Reasons' : 'Customer Report Reasons'}</span>
+              <span>{filteredTickets.length} matches</span>
             </div>
+
             <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none text-xs">
               <button
                 onClick={() => setActiveReasonTab('all')}
                 className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors flex items-center gap-1.5 ${
                   activeReasonTab === 'all'
                     ? 'bg-amber-400 text-black shadow-2xs'
-                    : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 hover:bg-gray-100 border border-gray-200 dark:border-zinc-700'
+                    : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-700 border border-gray-200 dark:border-zinc-700'
                 }`}
               >
                 <span>All Reasons</span>
                 <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-black/10 dark:bg-white/10">
-                  {tickets.length}
+                  {currentAudienceTickets.length}
                 </span>
               </button>
 
-              {SUPPORT_TICKET_REASONS.map((r) => {
-                const count = reasonCounts[r] || 0;
-                return (
-                  <button
-                    key={r}
-                    onClick={() => setActiveReasonTab(r)}
-                    className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors flex items-center gap-1.5 ${
-                      activeReasonTab === r
-                        ? 'bg-amber-400 text-black shadow-2xs'
-                        : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 hover:bg-gray-100 border border-gray-200 dark:border-zinc-700'
-                    }`}
-                  >
-                    <span>{r}</span>
-                    {count > 0 && (
-                      <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-red-500 text-white font-extrabold">
-                        {count}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
+              {supportAudience === 'customer'
+                ? SUPPORT_TICKET_REASONS.map((r) => {
+                    const count = customerReasonCounts[r] || 0;
+                    return (
+                      <button
+                        key={r}
+                        onClick={() => setActiveReasonTab(r)}
+                        className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors flex items-center gap-1.5 ${
+                          activeReasonTab === r
+                            ? 'bg-amber-400 text-black shadow-2xs'
+                            : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-700 border border-gray-200 dark:border-zinc-700'
+                        }`}
+                      >
+                        <span>{r}</span>
+                        {count > 0 && (
+                          <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-red-500 text-white font-extrabold">
+                            {count}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })
+                : DRIVER_SUPPORT_REASONS.map((r) => {
+                    const count = driverReasonCounts[r.id] || 0;
+                    return (
+                      <button
+                        key={r.id}
+                        onClick={() => setActiveReasonTab(r.id)}
+                        className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors flex items-center gap-1.5 ${
+                          activeReasonTab === r.id
+                            ? 'bg-amber-400 text-black shadow-2xs'
+                            : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-700 border border-gray-200 dark:border-zinc-700'
+                        }`}
+                      >
+                        <span>{r.label}</span>
+                        {count > 0 && (
+                          <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-red-500 text-white font-extrabold">
+                            {count}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
             </div>
           </div>
 
@@ -814,7 +1431,11 @@ export const Support: React.FC = () => {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search ticket title, customer, order #..."
+                placeholder={
+                  supportAudience === 'rider'
+                    ? 'Search driver name, batch #, order #, reason...'
+                    : 'Search ticket title, customer name, order #...'
+                }
                 className="w-full pl-9 pr-4 py-2 text-xs rounded-xl border border-gray-200 dark:border-zinc-700 bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-white"
               />
             </div>
@@ -852,12 +1473,14 @@ export const Support: React.FC = () => {
             {loading ? (
               <div className="p-12 text-center text-xs text-gray-400 flex flex-col items-center justify-center gap-2">
                 <Loader2 className="w-6 h-6 animate-spin text-amber-500" />
-                <span>Loading support tickets...</span>
+                <span>Loading {supportAudience === 'rider' ? 'driver' : 'customer'} tickets...</span>
               </div>
             ) : filteredTickets.length === 0 ? (
               <div className="p-12 text-center text-xs text-gray-400 space-y-2">
                 <MessageSquare className="w-8 h-8 text-gray-300 dark:text-zinc-700 mx-auto" />
-                <p className="font-bold text-gray-600 dark:text-zinc-400">No support tickets found</p>
+                <p className="font-bold text-gray-600 dark:text-zinc-400">
+                  No {supportAudience === 'rider' ? 'driver' : 'customer'} tickets found
+                </p>
                 <p className="text-[11px] text-gray-400">
                   Try adjusting the reason filter, search query, or status selector.
                 </p>
@@ -867,6 +1490,7 @@ export const Support: React.FC = () => {
                 const isSelected = ticket.id === selectedTicketId;
                 const isUnread = Boolean(ticket.unreadByAdmin);
                 const ticketDate = parseDate(ticket.lastMessageAt || ticket.createdAt);
+                const isDriverReport = ticket.reporterType === 'rider';
 
                 return (
                   <div
@@ -881,7 +1505,7 @@ export const Support: React.FC = () => {
                         : 'hover:bg-gray-50/70 dark:hover:bg-zinc-850/50'
                     }`}
                   >
-                    {/* Unread indicator */}
+                    {/* Unread indicator dot */}
                     {isUnread && (
                       <span
                         className="w-2.5 h-2.5 rounded-full bg-red-500 ring-2 ring-white dark:ring-zinc-900 shrink-0 mt-1"
@@ -891,8 +1515,13 @@ export const Support: React.FC = () => {
 
                     <div className="flex-1 min-w-0 space-y-1">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="font-extrabold text-xs text-gray-900 dark:text-white truncate">
-                          {ticket.title}
+                        <span className="font-extrabold text-xs text-gray-900 dark:text-white truncate flex items-center gap-1.5">
+                          {isDriverReport ? (
+                            <Truck className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                          ) : (
+                            <User className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                          )}
+                          <span className="truncate">{ticket.title}</span>
                         </span>
                         <span className="text-[10px] font-mono text-gray-400 shrink-0">
                           {ticketDate ? formatRelativeTime(ticketDate) : ''}
@@ -901,7 +1530,7 @@ export const Support: React.FC = () => {
 
                       <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
                         <span className="px-2 py-0.5 rounded-md font-bold bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300 text-[10px]">
-                          {ticket.reason}
+                          {getTicketReasonDisplay(ticket)}
                         </span>
 
                         {ticket.status === 'open' && (
@@ -925,10 +1554,29 @@ export const Support: React.FC = () => {
                             #{ticket.orderNumber}
                           </span>
                         )}
+
+                        {ticket.batchId && (
+                          <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300">
+                            Batch: #{ticket.batchId}
+                          </span>
+                        )}
+
+                        {ticket.splitChildOrderId && (
+                          <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-500 text-black flex items-center gap-0.5">
+                            <Split className="w-2.5 h-2.5" />
+                            Split active
+                          </span>
+                        )}
                       </div>
 
                       <div className="text-[11px] text-gray-500 dark:text-zinc-400 flex items-center justify-between pt-0.5">
-                        <span className="truncate">Customer: <strong>{ticket.customerName}</strong></span>
+                        <span className="truncate">
+                          {isDriverReport ? (
+                            <>Driver: <strong>{ticket.riderName || 'Assigned Driver'}</strong></>
+                          ) : (
+                            <>Customer: <strong>{ticket.customerName || 'Customer'}</strong></>
+                          )}
+                        </span>
                       </div>
 
                       {ticket.lastMessagePreview && (
@@ -955,7 +1603,7 @@ export const Support: React.FC = () => {
                 Select a Support Ticket
               </h3>
               <p className="text-xs text-gray-400 max-w-sm mt-1">
-                Choose a ticket from the left list to review customer reports, chat in real-time, view order details, and issue resolutions.
+                Choose a ticket from the left list to review customer reports or driver inquiries, chat in real-time, view order details, and coordinate solutions.
               </p>
             </div>
           ) : (
@@ -964,7 +1612,18 @@ export const Support: React.FC = () => {
               <div className="p-4 border-b border-gray-100 dark:border-zinc-800 bg-white dark:bg-zinc-900 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <div className="flex items-center gap-2">
-                    <h2 className="font-extrabold text-base text-gray-900 dark:text-white">
+                    <span
+                      className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase flex items-center gap-1 ${
+                        selectedTicket.reporterType === 'rider'
+                          ? 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300'
+                          : 'bg-blue-100 text-blue-900 dark:bg-blue-950 dark:text-blue-300'
+                      }`}
+                    >
+                      {selectedTicket.reporterType === 'rider' ? <Car className="w-3 h-3" /> : <User className="w-3 h-3" />}
+                      <span>{selectedTicket.reporterType === 'rider' ? 'Driver Report' : 'Customer Report'}</span>
+                    </span>
+
+                    <h2 className="font-extrabold text-base text-gray-900 dark:text-white truncate">
                       {selectedTicket.title}
                     </h2>
                     <span
@@ -979,10 +1638,16 @@ export const Support: React.FC = () => {
                       {selectedTicket.status}
                     </span>
                   </div>
+
                   <div className="flex flex-wrap items-center gap-3 text-xs text-gray-500 dark:text-zinc-400 mt-1">
-                    <span>Reason: <strong className="text-gray-900 dark:text-white">{selectedTicket.reason}</strong></span>
+                    <span>Reason: <strong className="text-gray-900 dark:text-white">{getTicketReasonDisplay(selectedTicket)}</strong></span>
                     <span>•</span>
-                    <span>Customer: <strong>{selectedTicket.customerName}</strong></span>
+                    {selectedTicket.reporterType === 'rider' ? (
+                      <span>Driver: <strong>{selectedTicket.riderName || 'Driver'}</strong></span>
+                    ) : (
+                      <span>Customer: <strong>{selectedTicket.customerName || 'Customer'}</strong></span>
+                    )}
+
                     {selectedTicket.orderNumber && (
                       <>
                         <span>•</span>
@@ -991,10 +1656,31 @@ export const Support: React.FC = () => {
                         </span>
                       </>
                     )}
+
+                    {selectedTicket.batchId && (
+                      <>
+                        <span>•</span>
+                        <span className="font-mono text-purple-600 font-bold">
+                          Batch #{selectedTicket.batchId}
+                        </span>
+                      </>
+                    )}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2">
+                  {/* Split Delivery Button: food and convenience only, only on accepted ticket with cant_fit_bag or too_big */}
+                  {canSplitDelivery && (
+                    <button
+                      onClick={handleOpenSplitModal}
+                      className="px-3.5 py-1.5 rounded-xl border border-amber-400 bg-amber-400 text-black hover:bg-amber-300 text-xs font-black flex items-center gap-1.5 shadow-xs transition-colors"
+                      title="Split this bulky order across two riders"
+                    >
+                      <Split className="w-3.5 h-3.5" />
+                      <span>Split Delivery</span>
+                    </button>
+                  )}
+
                   {selectedTicket.status === 'open' && (
                     <button
                       onClick={handleAcceptTicket}
@@ -1027,7 +1713,7 @@ export const Support: React.FC = () => {
                       Ticket Resolved by {selectedTicket.resolvedBy || 'Support'}
                     </p>
                     <p className="text-[11px] text-emerald-800/80 dark:text-emerald-300/80 mt-0.5">
-                      Resolution Note: {selectedTicket.resolution || 'Resolved with customer.'}
+                      Resolution Note: {selectedTicket.resolution || 'Resolved with reporter.'}
                     </p>
                   </div>
                 </div>
@@ -1051,13 +1737,14 @@ export const Support: React.FC = () => {
                       messages.map((msg) => {
                         const isAdmin = msg.senderType === 'admin';
                         const isSystem = msg.senderType === 'system';
+                        const isRider = msg.senderType === 'rider';
                         const msgTime = parseDate(msg.createdAt);
 
                         if (isSystem) {
                           return (
                             <div key={msg.id} className="flex justify-center my-2">
-                              <span className="px-3 py-1 rounded-full text-[10px] font-bold bg-gray-200/80 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 flex items-center gap-1.5">
-                                <Info className="w-3 h-3 text-amber-500" />
+                              <span className="px-3 py-1 rounded-full text-[10px] font-bold bg-gray-200/80 dark:bg-zinc-800 text-gray-700 dark:text-zinc-300 flex items-center gap-1.5 shadow-2xs">
+                                <Info className="w-3.5 h-3.5 text-amber-500" />
                                 {msg.text}
                               </span>
                             </div>
@@ -1069,8 +1756,19 @@ export const Support: React.FC = () => {
                             key={msg.id}
                             className={`flex flex-col ${isAdmin ? 'items-end' : 'items-start'}`}
                           >
-                            <span className="text-[10px] text-gray-400 mb-0.5 px-1 font-semibold">
-                              {isAdmin ? 'Delivio Support' : msg.senderName || 'Customer'}
+                            <span className="text-[10px] text-gray-400 mb-0.5 px-1 font-semibold flex items-center gap-1">
+                              {isAdmin ? (
+                                'Delivio Support'
+                              ) : isRider ? (
+                                <>
+                                  <span className="px-1.5 py-0.2 rounded font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300">
+                                    Driver
+                                  </span>
+                                  <span>{msg.senderName || selectedTicket.riderName || 'Driver'}</span>
+                                </>
+                              ) : (
+                                msg.senderName || selectedTicket.customerName || 'Customer'
+                              )}
                               {msgTime && ` • ${formatRelativeTime(msgTime)}`}
                             </span>
 
@@ -1118,7 +1816,10 @@ export const Support: React.FC = () => {
                       <div className="p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 flex items-center justify-between gap-3 text-xs">
                         <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200">
                           <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                          <span>Accept this ticket to reply and coordinate with the customer.</span>
+                          <span>
+                            Accept this ticket to reply and coordinate with the{' '}
+                            {selectedTicket.reporterType === 'rider' ? 'driver' : 'customer'}.
+                          </span>
                         </div>
                         <button
                           onClick={handleAcceptTicket}
@@ -1148,65 +1849,53 @@ export const Support: React.FC = () => {
                             }}
                             className="px-2.5 py-1 text-xs rounded-xl border border-gray-200 dark:border-zinc-700 bg-gray-50 dark:bg-zinc-800 text-gray-700 dark:text-zinc-300 flex-1 truncate"
                           >
-                            <option value="">-- Quick Answer Templates --</option>
-                            {SUPPORT_CANNED_REPLIES.map((reply, idx) => (
-                              <option key={idx} value={reply}>
-                                {reply}
+                            <option value="">
+                              Select a quick response for {selectedTicket.reporterType === 'rider' ? 'driver' : 'customer'}...
+                            </option>
+                            {(selectedTicket.reporterType === 'rider'
+                              ? DRIVER_CANNED_REPLIES
+                              : SUPPORT_CANNED_REPLIES
+                            ).map((cr, idx) => (
+                              <option key={idx} value={cr}>
+                                {cr}
                               </option>
                             ))}
                           </select>
                         </div>
 
-                        {/* Attached Image Preview */}
+                        {/* Image Preview */}
                         {attachedImageData && (
-                          <div className="relative inline-block border border-gray-300 dark:border-zinc-700 rounded-xl overflow-hidden p-1 bg-gray-50 dark:bg-zinc-800">
+                          <div className="relative inline-block border border-amber-300 dark:border-amber-700 rounded-xl overflow-hidden p-1 bg-amber-50/50">
                             <img
                               src={attachedImageData}
-                              alt="Attached"
-                              className="w-16 h-16 object-cover rounded-lg"
+                              alt="To send"
+                              className="h-16 w-16 object-cover rounded-lg"
                             />
                             <button
                               type="button"
                               onClick={() => setAttachedImageData(null)}
-                              className="absolute -top-1 -right-1 p-0.5 rounded-full bg-red-600 text-white"
-                              title="Remove photo"
+                              className="absolute top-1 right-1 p-0.5 rounded-full bg-black/70 text-white hover:bg-black"
                             >
                               <X className="w-3 h-3" />
                             </button>
                           </div>
                         )}
 
-                        {/* Input Box and Action Controls */}
+                        {/* Text and Actions */}
                         <div className="flex items-end gap-2">
-                          <textarea
-                            rows={2}
-                            value={replyText}
-                            onChange={(e) => setReplyText(e.target.value)}
-                            placeholder="Type a helpful response to the customer..."
-                            className="flex-1 px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-white"
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' && !e.shiftKey) {
-                                e.preventDefault();
-                                handleSendReply(e);
-                              }
-                            }}
-                          />
-
                           <input
                             type="file"
                             ref={fileInputRef}
                             accept="image/*"
-                            capture="environment"
                             onChange={handlePhotoSelect}
                             className="hidden"
                           />
-
                           <button
                             type="button"
                             onClick={() => fileInputRef.current?.click()}
-                            disabled={compressingImage}
-                            className="p-2.5 rounded-xl border border-gray-200 dark:border-zinc-700 hover:bg-gray-100 dark:hover:bg-zinc-800 text-gray-600 dark:text-zinc-300 transition-colors"
-                            title="Attach Photo / Camera (<300 KB compressed)"
+                            disabled={compressingImage || sendingReply}
+                            className="p-2.5 rounded-xl border border-gray-200 dark:border-zinc-700 text-gray-500 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-zinc-800 transition-colors disabled:opacity-50"
+                            title="Attach Photo (auto-compressed to <300 KB)"
                           >
                             {compressingImage ? (
                               <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
@@ -1214,6 +1903,20 @@ export const Support: React.FC = () => {
                               <Camera className="w-4 h-4" />
                             )}
                           </button>
+
+                          <textarea
+                            value={replyText}
+                            onChange={(e) => setReplyText(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && !e.shiftKey) {
+                                e.preventDefault();
+                                handleSendReply(e);
+                              }
+                            }}
+                            placeholder={`Reply to ${selectedTicket.reporterType === 'rider' ? 'driver' : 'customer'}...`}
+                            rows={2}
+                            className="flex-1 px-3.5 py-2 text-xs rounded-xl border border-gray-200 dark:border-zinc-700 bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-white resize-none"
+                          />
 
                           <button
                             type="submit"
@@ -1233,12 +1936,12 @@ export const Support: React.FC = () => {
                   </div>
                 </div>
 
-                {/* ORDER PANEL (Right sub-pane) */}
-                <div className="w-full md:w-80 border-t md:border-t-0 md:border-l border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 overflow-y-auto p-4 space-y-4 text-xs">
+                {/* ORDER & DRIVER REPORT PANEL (Right sub-pane) */}
+                <div className="w-full md:w-84 border-t md:border-t-0 md:border-l border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 overflow-y-auto p-4 space-y-4 text-xs">
                   <div className="flex items-center justify-between pb-2 border-b border-gray-100 dark:border-zinc-800">
                     <span className="font-extrabold uppercase text-[11px] text-gray-500 tracking-wider flex items-center gap-1.5">
                       <ShoppingBag className="w-3.5 h-3.5 text-amber-500" />
-                      Related Order Details
+                      Order & Dispatch Panel
                     </span>
                     {relatedOrder && (
                       <button
@@ -1250,6 +1953,126 @@ export const Support: React.FC = () => {
                       </button>
                     )}
                   </div>
+
+                  {/* Bulky / Uncarryable Items Alert (Driver flagged) */}
+                  {selectedTicket.splitItems && selectedTicket.splitItems.length > 0 && (
+                    <div className="p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 space-y-2">
+                      <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200 font-extrabold text-xs">
+                        <PackageX className="w-4 h-4 text-amber-600 shrink-0" />
+                        <span>Items Driver Cannot Carry:</span>
+                      </div>
+                      <div className="space-y-1">
+                        {selectedTicket.splitItems.map((item: any, idx: number) => (
+                          <div
+                            key={idx}
+                            className="flex justify-between items-center text-[11px] bg-white/70 dark:bg-zinc-900/60 p-2 rounded-xl border border-amber-200 dark:border-amber-900/60"
+                          >
+                            <span className="font-bold text-gray-900 dark:text-white">
+                              {item.qty || 1}x {item.name}
+                            </span>
+                            {item.price && (
+                              <span className="font-mono text-gray-600 dark:text-zinc-400">
+                                ₱{Number(item.price).toFixed(2)}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      {canSplitDelivery && (
+                        <button
+                          onClick={handleOpenSplitModal}
+                          className="w-full mt-1.5 py-1.5 text-xs font-bold delivio-btn-yellow rounded-xl flex items-center justify-center gap-1.5 shadow-xs"
+                        >
+                          <Split className="w-3.5 h-3.5" />
+                          <span>Dispatch 2nd Rider (Split)</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Active Split Child Order Status Card */}
+                  {(splitChildOrder || selectedTicket.splitChildOrderId) && (
+                    <div className="p-3.5 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-700 dark:text-indigo-300 flex items-center gap-1">
+                          <Split className="w-3.5 h-3.5 text-indigo-500" />
+                          Split Delivery (Child Order)
+                        </span>
+                        <span className="font-mono text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-indigo-200 dark:bg-indigo-900 text-indigo-900 dark:text-indigo-200">
+                          #{splitChildOrder?.orderNumber || selectedTicket.splitChildOrderId?.slice(0, 8)}
+                        </span>
+                      </div>
+
+                      {loadingChildOrder ? (
+                        <div className="flex items-center gap-2 text-indigo-500 text-xs py-1">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Syncing secondary rider status...</span>
+                        </div>
+                      ) : splitChildOrder ? (
+                        <div className="space-y-2 text-[11px]">
+                          <div className="flex items-center justify-between">
+                            <span className="text-gray-500">Live Status:</span>
+                            <span className="font-bold px-2 py-0.5 rounded-full text-[10px] bg-indigo-100 dark:bg-indigo-900/60 text-indigo-800 dark:text-indigo-200">
+                              {splitChildOrder.status}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                            <span className="text-gray-500">2nd Driver:</span>
+                            {splitChildOrder.riderName ? (
+                              <span className="font-bold text-gray-900 dark:text-white flex items-center gap-1">
+                                <Car className="w-3 h-3 text-indigo-500" />
+                                {splitChildOrder.riderName}
+                              </span>
+                            ) : (
+                              <span className="text-amber-600 dark:text-amber-400 font-bold animate-pulse">
+                                Dispatch searching riders...
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                            <span className="text-gray-500">Rider Pay (Fixed):</span>
+                            <span className="font-mono font-bold text-emerald-600">
+                              ₱{Number(splitChildOrder.riderFeeFixed || 45).toFixed(2)}
+                            </span>
+                          </div>
+
+                          {/* Items carried by child */}
+                          {splitChildOrder.items && splitChildOrder.items.length > 0 && (
+                            <div className="pt-1.5 border-t border-indigo-100 dark:border-indigo-900/60">
+                              <span className="text-[10px] uppercase font-bold text-gray-400">
+                                Handed-Over Items:
+                              </span>
+                              <div className="mt-1 space-y-0.5">
+                                {splitChildOrder.items.map((it: any, i: number) => (
+                                  <div key={i} className="text-gray-700 dark:text-zinc-300">
+                                    • {it.qty}x {it.name}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Cancel Split Delivery: allowed before a rider accepts */}
+                          {!splitChildOrder.riderId && splitChildOrder.status !== 'Cancelled' && (
+                            <button
+                              onClick={handleCancelSplitDelivery}
+                              disabled={cancellingSplit}
+                              className="w-full mt-2 py-1.5 px-2.5 rounded-xl border border-red-300 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 hover:bg-red-100 text-[11px] font-bold flex items-center justify-center gap-1.5"
+                            >
+                              {cancellingSplit ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Ban className="w-3.5 h-3.5" />
+                              )}
+                              <span>Cancel Split Delivery</span>
+                            </button>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
 
                   {loadingOrder ? (
                     <div className="py-8 text-center text-xs text-gray-400 flex items-center justify-center gap-2">
@@ -1277,8 +2100,8 @@ export const Support: React.FC = () => {
                     </div>
                   ) : (
                     <div className="space-y-4">
-                      {/* Order Status & Number */}
-                      <div className="p-3 rounded-2xl bg-gray-50 dark:bg-zinc-850/60 border border-gray-100 dark:border-zinc-800 space-y-1">
+                      {/* Order Status & Batch */}
+                      <div className="p-3 rounded-2xl bg-gray-50 dark:bg-zinc-850/60 border border-gray-100 dark:border-zinc-800 space-y-1.5">
                         <div className="flex items-center justify-between">
                           <span className="font-mono font-bold text-gray-900 dark:text-white">
                             #{relatedOrder.orderNumber}
@@ -1287,61 +2110,87 @@ export const Support: React.FC = () => {
                             {relatedOrder.status}
                           </span>
                         </div>
-                        <div className="text-[11px] text-gray-400 capitalize">
-                          Service: <strong>{relatedOrder.serviceType}</strong>
+
+                        <div className="flex items-center justify-between text-[11px] text-gray-400">
+                          <span className="capitalize">Service: <strong>{relatedOrder.serviceType}</strong></span>
+                          {(selectedTicket.batchId || relatedOrder.batchId) && (
+                            <span className="font-mono text-purple-600 dark:text-purple-400 font-bold">
+                              Batch: #{selectedTicket.batchId || relatedOrder.batchId}
+                            </span>
+                          )}
                         </div>
                       </div>
 
+                      {/* Stops: Pickup and Dropoff */}
+                      <div className="space-y-2 text-[11px] p-3 rounded-2xl bg-gray-50/70 dark:bg-zinc-850/40 border border-gray-100 dark:border-zinc-800">
+                        <span className="text-gray-400 font-bold uppercase text-[10px] tracking-wider block">
+                          Route Stops
+                        </span>
+
+                        {/* Pickup */}
+                        <div className="flex items-start gap-2">
+                          <div className="w-5 h-5 rounded-md bg-emerald-100 dark:bg-emerald-950 text-emerald-600 flex items-center justify-center shrink-0 mt-0.5 font-black text-[10px]">
+                            P
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-bold text-gray-900 dark:text-white truncate">
+                              {relatedOrder.merchantName || 'Pickup Location'}
+                            </p>
+                            <p className="text-[10px] text-gray-400 truncate">
+                              {relatedOrder.pickup?.address || relatedOrder.merchantAddress || 'Merchant premises'}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Dropoff */}
+                        <div className="flex items-start gap-2">
+                          <div className="w-5 h-5 rounded-md bg-amber-100 dark:bg-amber-950 text-amber-600 flex items-center justify-center shrink-0 mt-0.5 font-black text-[10px]">
+                            D
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-bold text-gray-900 dark:text-white truncate">
+                              {relatedOrder.customerName || selectedTicket.customerName || 'Customer'}
+                            </p>
+                            <p className="text-[10px] text-gray-400 truncate">
+                              {relatedOrder.dropoff?.address || 'Customer destination'}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Driver Info */}
+                      {(relatedOrder.riderName || selectedTicket.riderName) && (
+                        <div className="space-y-1 text-[11px] p-2.5 rounded-xl border border-gray-100 dark:border-zinc-800">
+                          <span className="text-gray-400 font-bold uppercase text-[10px]">Assigned Driver</span>
+                          <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
+                            <Car className="w-3.5 h-3.5 text-amber-500" />
+                            <span>{relatedOrder.riderName || selectedTicket.riderName}</span>
+                          </div>
+                          {(relatedOrder.riderPhone || selectedTicket.riderPhone) && (
+                            <div className="text-gray-500 flex items-center gap-1.5 text-[10px]">
+                              <Phone className="w-3 h-3" />
+                              <span>{relatedOrder.riderPhone || selectedTicket.riderPhone}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
                       {/* Customer Info */}
-                      <div className="space-y-1 text-[11px]">
+                      <div className="space-y-1 text-[11px] p-2.5 rounded-xl border border-gray-100 dark:border-zinc-800">
                         <span className="text-gray-400 font-bold uppercase text-[10px]">Customer</span>
                         <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
-                          <User className="w-3.5 h-3.5 text-gray-400" />
+                          <User className="w-3.5 h-3.5 text-blue-500" />
                           <span>{relatedOrder.customerName || selectedTicket.customerName}</span>
                         </div>
                         {(relatedOrder.customerPhone || selectedTicket.customerPhone) && (
-                          <div className="text-gray-500 flex items-center gap-1.5">
+                          <div className="text-gray-500 flex items-center gap-1.5 text-[10px]">
                             <Phone className="w-3 h-3" />
                             <span>{relatedOrder.customerPhone || selectedTicket.customerPhone}</span>
                           </div>
                         )}
                       </div>
 
-                      {/* Merchant Info */}
-                      {relatedOrder.merchantName && (
-                        <div className="space-y-1 text-[11px]">
-                          <span className="text-gray-400 font-bold uppercase text-[10px]">Merchant Store</span>
-                          <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
-                            <Store className="w-3.5 h-3.5 text-gray-400" />
-                            <span>{relatedOrder.merchantName}</span>
-                          </div>
-                          {relatedOrder.merchantAddress && (
-                            <div className="text-gray-500 text-[10px] flex items-center gap-1">
-                              <MapPin className="w-3 h-3 shrink-0" />
-                              <span className="truncate">{relatedOrder.merchantAddress}</span>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Driver Info */}
-                      {relatedOrder.riderName && (
-                        <div className="space-y-1 text-[11px]">
-                          <span className="text-gray-400 font-bold uppercase text-[10px]">Assigned Driver</span>
-                          <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
-                            <Car className="w-3.5 h-3.5 text-gray-400" />
-                            <span>{relatedOrder.riderName}</span>
-                          </div>
-                          {relatedOrder.riderPhone && (
-                            <div className="text-gray-500 flex items-center gap-1.5 text-[10px]">
-                              <Phone className="w-3 h-3" />
-                              <span>{relatedOrder.riderPhone}</span>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Items List */}
+                      {/* Items Ordered List */}
                       {relatedOrder.items && relatedOrder.items.length > 0 && (
                         <div className="space-y-1.5 pt-2 border-t border-gray-100 dark:border-zinc-800">
                           <span className="text-gray-400 font-bold uppercase text-[10px]">
@@ -1367,7 +2216,7 @@ export const Support: React.FC = () => {
                         </div>
                       )}
 
-                      {/* Fees Breakdown including lateTip */}
+                      {/* Fees Breakdown */}
                       <div className="p-3 rounded-2xl bg-gray-50 dark:bg-zinc-850/60 space-y-1 text-[11px]">
                         <div className="flex justify-between">
                           <span className="text-gray-500">Subtotal</span>
@@ -1383,10 +2232,10 @@ export const Support: React.FC = () => {
                             <span className="font-mono">₱{Number(relatedOrder.fees?.serviceFee || 0).toFixed(2)}</span>
                           </div>
                         )}
-                        {(relatedOrder.lateTip || relatedOrder.fees?.lateTip) && (
+                        {(relatedOrder.lateTip || (relatedOrder.fees as any)?.lateTip) && (
                           <div className="flex justify-between text-amber-600 font-bold">
                             <span>Late Tip</span>
-                            <span className="font-mono">+₱{Number(relatedOrder.lateTip || relatedOrder.fees?.lateTip || 0).toFixed(2)}</span>
+                            <span className="font-mono">+₱{Number(relatedOrder.lateTip || (relatedOrder.fees as any)?.lateTip || 0).toFixed(2)}</span>
                           </div>
                         )}
                         {Number(relatedOrder.fees?.discount || 0) > 0 && (
@@ -1404,13 +2253,13 @@ export const Support: React.FC = () => {
                         </div>
                       </div>
 
-                      {/* Action Buttons: Cancel and Wallet Refund */}
+                      {/* Action Buttons: Cancel Order & Wallet Refund */}
                       <div className="space-y-2 pt-2 border-t border-gray-100 dark:border-zinc-800">
                         {relatedOrder.status !== 'Cancelled' && (
                           <button
                             type="button"
                             onClick={() => {
-                              setCancelReasonPicker('Customer dispute via Support');
+                              setCancelReasonPicker('Dispute resolved via Support');
                               setCancelNote('');
                               setCancelFault('platform');
                               setRefundToWallet(true);
@@ -1427,13 +2276,13 @@ export const Support: React.FC = () => {
                           type="button"
                           onClick={() => {
                             setRefundAmount(Number(relatedOrder.fees?.total || 0));
-                            setRefundReason(`Support resolution for Order #${relatedOrder.orderNumber}`);
+                            setRefundReason(`Support resolution for ticket #${selectedTicket.id}`);
                             setRefundModalOpen(true);
                           }}
-                          className="w-full py-2 px-3 text-xs font-bold text-gray-800 dark:text-zinc-200 bg-gray-100 dark:bg-zinc-800 hover:bg-gray-200 dark:hover:bg-zinc-700 rounded-xl transition-colors flex items-center justify-center gap-1.5"
+                          className="w-full py-2 px-3 text-xs font-bold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-xl hover:bg-amber-100 transition-colors flex items-center justify-center gap-1.5"
                         >
-                          <RotateCcw className="w-3.5 h-3.5 text-amber-500" />
-                          <span>Issue Wallet Refund</span>
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>Direct Customer Wallet Refund</span>
                         </button>
                       </div>
                     </div>
@@ -1445,7 +2294,136 @@ export const Support: React.FC = () => {
         </div>
       </div>
 
-      {/* MODAL 1: RESOLVE TICKET MODAL */}
+      {/* MODAL 1: SPLIT DELIVERY DISPATCH MODAL */}
+      {splitModalOpen && selectedTicket && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="w-full max-w-lg bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100 dark:border-zinc-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-amber-400 flex items-center justify-center text-black font-extrabold shadow-sm">
+                  <Split className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                    Split Bulky Delivery
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    Dispatch a secondary rider with Priority delivery for excess items.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setSplitModalOpen(false)}
+                className="p-1.5 rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3 rounded-2xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/60 text-xs text-blue-900 dark:text-blue-200 flex items-start gap-2">
+              <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-bold">Automated Multi-Rider Dispatch</p>
+                <p className="text-[11px] leading-relaxed text-blue-800 dark:text-blue-300">
+                  A child order will be dispatched to nearby available drivers excluding the current rider (
+                  {relatedOrder?.riderName || selectedTicket.riderName || 'Driver'}). The customer will receive an
+                  inbox notification that two riders are delivering their order.
+                </p>
+              </div>
+            </div>
+
+            {/* Checklist of Items to Hand Over */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-500">
+                  Select Items to Hand Over to 2nd Rider:
+                </label>
+                <span className="text-[11px] font-bold text-amber-600">
+                  {selectedSplitItemIndices.length} item(s) selected
+                </span>
+              </div>
+
+              <div className="max-h-52 overflow-y-auto space-y-1.5 border border-gray-200 dark:border-zinc-800 rounded-2xl p-2.5 bg-gray-50/50 dark:bg-zinc-850/50">
+                {candidateItems.length === 0 ? (
+                  <p className="text-xs text-gray-400 text-center py-4">No items found on order.</p>
+                ) : (
+                  candidateItems.map((item, idx) => {
+                    const isChecked = selectedSplitItemIndices.includes(idx);
+                    return (
+                      <div
+                        key={idx}
+                        onClick={() => toggleSplitItem(idx)}
+                        className={`p-2.5 rounded-xl border flex items-center justify-between cursor-pointer transition-colors ${
+                          isChecked
+                            ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800'
+                            : 'bg-white dark:bg-zinc-800 border-gray-200 dark:border-zinc-700 opacity-70'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          {isChecked ? (
+                            <CheckSquare className="w-4 h-4 text-amber-500 shrink-0" />
+                          ) : (
+                            <Square className="w-4 h-4 text-gray-400 shrink-0" />
+                          )}
+                          <span className="text-xs font-bold text-gray-900 dark:text-white">
+                            {item.qty || 1}x {item.name}
+                          </span>
+                        </div>
+                        {item.price && (
+                          <span className="font-mono text-xs text-gray-500">
+                            ₱{Number(item.price * (item.qty || 1)).toFixed(2)}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            {/* Rider Fee input */}
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1">
+                Fixed Payout for Secondary Rider (₱):
+              </label>
+              <input
+                type="number"
+                min="20"
+                step="5"
+                value={splitRiderFee}
+                onChange={(e) => setSplitRiderFee(Number(e.target.value))}
+                className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
+              />
+              <p className="text-[10px] text-gray-400 mt-1">
+                Default derived from the original delivery fee structure (₱
+                {Number(relatedOrder?.fees?.deliveryFee || 45).toFixed(2)}).
+              </p>
+            </div>
+
+            {/* Actions */}
+            <div className="flex justify-end gap-2 pt-3 border-t border-gray-100 dark:border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setSplitModalOpen(false)}
+                className="px-4 py-2 text-xs font-bold text-gray-600 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-xl"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleExecuteSplitDelivery}
+                disabled={splittingDelivery || selectedSplitItemIndices.length === 0}
+                className="delivio-btn-yellow px-5 py-2 text-xs font-extrabold rounded-xl flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+              >
+                {splittingDelivery && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>Confirm & Dispatch 2nd Rider</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: RESOLVE TICKET MODAL */}
       {resolveModalOpen && selectedTicket && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
           <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-2xl space-y-4">
@@ -1458,24 +2436,24 @@ export const Support: React.FC = () => {
                   Resolve Support Ticket
                 </h3>
                 <p className="text-xs text-gray-500">
-                  {selectedTicket.title}
+                  Ticket #{selectedTicket.id.slice(0, 8)} ({selectedTicket.reporterType === 'rider' ? 'Driver Report' : 'Customer'})
                 </p>
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400">
-                Resolution Note (Required) <span className="text-red-500">*</span>
+            <div className="space-y-2">
+              <label className="block text-xs font-semibold text-gray-700 dark:text-zinc-300">
+                Resolution Note <span className="text-red-500">*</span>
               </label>
               <textarea
-                rows={3}
                 value={resolutionNote}
                 onChange={(e) => setResolutionNote(e.target.value)}
-                placeholder="Explain the solution (e.g. Refund issued, missing items redelivered, apology credit applied)..."
-                className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                placeholder="Explain the outcome (e.g. 'Customer provided delivery proof, refund processed', 'Secondary driver dispatched', etc.)"
+                rows={3}
+                className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white resize-none"
               />
               <p className="text-[11px] text-gray-400">
-                This note will be recorded on the ticket and delivered to the customer's Delivio Inbox.
+                This note will be logged in the audit trail, sent to the {selectedTicket.reporterType === 'rider' ? "driver's" : "customer's"} inbox, and mark the conversation as resolved.
               </p>
             </div>
 
@@ -1491,17 +2469,17 @@ export const Support: React.FC = () => {
                 type="button"
                 onClick={handleResolveTicket}
                 disabled={resolving || !resolutionNote.trim()}
-                className="delivio-btn-yellow px-5 py-2 text-xs font-bold rounded-xl flex items-center gap-1.5 disabled:opacity-50"
+                className="px-5 py-2 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1.5 disabled:opacity-50"
               >
                 {resolving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                <span>Confirm & Resolve</span>
+                <span>Confirm Resolution</span>
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* MODAL 2: CANCEL ORDER MODAL */}
+      {/* MODAL 3: CANCEL ORDER MODAL */}
       {cancelModalOpen && relatedOrder && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
           <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-2xl space-y-4">
@@ -1514,7 +2492,7 @@ export const Support: React.FC = () => {
                   Cancel Order #{relatedOrder.orderNumber}
                 </h3>
                 <p className="text-xs text-gray-500">
-                  Total: ₱{Number(relatedOrder.fees?.total || 0).toFixed(2)}
+                  Total: ₱{Number(relatedOrder.fees?.total || 0).toFixed(2)} • {relatedOrder.serviceType}
                 </p>
               </div>
             </div>
@@ -1522,7 +2500,7 @@ export const Support: React.FC = () => {
             <div className="space-y-3 text-xs">
               <div>
                 <label className="block font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                  Cancellation Reason
+                  Reason Preset
                 </label>
                 <select
                   value={cancelReasonPicker}
@@ -1530,23 +2508,23 @@ export const Support: React.FC = () => {
                   className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
                 >
                   <option value="Customer dispute via Support">Customer dispute via Support</option>
-                  <option value="Store unable to prepare order">Store unable to prepare order</option>
-                  <option value="Item out of stock">Item out of stock</option>
-                  <option value="No driver available">No driver available</option>
-                  <option value="Delivery delayed beyond tolerance">Delivery delayed beyond tolerance</option>
-                  <option value="Wrong delivery address">Wrong delivery address</option>
-                  <option value="Other support resolution">Other support resolution</option>
+                  <option value="Driver cannot fulfill order">Driver cannot fulfill order</option>
+                  <option value="Merchant store closed">Merchant store closed</option>
+                  <option value="Out of stock items">Out of stock items</option>
+                  <option value="Severe delivery delay">Severe delivery delay</option>
+                  <option value="Customer unreachable">Customer unreachable</option>
+                  <option value="Other support reason">Other support reason</option>
                 </select>
               </div>
 
               <div>
                 <label className="block font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                  Responsible Party (Fault)
+                  Cancellation Fault Assignment
                 </label>
                 <select
                   value={cancelFault}
                   onChange={(e) => setCancelFault(e.target.value as any)}
-                  className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium"
+                  className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
                 >
                   <option value="platform">Platform / Operations Fault</option>
                   <option value="merchant">Merchant Store Fault</option>
@@ -1605,7 +2583,7 @@ export const Support: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL 3: DIRECT WALLET REFUND MODAL */}
+      {/* MODAL 4: DIRECT WALLET REFUND MODAL */}
       {refundModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
           <div className="w-full max-w-md bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-2xl space-y-4">
@@ -1618,7 +2596,7 @@ export const Support: React.FC = () => {
                   Issue Customer Wallet Refund
                 </h3>
                 <p className="text-xs text-gray-500">
-                  Recipient: {selectedTicket?.customerName || relatedOrder?.customerName}
+                  Recipient: {selectedTicket?.customerName || relatedOrder?.customerName || 'Customer'}
                 </p>
               </div>
             </div>
@@ -1675,7 +2653,7 @@ export const Support: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL 4: LIGHTBOX ENLARGE PHOTO */}
+      {/* MODAL 5: LIGHTBOX ENLARGE PHOTO */}
       {lightboxImage && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md cursor-pointer"

@@ -1,4 +1,4 @@
-import { OrderServiceType } from '../types';
+import { OrderServiceType, DispatchSettings, RiderPayConfig } from '../types';
 
 export const FOOD_CATEGORIES = [
   'Dessert',
@@ -176,4 +176,94 @@ export const SUPPORT_CANNED_REPLIES = [
   'Your order has been cancelled and any paid amount has been returned to your wallet balance.',
   'Thank you for reaching out to Delivio Support. This report has been investigated and resolved.'
 ];
+
+export const DRIVER_SUPPORT_REASONS = [
+  { id: 'cant_fit_bag', label: "Can't fit on my bag" },
+  { id: 'too_big', label: 'Order is too big or heavy' },
+  { id: 'accident', label: 'Accident' },
+  { id: 'wrong_items', label: 'Wrong or missing items' },
+  { id: 'merchant_wait', label: 'Merchant is taking too long' },
+  { id: 'merchant_closed', label: 'Merchant is closed' },
+  { id: 'customer_unreachable', label: 'Customer unreachable' },
+  { id: 'vehicle_breakdown', label: 'Vehicle breakdown' },
+  { id: 'safety', label: 'Safety concern' },
+  { id: 'other', label: 'Other' }
+] as const;
+
+export type DriverSupportReasonId = typeof DRIVER_SUPPORT_REASONS[number]['id'];
+
+export const DRIVER_CANNED_REPLIES = [
+  'Hello! We are reviewing your driver report and order items right now.',
+  'We are splitting this delivery. Another rider is being dispatched to carry the excess items.',
+  'Your safety is our top priority. Please stay in a secure area while we coordinate with dispatch.',
+  'We have logged the merchant preparation delay and updated the customer.',
+  'We are attempting to call the customer directly from operations. Please stand by.',
+  'The order has been re-dispatched to another partner without affecting your performance record.',
+  'Thank you for your report and diligence. This ticket has been resolved.'
+];
+
+export const DEFAULT_DISPATCH_SETTINGS: DispatchSettings = {
+  defaultOption: 'priority',
+  options: {
+    priority: {
+      label: 'Priority',
+      enabled: true,
+      holdMinutes: 0,
+      maxBatch: 1,
+      feeAdjustType: 'flat',
+      feeAdjustValue: 22
+    },
+    standard: {
+      label: 'Standard',
+      enabled: true,
+      holdMinutes: 5,
+      maxBatch: 2,
+      feeAdjustType: 'flat',
+      feeAdjustValue: 0
+    },
+    saver: {
+      label: 'Saver',
+      enabled: true,
+      holdMinutes: 10,
+      maxBatch: 3,
+      feeAdjustType: 'flat',
+      feeAdjustValue: -15
+    }
+  },
+  searchRadiusKm: 5,
+  waveSeconds: 8,
+  poolMaxPickupGapKm: 1.5,
+  poolMaxDropoffGapKm: 3
+};
+
+export const DEFAULT_RIDER_PAY: RiderPayConfig = {
+  single: {
+    minFare: 35,
+    includedKm: 2,
+    perKmExtra: 8
+  },
+  double: {
+    first: {
+      minFare: 35,
+      includedKm: 2,
+      perKmExtra: 8
+    },
+    second: {
+      minFare: 25,
+      includedKm: 2,
+      perKmExtra: 6
+    },
+    third: {
+      minFare: 20,
+      includedKm: 2,
+      perKmExtra: 5
+    }
+  },
+  pickup: {
+    minFare: 10,
+    freeKm: 1,
+    perKmExtra: 6
+  }
+};
+
 

@@ -14,11 +14,12 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { useCity } from '../context/CityContext';
 import { logAuditEvent } from '../utils/audit';
-import type { PlatformSettings, OrderServiceType, PlatformVatConfig } from '../types';
+import type { PlatformSettings, OrderServiceType, PlatformVatConfig, DispatchSettings, DeliveryOptionType } from '../types';
 import {
   VEHICLE_TYPES,
   SERVICES_BY_VEHICLE,
   DEFAULT_TAXI_RATES,
+  DEFAULT_DISPATCH_SETTINGS,
   type VehicleType
 } from '../constants';
 import {
@@ -50,7 +51,10 @@ import {
   Receipt,
   Clock,
   Globe,
-  Percent
+  Percent,
+  Radio,
+  Compass,
+  Zap
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
@@ -105,6 +109,13 @@ export const Settings: React.FC = () => {
   const [sampleServiceFee, setSampleServiceFee] = useState<number>(15);
   const [confirmSaveVatModalOpen, setConfirmSaveVatModalOpen] = useState(false);
   const [savingTaxesAndFees, setSavingTaxesAndFees] = useState(false);
+
+  // Dispatch Settings (settings/dispatch)
+  const [dispatchSettings, setDispatchSettings] = useState<DispatchSettings>(DEFAULT_DISPATCH_SETTINGS);
+  const [dispatchExists, setDispatchExists] = useState<boolean>(true);
+  const [loadingDispatch, setLoadingDispatch] = useState<boolean>(true);
+  const [savingDispatch, setSavingDispatch] = useState<boolean>(false);
+  const [confirmSaveDispatchModalOpen, setConfirmSaveDispatchModalOpen] = useState<boolean>(false);
 
   // Initialize DB state
   const [initDbModalOpen, setInitDbModalOpen] = useState(false);
@@ -308,6 +319,57 @@ export const Settings: React.FC = () => {
             setTimezone(dt.timezone);
           }
         }
+
+        // Fetch settings/dispatch
+        try {
+          setLoadingDispatch(true);
+          const dRef = doc(db, 'settings', 'dispatch');
+          const dSnap = await getDoc(dRef);
+          if (dSnap.exists()) {
+            const dt = dSnap.data();
+            setDispatchSettings({
+              defaultOption: dt.defaultOption || 'priority',
+              options: {
+                priority: {
+                  label: dt.options?.priority?.label || 'Priority',
+                  enabled: dt.options?.priority?.enabled !== false,
+                  holdMinutes: 0,
+                  maxBatch: 1,
+                  feeAdjustType: dt.options?.priority?.feeAdjustType || 'flat',
+                  feeAdjustValue: Number(dt.options?.priority?.feeAdjustValue ?? 22)
+                },
+                standard: {
+                  label: dt.options?.standard?.label || 'Standard',
+                  enabled: dt.options?.standard?.enabled !== false,
+                  holdMinutes: Number(dt.options?.standard?.holdMinutes ?? 5),
+                  maxBatch: Number(dt.options?.standard?.maxBatch ?? 2),
+                  feeAdjustType: dt.options?.standard?.feeAdjustType || 'flat',
+                  feeAdjustValue: Number(dt.options?.standard?.feeAdjustValue ?? 0)
+                },
+                saver: {
+                  label: dt.options?.saver?.label || 'Saver',
+                  enabled: dt.options?.saver?.enabled !== false,
+                  holdMinutes: Number(dt.options?.saver?.holdMinutes ?? 10),
+                  maxBatch: Number(dt.options?.saver?.maxBatch ?? 3),
+                  feeAdjustType: dt.options?.saver?.feeAdjustType || 'flat',
+                  feeAdjustValue: Number(dt.options?.saver?.feeAdjustValue ?? -15)
+                }
+              },
+              searchRadiusKm: Number(dt.searchRadiusKm ?? 5),
+              waveSeconds: Number(dt.waveSeconds ?? 8),
+              poolMaxPickupGapKm: Number(dt.poolMaxPickupGapKm ?? 1.5),
+              poolMaxDropoffGapKm: Number(dt.poolMaxDropoffGapKm ?? 3)
+            });
+            setDispatchExists(true);
+          } else {
+            setDispatchSettings(DEFAULT_DISPATCH_SETTINGS);
+            setDispatchExists(false);
+          }
+        } catch (e) {
+          console.warn('Failed to load settings/dispatch:', e);
+        } finally {
+          setLoadingDispatch(false);
+        }
       } catch (err) {
         showError(err);
       } finally {
@@ -317,6 +379,95 @@ export const Settings: React.FC = () => {
 
     fetchSettings();
   }, []);
+
+  const handleCreateDefaultDispatch = async () => {
+    try {
+      setSavingDispatch(true);
+      const dRef = doc(db, 'settings', 'dispatch');
+      const payload = {
+        ...DEFAULT_DISPATCH_SETTINGS,
+        updatedAt: Timestamp.now(),
+        updatedBy: adminProfile?.uid || 'admin'
+      };
+      await setDoc(dRef, payload);
+      setDispatchSettings(DEFAULT_DISPATCH_SETTINGS);
+      setDispatchExists(true);
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'CREATE_DEFAULT_DISPATCH_SETTINGS',
+        entityType: 'settings',
+        entityId: 'dispatch',
+        details: 'Created initial default dispatch settings document (Priority +22, Standard 0, Saver -15, Radius 5km)'
+      });
+
+      showSuccess('Default dispatch settings created successfully.');
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSavingDispatch(false);
+    }
+  };
+
+  const handleConfirmSaveDispatch = async () => {
+    try {
+      setSavingDispatch(true);
+      const dRef = doc(db, 'settings', 'dispatch');
+      // Priority must keep holdMinutes 0 and maxBatch 1
+      const payload: DispatchSettings = {
+        defaultOption: dispatchSettings.defaultOption || 'priority',
+        options: {
+          priority: {
+            ...dispatchSettings.options.priority,
+            holdMinutes: 0,
+            maxBatch: 1,
+            feeAdjustValue: Number(dispatchSettings.options.priority.feeAdjustValue)
+          },
+          standard: {
+            ...dispatchSettings.options.standard,
+            holdMinutes: Math.max(1, Number(dispatchSettings.options.standard.holdMinutes) || 5),
+            maxBatch: Math.max(1, Number(dispatchSettings.options.standard.maxBatch) || 2),
+            feeAdjustValue: Number(dispatchSettings.options.standard.feeAdjustValue)
+          },
+          saver: {
+            ...dispatchSettings.options.saver,
+            holdMinutes: Math.max(1, Number(dispatchSettings.options.saver.holdMinutes) || 10),
+            maxBatch: Math.max(1, Number(dispatchSettings.options.saver.maxBatch) || 3),
+            feeAdjustValue: Number(dispatchSettings.options.saver.feeAdjustValue)
+          }
+        },
+        searchRadiusKm: Math.max(1, Number(dispatchSettings.searchRadiusKm) || 5),
+        waveSeconds: Math.max(1, Number(dispatchSettings.waveSeconds) || 8),
+        poolMaxPickupGapKm: Math.max(0.1, Number(dispatchSettings.poolMaxPickupGapKm) || 1.5),
+        poolMaxDropoffGapKm: Math.max(0.1, Number(dispatchSettings.poolMaxDropoffGapKm) || 3),
+        updatedAt: Timestamp.now(),
+        updatedBy: adminProfile?.uid || 'admin'
+      };
+
+      await setDoc(dRef, payload);
+      setDispatchSettings(payload);
+      setDispatchExists(true);
+      setConfirmSaveDispatchModalOpen(false);
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'UPDATE_DISPATCH_SETTINGS',
+        entityType: 'settings',
+        entityId: 'dispatch',
+        details: `Updated dispatch settings. Default: ${payload.defaultOption}, Radius: ${payload.searchRadiusKm}km, Wave: ${payload.waveSeconds}s, Priority: ${payload.options.priority.feeAdjustValue >= 0 ? '+' : ''}${payload.options.priority.feeAdjustValue}, Saver: ${payload.options.saver.feeAdjustValue}`
+      });
+
+      showSuccess('Dispatch settings saved successfully.');
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSavingDispatch(false);
+    }
+  };
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1229,6 +1380,680 @@ export const Settings: React.FC = () => {
         </div>
       </div>
 
+      {/* Dispatch Settings Panel (settings/dispatch) */}
+      <div id="dispatch-settings" className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-gray-100 dark:border-zinc-800">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-xl bg-amber-400 text-black shadow-xs">
+              <Zap className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                  Dispatch & Order Batching Settings
+                </h3>
+                {dispatchExists ? (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800">
+                    Active (settings/dispatch)
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-400 border border-amber-300 dark:border-amber-800">
+                    Missing Document
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-gray-500 dark:text-zinc-400 mt-0.5">
+                Configure Priority, Standard, and Saver batching windows, fee adjustments, and driver pooling radii.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            {!dispatchExists && (
+              <button
+                type="button"
+                onClick={handleCreateDefaultDispatch}
+                disabled={savingDispatch}
+                className="px-3.5 py-2 rounded-xl text-xs font-bold border border-amber-400 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/30 flex items-center gap-1.5 transition-colors"
+              >
+                {savingDispatch ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                Create default dispatch settings
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setConfirmSaveDispatchModalOpen(true)}
+              disabled={savingDispatch || loadingDispatch}
+              className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs"
+            >
+              {savingDispatch ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              Save Dispatch Settings
+            </button>
+          </div>
+        </div>
+
+        {/* Helper Explanatory Banner */}
+        <div className="p-4 rounded-2xl bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800/50 flex items-start gap-3">
+          <Radio className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <span className="font-extrabold text-xs text-amber-900 dark:text-amber-200 uppercase tracking-wider block">
+              Dispatch Rules & Batching Engine
+            </span>
+            <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed">
+              <strong>Priority</strong> = one rider, one booking. <strong>Standard</strong> and <strong>Saver</strong> = the order waits up to <span className="font-semibold text-amber-700 dark:text-amber-400">holdMinutes</span> after the merchant accepts (or until Ready) to be combined with another order; if none is found it goes out as a single booking. <em>Priority must keep holdMinutes 0 and maxBatch 1.</em>
+            </p>
+          </div>
+        </div>
+
+        {/* Global Dispatch & Pool Limits */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-extrabold uppercase tracking-wider text-gray-700 dark:text-zinc-300 flex items-center gap-2">
+              <Compass className="w-4 h-4 text-amber-500" />
+              General Dispatch & Pool Parameters
+            </h4>
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-bold text-gray-600 dark:text-zinc-400">
+                Default Option for Customers:
+              </label>
+              <select
+                value={dispatchSettings.defaultOption}
+                onChange={(e) =>
+                  setDispatchSettings((prev) => ({
+                    ...prev,
+                    defaultOption: e.target.value as DeliveryOptionType
+                  }))
+                }
+                className="px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-amber-600 focus:ring-2 focus:ring-amber-400"
+              >
+                <option value="priority">Priority Delivery</option>
+                <option value="standard">Standard Delivery</option>
+                <option value="saver">Saver Delivery</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800">
+              <label className="block text-[11px] font-extrabold uppercase text-gray-500 dark:text-zinc-400 mb-1">
+                Driver Search Radius
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="1"
+                  max="50"
+                  step="0.5"
+                  value={dispatchSettings.searchRadiusKm}
+                  onChange={(e) =>
+                    setDispatchSettings((prev) => ({
+                      ...prev,
+                      searchRadiusKm: Number(e.target.value)
+                    }))
+                  }
+                  className="w-full px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                />
+                <span className="text-xs font-extrabold text-gray-500 dark:text-zinc-400">km</span>
+              </div>
+              <span className="text-[10px] text-gray-400 mt-1 block">Default: 5 km</span>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800">
+              <label className="block text-[11px] font-extrabold uppercase text-gray-500 dark:text-zinc-400 mb-1">
+                Wave Dispatch Interval
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="3"
+                  max="60"
+                  step="1"
+                  value={dispatchSettings.waveSeconds}
+                  onChange={(e) =>
+                    setDispatchSettings((prev) => ({
+                      ...prev,
+                      waveSeconds: Number(e.target.value)
+                    }))
+                  }
+                  className="w-full px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                />
+                <span className="text-xs font-extrabold text-gray-500 dark:text-zinc-400">sec</span>
+              </div>
+              <span className="text-[10px] text-gray-400 mt-1 block">Default: 8 seconds</span>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800">
+              <label className="block text-[11px] font-extrabold uppercase text-gray-500 dark:text-zinc-400 mb-1">
+                Pool Max Pickup Gap
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="0.1"
+                  max="10"
+                  step="0.1"
+                  value={dispatchSettings.poolMaxPickupGapKm}
+                  onChange={(e) =>
+                    setDispatchSettings((prev) => ({
+                      ...prev,
+                      poolMaxPickupGapKm: Number(e.target.value)
+                    }))
+                  }
+                  className="w-full px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                />
+                <span className="text-xs font-extrabold text-gray-500 dark:text-zinc-400">km</span>
+              </div>
+              <span className="text-[10px] text-gray-400 mt-1 block">Default: 1.5 km</span>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800">
+              <label className="block text-[11px] font-extrabold uppercase text-gray-500 dark:text-zinc-400 mb-1">
+                Pool Max Dropoff Gap
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="0.1"
+                  max="15"
+                  step="0.1"
+                  value={dispatchSettings.poolMaxDropoffGapKm}
+                  onChange={(e) =>
+                    setDispatchSettings((prev) => ({
+                      ...prev,
+                      poolMaxDropoffGapKm: Number(e.target.value)
+                    }))
+                  }
+                  className="w-full px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                />
+                <span className="text-xs font-extrabold text-gray-500 dark:text-zinc-400">km</span>
+              </div>
+              <span className="text-[10px] text-gray-400 mt-1 block">Default: 3.0 km</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Options Table / Cards: Priority, Standard, Saver */}
+        <div className="space-y-3">
+          <h4 className="text-xs font-extrabold uppercase tracking-wider text-gray-700 dark:text-zinc-300">
+            Delivery Option Tiers
+          </h4>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Priority Option */}
+            <div className={`p-4 rounded-2xl border transition-all ${
+              dispatchSettings.options.priority.enabled
+                ? 'bg-amber-500/5 border-amber-300 dark:border-amber-800/80'
+                : 'bg-gray-50 dark:bg-zinc-850 border-gray-200 dark:border-zinc-800 opacity-60'
+            }`}>
+              <div className="flex items-center justify-between pb-3 border-b border-gray-200 dark:border-zinc-700/60 mb-3">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 ring-2 ring-amber-300 dark:ring-amber-900" />
+                  <span className="font-black text-sm text-gray-900 dark:text-white">Priority</span>
+                  {dispatchSettings.defaultOption === 'priority' && (
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-amber-400 text-black">
+                      DEFAULT
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setDispatchSettings((prev) => ({
+                      ...prev,
+                      options: {
+                        ...prev.options,
+                        priority: {
+                          ...prev.options.priority,
+                          enabled: !prev.options.priority.enabled
+                        }
+                      }
+                    }))
+                  }
+                  className={`text-xs font-extrabold px-2.5 py-1 rounded-lg ${
+                    dispatchSettings.options.priority.enabled
+                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                      : 'bg-gray-200 text-gray-600 dark:bg-zinc-700 dark:text-zinc-300'
+                  }`}
+                >
+                  {dispatchSettings.options.priority.enabled ? 'Enabled' : 'Disabled'}
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                    Display Label
+                  </label>
+                  <input
+                    type="text"
+                    value={dispatchSettings.options.priority.label}
+                    onChange={(e) =>
+                      setDispatchSettings((prev) => ({
+                        ...prev,
+                        options: {
+                          ...prev.options,
+                          priority: { ...prev.options.priority, label: e.target.value }
+                        }
+                      }))
+                    }
+                    className="w-full px-3 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                      Hold Minutes
+                    </label>
+                    <input
+                      type="number"
+                      disabled
+                      value={0}
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-200 dark:border-zinc-800 bg-gray-100 dark:bg-zinc-900 text-gray-500 font-bold cursor-not-allowed"
+                    />
+                    <span className="text-[9px] text-gray-400 mt-0.5 block">Locked at 0</span>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                      Max Batch
+                    </label>
+                    <input
+                      type="number"
+                      disabled
+                      value={1}
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-200 dark:border-zinc-800 bg-gray-100 dark:bg-zinc-900 text-gray-500 font-bold cursor-not-allowed"
+                    />
+                    <span className="text-[9px] text-gray-400 mt-0.5 block">Locked at 1</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                      Adjustment Type
+                    </label>
+                    <select
+                      value={dispatchSettings.options.priority.feeAdjustType}
+                      onChange={(e) =>
+                        setDispatchSettings((prev) => ({
+                          ...prev,
+                          options: {
+                            ...prev.options,
+                            priority: {
+                              ...prev.options.priority,
+                              feeAdjustType: e.target.value as 'flat' | 'percent'
+                            }
+                          }
+                        }))
+                      }
+                      className="w-full px-2 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-semibold"
+                    >
+                      <option value="flat">₱ Flat</option>
+                      <option value="percent">% Percent</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                      Fee Adjustment
+                    </label>
+                    <input
+                      type="number"
+                      value={dispatchSettings.options.priority.feeAdjustValue}
+                      onChange={(e) =>
+                        setDispatchSettings((prev) => ({
+                          ...prev,
+                          options: {
+                            ...prev.options,
+                            priority: {
+                              ...prev.options.priority,
+                              feeAdjustValue: Number(e.target.value)
+                            }
+                          }
+                        }))
+                      }
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-amber-600 font-black"
+                    />
+                    <span className="text-[9px] text-gray-400 mt-0.5 block">Default: +₱22</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Standard Option */}
+            <div className={`p-4 rounded-2xl border transition-all ${
+              dispatchSettings.options.standard.enabled
+                ? 'bg-blue-500/5 border-blue-300 dark:border-blue-800/80'
+                : 'bg-gray-50 dark:bg-zinc-850 border-gray-200 dark:border-zinc-800 opacity-60'
+            }`}>
+              <div className="flex items-center justify-between pb-3 border-b border-gray-200 dark:border-zinc-700/60 mb-3">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-blue-500 ring-2 ring-blue-300 dark:ring-blue-900" />
+                  <span className="font-black text-sm text-gray-900 dark:text-white">Standard</span>
+                  {dispatchSettings.defaultOption === 'standard' && (
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-blue-500 text-white">
+                      DEFAULT
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setDispatchSettings((prev) => ({
+                      ...prev,
+                      options: {
+                        ...prev.options,
+                        standard: {
+                          ...prev.options.standard,
+                          enabled: !prev.options.standard.enabled
+                        }
+                      }
+                    }))
+                  }
+                  className={`text-xs font-extrabold px-2.5 py-1 rounded-lg ${
+                    dispatchSettings.options.standard.enabled
+                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                      : 'bg-gray-200 text-gray-600 dark:bg-zinc-700 dark:text-zinc-300'
+                  }`}
+                >
+                  {dispatchSettings.options.standard.enabled ? 'Enabled' : 'Disabled'}
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                    Display Label
+                  </label>
+                  <input
+                    type="text"
+                    value={dispatchSettings.options.standard.label}
+                    onChange={(e) =>
+                      setDispatchSettings((prev) => ({
+                        ...prev,
+                        options: {
+                          ...prev.options,
+                          standard: { ...prev.options.standard, label: e.target.value }
+                        }
+                      }))
+                    }
+                    className="w-full px-3 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                      Hold Minutes
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="30"
+                      value={dispatchSettings.options.standard.holdMinutes}
+                      onChange={(e) =>
+                        setDispatchSettings((prev) => ({
+                          ...prev,
+                          options: {
+                            ...prev.options,
+                            standard: {
+                              ...prev.options.standard,
+                              holdMinutes: Math.max(1, Number(e.target.value))
+                            }
+                          }
+                        }))
+                      }
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
+                    />
+                    <span className="text-[9px] text-gray-400 mt-0.5 block">Default: 5 mins</span>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                      Max Batch
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="5"
+                      value={dispatchSettings.options.standard.maxBatch}
+                      onChange={(e) =>
+                        setDispatchSettings((prev) => ({
+                          ...prev,
+                          options: {
+                            ...prev.options,
+                            standard: {
+                              ...prev.options.standard,
+                              maxBatch: Math.max(1, Number(e.target.value))
+                            }
+                          }
+                        }))
+                      }
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
+                    />
+                    <span className="text-[9px] text-gray-400 mt-0.5 block">Default: 2 orders</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                      Adjustment Type
+                    </label>
+                    <select
+                      value={dispatchSettings.options.standard.feeAdjustType}
+                      onChange={(e) =>
+                        setDispatchSettings((prev) => ({
+                          ...prev,
+                          options: {
+                            ...prev.options,
+                            standard: {
+                              ...prev.options.standard,
+                              feeAdjustType: e.target.value as 'flat' | 'percent'
+                            }
+                          }
+                        }))
+                      }
+                      className="w-full px-2 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-semibold"
+                    >
+                      <option value="flat">₱ Flat</option>
+                      <option value="percent">% Percent</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                      Fee Adjustment
+                    </label>
+                    <input
+                      type="number"
+                      value={dispatchSettings.options.standard.feeAdjustValue}
+                      onChange={(e) =>
+                        setDispatchSettings((prev) => ({
+                          ...prev,
+                          options: {
+                            ...prev.options,
+                            standard: {
+                              ...prev.options.standard,
+                              feeAdjustValue: Number(e.target.value)
+                            }
+                          }
+                        }))
+                      }
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-blue-600 font-black"
+                    />
+                    <span className="text-[9px] text-gray-400 mt-0.5 block">Default: ₱0</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Saver Option */}
+            <div className={`p-4 rounded-2xl border transition-all ${
+              dispatchSettings.options.saver.enabled
+                ? 'bg-emerald-500/5 border-emerald-300 dark:border-emerald-800/80'
+                : 'bg-gray-50 dark:bg-zinc-850 border-gray-200 dark:border-zinc-800 opacity-60'
+            }`}>
+              <div className="flex items-center justify-between pb-3 border-b border-gray-200 dark:border-zinc-700/60 mb-3">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-300 dark:ring-emerald-900" />
+                  <span className="font-black text-sm text-gray-900 dark:text-white">Saver</span>
+                  {dispatchSettings.defaultOption === 'saver' && (
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-emerald-500 text-white">
+                      DEFAULT
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setDispatchSettings((prev) => ({
+                      ...prev,
+                      options: {
+                        ...prev.options,
+                        saver: {
+                          ...prev.options.saver,
+                          enabled: !prev.options.saver.enabled
+                        }
+                      }
+                    }))
+                  }
+                  className={`text-xs font-extrabold px-2.5 py-1 rounded-lg ${
+                    dispatchSettings.options.saver.enabled
+                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                      : 'bg-gray-200 text-gray-600 dark:bg-zinc-700 dark:text-zinc-300'
+                  }`}
+                >
+                  {dispatchSettings.options.saver.enabled ? 'Enabled' : 'Disabled'}
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                    Display Label
+                  </label>
+                  <input
+                    type="text"
+                    value={dispatchSettings.options.saver.label}
+                    onChange={(e) =>
+                      setDispatchSettings((prev) => ({
+                        ...prev,
+                        options: {
+                          ...prev.options,
+                          saver: { ...prev.options.saver, label: e.target.value }
+                        }
+                      }))
+                    }
+                    className="w-full px-3 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                      Hold Minutes
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="45"
+                      value={dispatchSettings.options.saver.holdMinutes}
+                      onChange={(e) =>
+                        setDispatchSettings((prev) => ({
+                          ...prev,
+                          options: {
+                            ...prev.options,
+                            saver: {
+                              ...prev.options.saver,
+                              holdMinutes: Math.max(1, Number(e.target.value))
+                            }
+                          }
+                        }))
+                      }
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
+                    />
+                    <span className="text-[9px] text-gray-400 mt-0.5 block">Default: 10 mins</span>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                      Max Batch
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="6"
+                      value={dispatchSettings.options.saver.maxBatch}
+                      onChange={(e) =>
+                        setDispatchSettings((prev) => ({
+                          ...prev,
+                          options: {
+                            ...prev.options,
+                            saver: {
+                              ...prev.options.saver,
+                              maxBatch: Math.max(1, Number(e.target.value))
+                            }
+                          }
+                        }))
+                      }
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
+                    />
+                    <span className="text-[9px] text-gray-400 mt-0.5 block">Default: 3 orders</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                      Adjustment Type
+                    </label>
+                    <select
+                      value={dispatchSettings.options.saver.feeAdjustType}
+                      onChange={(e) =>
+                        setDispatchSettings((prev) => ({
+                          ...prev,
+                          options: {
+                            ...prev.options,
+                            saver: {
+                              ...prev.options.saver,
+                              feeAdjustType: e.target.value as 'flat' | 'percent'
+                            }
+                          }
+                        }))
+                      }
+                      className="w-full px-2 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-semibold"
+                    >
+                      <option value="flat">₱ Flat</option>
+                      <option value="percent">% Percent</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
+                      Fee Adjustment
+                    </label>
+                    <input
+                      type="number"
+                      value={dispatchSettings.options.saver.feeAdjustValue}
+                      onChange={(e) =>
+                        setDispatchSettings((prev) => ({
+                          ...prev,
+                          options: {
+                            ...prev.options,
+                            saver: {
+                              ...prev.options.saver,
+                              feeAdjustValue: Number(e.target.value)
+                            }
+                          }
+                        }))
+                      }
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-emerald-600 font-black"
+                    />
+                    <span className="text-[9px] text-gray-400 mt-0.5 block">Default: -₱15</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Service Types & Platform Switches Panel */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-gray-100 dark:border-zinc-800">
@@ -1650,6 +2475,20 @@ export const Settings: React.FC = () => {
           title="Save Taxes & Platform Timezone Settings?"
           message={`Are you sure you want to update platform VAT to ${vatEnabled ? 'ENABLED' : 'DISABLED'} (${vatPercent}%, mode: ${vatMode}, base: ${vatBase}) and timezone to "${timezone}"? This affects checkout pricing and operational schedules.`}
           confirmLabel="Save Changes"
+          reasonRequired={false}
+          isDestructive={false}
+        />
+      )}
+
+      {/* Confirmation Modal for Dispatch Settings Save */}
+      {confirmSaveDispatchModalOpen && (
+        <ConfirmationModal
+          isOpen={confirmSaveDispatchModalOpen}
+          onClose={() => setConfirmSaveDispatchModalOpen(false)}
+          onConfirm={handleConfirmSaveDispatch}
+          title="Save Dispatch & Batching Settings?"
+          message={`Are you sure you want to save dispatch settings? Default option is set to "${dispatchSettings.defaultOption.toUpperCase()}". Priority will enforce 0 holdMinutes and maxBatch 1. Driver search radius is ${dispatchSettings.searchRadiusKm} km.`}
+          confirmLabel="Save Dispatch Settings"
           reasonRequired={false}
           isDestructive={false}
         />

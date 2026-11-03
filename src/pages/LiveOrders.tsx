@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import L from 'leaflet';
 import {
   db,
@@ -54,7 +54,11 @@ import {
   ChevronDown,
   Calendar,
   Navigation,
-  Edit
+  Edit,
+  Zap,
+  Layers,
+  Split,
+  Route
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
@@ -282,6 +286,222 @@ export const OrderItemSelectionsView: React.FC<{ item: any }> = ({ item }) => {
   );
 };
 
+export const DeliveryOptionChip: React.FC<{ option?: string }> = ({ option }) => {
+  if (!option) return null;
+  const opt = option.toLowerCase();
+  if (opt === 'priority') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-rose-100 text-rose-800 dark:bg-rose-950/70 dark:text-rose-300 border border-rose-300 dark:border-rose-800 shadow-2xs">
+        <Zap className="w-3 h-3 text-rose-600 fill-rose-500 shrink-0" />
+        <span>Priority</span>
+      </span>
+    );
+  }
+  if (opt === 'saver') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 shadow-2xs">
+        <Clock className="w-3 h-3 text-emerald-600 shrink-0" />
+        <span>Saver</span>
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-blue-100 text-blue-800 dark:bg-blue-950/70 dark:text-blue-300 border border-blue-300 dark:border-blue-800 shadow-2xs">
+      <span>Standard</span>
+    </span>
+  );
+};
+
+export const HoldCountdown: React.FC<{ order: Order }> = ({ order }) => {
+  const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!order.holdUntil?.seconds) {
+      setSecondsLeft(null);
+      return;
+    }
+    const update = () => {
+      const diff = Math.floor(order.holdUntil!.seconds - Date.now() / 1000);
+      setSecondsLeft(Math.max(0, diff));
+    };
+    update();
+    const iv = setInterval(update, 1000);
+    return () => clearInterval(iv);
+  }, [order.holdUntil]);
+
+  if (secondsLeft === null) return null;
+
+  if (secondsLeft <= 0) {
+    return (
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400">
+        <Clock className="w-2.5 h-2.5" /> Hold released
+      </span>
+    );
+  }
+
+  const m = Math.floor(secondsLeft / 60);
+  const s = secondsLeft % 60;
+
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 dark:bg-amber-950/70 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 animate-pulse">
+      <Clock className="w-3 h-3 text-amber-600 shrink-0" />
+      <span>Hold {m}:{s.toString().padStart(2, '0')}</span>
+    </span>
+  );
+};
+
+export const BatchInfoBadge: React.FC<{
+  order: Order;
+  onClickBatch?: (batchId: string) => void;
+}> = ({ order, onClickBatch }) => {
+  if (!order.batchId) return null;
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        if (onClickBatch) {
+          e.stopPropagation();
+          onClickBatch(order.batchId!);
+        }
+      }}
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-purple-100 dark:bg-purple-950/70 text-purple-900 dark:text-purple-200 border border-purple-300 dark:border-purple-800 hover:bg-purple-200 dark:hover:bg-purple-900 transition-colors shadow-2xs"
+      title={`Batch ID: ${order.batchId}`}
+    >
+      <Layers className="w-3 h-3 text-purple-600 shrink-0" />
+      <span>Batch #{order.batchId.slice(-6)}</span>
+      {order.bookingRank && (
+        <span className="px-1 py-0.2 rounded bg-purple-200 dark:bg-purple-900 text-purple-950 dark:text-purple-100 font-extrabold text-[9px]">
+          #{order.bookingRank}{order.batchTotalBookings ? ` of ${order.batchTotalBookings}` : ''}
+        </span>
+      )}
+    </button>
+  );
+};
+
+export const SplitLinksView: React.FC<{
+  order: Order;
+  onSelectOrderById?: (orderId: string) => void;
+}> = ({ order, onSelectOrderById }) => {
+  if (!order.splitOf && !order.splitOut) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+      {order.splitOf && (
+        <button
+          type="button"
+          onClick={(e) => {
+            if (onSelectOrderById) {
+              e.stopPropagation();
+              onSelectOrderById(order.splitOf!);
+            }
+          }}
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-mono font-bold bg-orange-100 dark:bg-orange-950/70 text-orange-900 dark:text-orange-200 border border-orange-300 dark:border-orange-800 hover:bg-orange-200 transition-colors cursor-pointer"
+          title={`Split from parent order #${order.splitOf}`}
+        >
+          <Split className="w-3 h-3 text-orange-600 shrink-0" />
+          <span>Split of: #{order.splitOf.slice(-6)}</span>
+        </button>
+      )}
+      {order.splitOut && (() => {
+        const childId = typeof order.splitOut === 'string' ? order.splitOut : order.splitOut?.childOrderId;
+        if (!childId) return null;
+        return (
+          <button
+            type="button"
+            onClick={(e) => {
+              if (onSelectOrderById) {
+                e.stopPropagation();
+                onSelectOrderById(childId);
+              }
+            }}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-mono font-bold bg-teal-100 dark:bg-teal-950/70 text-teal-900 dark:text-teal-200 border border-teal-300 dark:border-teal-800 hover:bg-teal-200 transition-colors cursor-pointer"
+            title={`Split out into order #${childId}`}
+          >
+            <Split className="w-3 h-3 text-teal-600 shrink-0" />
+            <span>Split out: #{childId.slice(-6)}</span>
+          </button>
+        );
+      })()}
+    </div>
+  );
+};
+
+export const RiderPayBreakdownCard: React.FC<{ order: Order }> = ({ order }) => {
+  const earning = order.riderEarning;
+  const estimate = order.riderFeeEstimate;
+  const isFinal = Boolean(earning && (earning.total || earning.bookingFee || earning.pickupFee));
+  const data = isFinal ? earning : estimate;
+
+  if (!data && !order.riderName) {
+    return null;
+  }
+
+  const pickupFee = Number(data?.pickupFee || 0);
+  const bookingFee = Number(data?.bookingFee || 0);
+  const specialRadiusExtra = Number(data?.specialRadiusExtra || 0);
+  const tip = Number(order.fees?.tip || 0);
+  const lateTip = Number(order.lateTip || order.fees?.lateTip || 0);
+  const totalRiderPay = Number(data?.total || (pickupFee + bookingFee + specialRadiusExtra + tip + lateTip));
+
+  return (
+    <div className="p-4 rounded-2xl bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800/60 space-y-2.5 text-xs">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5 font-bold text-amber-950 dark:text-amber-200">
+          <Car className="w-4 h-4 text-amber-600" />
+          <span>Rider Pay Breakdown</span>
+        </div>
+        <span
+          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+            isFinal
+              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+              : 'bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300'
+          }`}
+        >
+          {isFinal ? 'Settled Earnings' : 'Estimated Pay'}
+        </span>
+      </div>
+
+      <div className="space-y-1.5 text-gray-600 dark:text-zinc-300 pt-1">
+        <div className="flex justify-between">
+          <span className="text-gray-500">Pickup Fee (Rider to First Merchant)</span>
+          <span className="font-semibold text-gray-900 dark:text-white">₱{pickupFee.toFixed(2)}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-gray-500">Booking Fee (Road Distance)</span>
+          <span className="font-semibold text-gray-900 dark:text-white">₱{bookingFee.toFixed(2)}</span>
+        </div>
+        {specialRadiusExtra > 0 && (
+          <div className="flex justify-between text-indigo-600 dark:text-indigo-400 font-semibold">
+            <span>Special Radius Extra Pay</span>
+            <span>+₱{specialRadiusExtra.toFixed(2)}</span>
+          </div>
+        )}
+        {tip > 0 && (
+          <div className="flex justify-between text-emerald-600 font-semibold">
+            <span>Customer Tip</span>
+            <span>+₱{tip.toFixed(2)}</span>
+          </div>
+        )}
+        {lateTip > 0 && (
+          <div className="flex justify-between text-amber-600 font-semibold">
+            <span>Late Tip</span>
+            <span>+₱{lateTip.toFixed(2)}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="pt-2 border-t border-amber-200 dark:border-amber-800/60 flex justify-between items-center font-bold text-sm">
+        <span className="text-gray-900 dark:text-white">Total Rider Payout</span>
+        <span className="text-amber-700 dark:text-amber-300 text-base font-extrabold">
+          ₱{totalRiderPay.toFixed(2)}
+        </span>
+      </div>
+      <p className="text-[10px] text-gray-400 dark:text-zinc-500 italic">
+        *Rider receives 100% of customer tips. The pickup fee is paid once per batch.
+      </p>
+    </div>
+  );
+};
+
 export const OrderMerchantEditComparison: React.FC<{ order: Order }> = ({ order }) => {
   const isEdited = Boolean(
     order.editedByMerchant ||
@@ -467,9 +687,10 @@ export const LiveOrders: React.FC = () => {
   const { adminProfile } = useAuth();
   const { showSuccess, showError } = useToast();
 
+  const navigate = useNavigate();
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
-  const [viewMode, setViewMode] = useState<'kanban' | 'table'>('table');
+  const [viewMode, setViewMode] = useState<'kanban' | 'table' | 'batches'>('table');
 
   // Filters
   const [searchQuery, setSearchQuery] = useState(initialSearch);
@@ -573,6 +794,15 @@ export const LiveOrders: React.FC = () => {
             walletAdjustDue: data.walletAdjustDue,
             walletAdjustApplied: data.walletAdjustApplied,
             walletAdjustAppliedAt: data.walletAdjustAppliedAt,
+            deliveryOption: data.deliveryOption,
+            holdUntil: data.holdUntil,
+            holdMinutes: data.holdMinutes,
+            batchId: data.batchId,
+            bookingRank: data.bookingRank,
+            batchTotalBookings: data.batchTotalBookings,
+            splitOf: data.splitOf,
+            splitOut: data.splitOut,
+            riderFeeEstimate: data.riderFeeEstimate,
             createdAt: data.createdAt,
             updatedAt: data.updatedAt,
             pickedUpAt: data.pickedUpAt,
@@ -701,6 +931,37 @@ export const LiveOrders: React.FC = () => {
       return true;
     });
   }, [orders, selectedCityId, serviceFilter, statusFilter, fulfillmentFilter, paymentFilter, dateFilter, searchQuery]);
+
+  // Grouped batches for Batches view
+  const batchedGroups = useMemo(() => {
+    const map = new Map<string, Order[]>();
+    const unbatched: Order[] = [];
+
+    filteredOrders.forEach((o) => {
+      if (o.batchId) {
+        const arr = map.get(o.batchId) || [];
+        arr.push(o);
+        map.set(o.batchId, arr);
+      } else {
+        unbatched.push(o);
+      }
+    });
+
+    const batches = Array.from(map.entries()).map(([batchId, batchOrders]) => {
+      batchOrders.sort((a, b) => Number(a.bookingRank || 1) - Number(b.bookingRank || 1));
+      return {
+        batchId,
+        orders: batchOrders,
+        riderName: batchOrders[0]?.riderName,
+        riderPhone: batchOrders[0]?.riderPhone,
+        riderVehicle: batchOrders[0]?.riderVehicle || batchOrders[0]?.vehicleType,
+        riderId: batchOrders[0]?.riderId,
+        cityId: batchOrders[0]?.cityId
+      };
+    });
+
+    return { batches, unbatched };
+  }, [filteredOrders]);
 
   // Mini map rendering inside detail drawer
   useEffect(() => {
@@ -1154,6 +1415,17 @@ export const LiveOrders: React.FC = () => {
               <LayoutGrid className="w-4 h-4" />
               <span>Kanban</span>
             </button>
+            <button
+              onClick={() => setViewMode('batches')}
+              className={`p-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all ${
+                viewMode === 'batches'
+                  ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-white shadow-xs'
+                  : 'text-gray-500 hover:text-gray-900 dark:hover:text-white'
+              }`}
+            >
+              <Layers className="w-4 h-4 text-purple-600" />
+              <span>Batches</span>
+            </button>
           </div>
 
           {/* CSV Export */}
@@ -1319,11 +1591,12 @@ export const LiveOrders: React.FC = () => {
                 <tr>
                   <th className="px-4 py-3.5">Order #</th>
                   <th className="px-4 py-3.5">Fulfillment</th>
+                  <th className="px-4 py-3.5">Option</th>
                   <th className="px-4 py-3.5">Service</th>
                   <th className="px-4 py-3.5">Status</th>
                   <th className="px-4 py-3.5">Customer</th>
                   <th className="px-4 py-3.5">Pickup / Start</th>
-                  <th className="px-4 py-3.5">Driver</th>
+                  <th className="px-4 py-3.5">Driver / Batch</th>
                   <th className="px-4 py-3.5">Payment</th>
                   <th className="px-4 py-3.5">Tip</th>
                   <th className="px-4 py-3.5">Total Amount</th>
@@ -1334,7 +1607,7 @@ export const LiveOrders: React.FC = () => {
               <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 font-medium">
                 {filteredOrders.length === 0 ? (
                   <tr>
-                    <td colSpan={12} className="text-center py-12 text-gray-400 text-xs">
+                    <td colSpan={13} className="text-center py-12 text-gray-400 text-xs">
                       No matching orders found.
                     </td>
                   </tr>
@@ -1346,13 +1619,30 @@ export const LiveOrders: React.FC = () => {
                       className="hover:bg-amber-50/50 dark:hover:bg-zinc-800/50 cursor-pointer transition-colors"
                     >
                       <td className="px-4 py-3 font-mono font-bold text-gray-900 dark:text-white">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span>#{order.orderNumber}</span>
-                          <EditedByMerchantBadge order={order} />
+                        <div className="flex flex-col gap-1 items-start">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span>#{order.orderNumber}</span>
+                            <EditedByMerchantBadge order={order} />
+                          </div>
+                          <SplitLinksView
+                            order={order}
+                            onSelectOrderById={(targetId) => {
+                              const found = orders.find(
+                                (o) => o.id === targetId || o.orderNumber === targetId
+                              );
+                              if (found) setSelectedOrder(found);
+                            }}
+                          />
                         </div>
                       </td>
                       <td className="px-4 py-3">
                         <FulfillmentChip order={order} />
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-col gap-1 items-start">
+                          <DeliveryOptionChip option={order.deliveryOption} />
+                          <HoldCountdown order={order} />
+                        </div>
                       </td>
                       <td className="px-4 py-3">
                         <ServiceChips order={order} />
@@ -1390,14 +1680,26 @@ export const LiveOrders: React.FC = () => {
                             No driver (Pick Up)
                           </span>
                         ) : order.riderName ? (
-                          <div className="flex items-center gap-1.5 font-semibold text-gray-900 dark:text-white">
-                            <Car className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                            <span>{order.riderName}</span>
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-1.5 font-semibold text-gray-900 dark:text-white">
+                              <Car className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                              <span>{order.riderName}</span>
+                            </div>
+                            <BatchInfoBadge
+                              order={order}
+                              onClickBatch={() => setViewMode('batches')}
+                            />
                           </div>
                         ) : (
-                          <span className="text-amber-600 dark:text-amber-400 text-[11px] font-bold animate-pulse">
-                            Unassigned
-                          </span>
+                          <div className="space-y-1">
+                            <span className="text-amber-600 dark:text-amber-400 text-[11px] font-bold animate-pulse block">
+                              Unassigned
+                            </span>
+                            <BatchInfoBadge
+                              order={order}
+                              onClickBatch={() => setViewMode('batches')}
+                            />
+                          </div>
                         )}
                       </td>
                       <td className="px-4 py-3">
@@ -1445,7 +1747,7 @@ export const LiveOrders: React.FC = () => {
             </table>
           </div>
         </div>
-      ) : (
+      ) : viewMode === 'kanban' ? (
         /* Kanban View */
         <div className="flex gap-4 overflow-x-auto pb-4 pt-1">
           {['Placed Order', 'Preparing', 'Ready', 'Driver is on the way / Trip', 'Delivered / Completed', 'Cancelled'].map(
@@ -1500,6 +1802,28 @@ export const LiveOrders: React.FC = () => {
                             <ServiceChips order={ord} />
                           </div>
                         </div>
+
+                        <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+                          <DeliveryOptionChip option={ord.deliveryOption} />
+                          <HoldCountdown order={ord} />
+                          <BatchInfoBadge
+                            order={ord}
+                            onClickBatch={() => setViewMode('batches')}
+                          />
+                        </div>
+
+                        <div className="mb-2">
+                          <SplitLinksView
+                            order={ord}
+                            onSelectOrderById={(targetId) => {
+                              const found = orders.find(
+                                (o) => o.id === targetId || o.orderNumber === targetId
+                              );
+                              if (found) setSelectedOrder(found);
+                            }}
+                          />
+                        </div>
+
                         <p className="text-xs font-semibold text-gray-900 dark:text-zinc-100">
                           {ord.serviceType === 'taxi' ? `Taxi: ${ord.pickup?.address || 'Pickup'}` : ord.merchantName || ord.serviceType}
                         </p>
@@ -1537,6 +1861,200 @@ export const LiveOrders: React.FC = () => {
             }
           )}
         </div>
+      ) : (
+        /* Batches View */
+        <div className="space-y-6">
+          {/* Batches Overview Stats */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="p-4 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-xs">
+              <div className="flex items-center gap-2 text-purple-600 dark:text-purple-400 mb-1">
+                <Layers className="w-4 h-4" />
+                <span className="text-xs font-bold uppercase tracking-wider">Active Batches</span>
+              </div>
+              <div className="text-2xl font-black text-gray-900 dark:text-white">
+                {batchedGroups.batches.length}
+              </div>
+              <p className="text-[11px] text-gray-400 mt-0.5">
+                Multi-order combined rider runs
+              </p>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-xs">
+              <div className="flex items-center gap-2 text-blue-600 dark:text-blue-400 mb-1">
+                <Truck className="w-4 h-4" />
+                <span className="text-xs font-bold uppercase tracking-wider">Batched Bookings</span>
+              </div>
+              <div className="text-2xl font-black text-gray-900 dark:text-white">
+                {batchedGroups.batches.reduce((sum, b) => sum + b.orders.length, 0)}
+              </div>
+              <p className="text-[11px] text-gray-400 mt-0.5">
+                Orders pooled into shared driver batches
+              </p>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-xs">
+              <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400 mb-1">
+                <CheckCircle2 className="w-4 h-4" />
+                <span className="text-xs font-bold uppercase tracking-wider">Single Orders</span>
+              </div>
+              <div className="text-2xl font-black text-gray-900 dark:text-white">
+                {batchedGroups.unbatched.length}
+              </div>
+              <p className="text-[11px] text-gray-400 mt-0.5">
+                Direct single-booking runs
+              </p>
+            </div>
+          </div>
+
+          {/* Batches Cards */}
+          {batchedGroups.batches.length === 0 ? (
+            <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-12 text-center shadow-xs">
+              <div className="w-12 h-12 rounded-2xl bg-purple-50 dark:bg-purple-950/50 text-purple-600 mx-auto flex items-center justify-center mb-3">
+                <Layers className="w-6 h-6" />
+              </div>
+              <h3 className="font-bold text-gray-900 dark:text-white text-base">No active batches</h3>
+              <p className="text-xs text-gray-500 max-w-sm mx-auto mt-1">
+                When multiple orders are combined for a rider within the pool pickup/dropoff radius, their combined stops and route will appear here.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              {batchedGroups.batches.map((batch) => {
+                const totalStops = batch.orders.length * 2;
+                const totalFees = batch.orders.reduce((sum, o) => sum + Number(o.fees?.total || 0), 0);
+
+                return (
+                  <div
+                    key={batch.batchId}
+                    className="bg-white dark:bg-zinc-900 border border-purple-200/80 dark:border-purple-900/60 rounded-2xl p-5 shadow-xs space-y-4 hover:border-purple-400 transition-all"
+                  >
+                    {/* Batch Header */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-gray-100 dark:border-zinc-800">
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-mono font-black bg-purple-100 dark:bg-purple-950 text-purple-900 dark:text-purple-200 border border-purple-300 dark:border-purple-800">
+                            <Layers className="w-3.5 h-3.5 text-purple-600" />
+                            Batch #{batch.batchId}
+                          </span>
+                          <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-zinc-300">
+                            {batch.orders.length} bookings • {totalStops} stops
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 mt-1.5 text-xs text-gray-500 dark:text-zinc-400">
+                          <Car className="w-3.5 h-3.5 text-amber-500" />
+                          <span className="font-semibold text-gray-900 dark:text-white">
+                            {batch.riderName || 'Rider Unassigned'}
+                          </span>
+                          {batch.riderPhone && <span>• {batch.riderPhone}</span>}
+                        </div>
+                      </div>
+
+                      {/* Live Map Link */}
+                      <button
+                        type="button"
+                        onClick={() => navigate(`/map?batchId=${batch.batchId}`)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold shadow-xs transition-colors self-start sm:self-auto shrink-0"
+                      >
+                        <Route className="w-3.5 h-3.5" />
+                        <span>View Route on Live Map</span>
+                      </button>
+                    </div>
+
+                    {/* Planned Stops Sequence */}
+                    <div className="bg-gray-50/70 dark:bg-zinc-850/60 rounded-xl p-3 space-y-2 border border-gray-100 dark:border-zinc-800">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 flex items-center gap-1">
+                        <Navigation className="w-3 h-3 text-emerald-500" />
+                        <span>Planned Multi-Stop Sequence</span>
+                      </div>
+                      <div className="space-y-1.5 text-xs">
+                        {/* Pickups first */}
+                        {batch.orders.map((ord, idx) => (
+                          <div key={`p-${ord.id}`} className="flex items-start gap-2">
+                            <span className="w-5 h-5 rounded-full bg-emerald-600 text-white font-black text-[10px] flex items-center justify-center shrink-0 mt-0.5 shadow-2xs">
+                              {idx + 1}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <span className="text-[10px] uppercase font-bold text-emerald-600">
+                                Pickup {idx + 1} (#{ord.orderNumber})
+                              </span>
+                              <p className="font-medium text-gray-900 dark:text-zinc-100 truncate">
+                                {ord.merchantName || ord.pickup?.address || 'Pickup Point'}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                        {/* Drop-offs next */}
+                        {batch.orders.map((ord, idx) => (
+                          <div key={`d-${ord.id}`} className="flex items-start gap-2">
+                            <span className="w-5 h-5 rounded-full bg-red-600 text-white font-black text-[10px] flex items-center justify-center shrink-0 mt-0.5 shadow-2xs">
+                              {batch.orders.length + idx + 1}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <span className="text-[10px] uppercase font-bold text-red-600">
+                                Drop-off {idx + 1} (#{ord.orderNumber})
+                              </span>
+                              <p className="font-medium text-gray-900 dark:text-zinc-100 truncate">
+                                {ord.dropoff?.address || 'Customer destination'} ({ord.customerName})
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Bookings inside batch */}
+                    <div className="space-y-2">
+                      <div className="text-xs font-bold text-gray-700 dark:text-zinc-300">
+                        Bookings in this Batch:
+                      </div>
+                      <div className="divide-y divide-gray-100 dark:divide-zinc-800 border border-gray-200 dark:border-zinc-800 rounded-xl overflow-hidden">
+                        {batch.orders.map((ord) => (
+                          <div
+                            key={ord.id}
+                            onClick={() => setSelectedOrder(ord)}
+                            className="p-3 bg-white dark:bg-zinc-900 hover:bg-amber-50/50 dark:hover:bg-zinc-800/50 cursor-pointer flex items-center justify-between gap-3 text-xs transition-colors"
+                          >
+                            <div className="space-y-1 min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-mono font-bold text-gray-900 dark:text-white">
+                                  #{ord.orderNumber}
+                                </span>
+                                <span className="px-1.5 py-0.2 rounded bg-purple-100 dark:bg-purple-950 text-purple-900 dark:text-purple-300 font-extrabold text-[10px]">
+                                  Rank #{ord.bookingRank || 1}
+                                </span>
+                                <DeliveryOptionChip option={ord.deliveryOption} />
+                                <HoldCountdown order={ord} />
+                              </div>
+                              <div className="text-gray-500 truncate text-[11px]">
+                                {ord.customerName} • {ord.merchantName || ord.serviceType}
+                              </div>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <div className="font-bold text-gray-900 dark:text-white">
+                                ₱{Number(ord.fees?.total || 0).toFixed(2)}
+                              </div>
+                              <span className="text-[10px] text-amber-600 dark:text-amber-400 font-bold">
+                                {ord.status}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Total customer value */}
+                    <div className="pt-3 border-t border-gray-100 dark:border-zinc-800 flex items-center justify-between text-xs font-medium text-gray-500">
+                      <span>Total Customer Value:</span>
+                      <span className="font-bold text-gray-900 dark:text-white">
+                        ₱{totalFees.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       )}
 
       {/* Selected Order Detail Modal / Drawer */}
@@ -1559,6 +2077,34 @@ export const LiveOrders: React.FC = () => {
                 >
                   {selectedOrder.status}
                 </span>
+                <DeliveryOptionChip option={selectedOrder.deliveryOption} />
+                <HoldCountdown order={selectedOrder} />
+                <BatchInfoBadge
+                  order={selectedOrder}
+                  onClickBatch={() => {
+                    setViewMode('batches');
+                    setSelectedOrder(null);
+                  }}
+                />
+                <SplitLinksView
+                  order={selectedOrder}
+                  onSelectOrderById={(targetId) => {
+                    const found = orders.find(
+                      (o) => o.id === targetId || o.orderNumber === targetId
+                    );
+                    if (found) setSelectedOrder(found);
+                  }}
+                />
+                {selectedOrder.batchId && (
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/map?batchId=${selectedOrder.batchId}`)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-bold shadow-xs transition-colors"
+                  >
+                    <Route className="w-3.5 h-3.5" />
+                    <span>View Batch Route on Live Map</span>
+                  </button>
+                )}
               </div>
 
               <button
@@ -1958,6 +2504,9 @@ export const LiveOrders: React.FC = () => {
                   </div>
                 </div>
               </div>
+
+              {/* Rider Pay Breakdown (Pickup fee, Booking fee, Special radius extra, Tips) */}
+              <RiderPayBreakdownCard order={selectedOrder} />
 
               {/* Timeline from statusHistory */}
               <div>

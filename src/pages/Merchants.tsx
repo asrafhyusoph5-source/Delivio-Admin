@@ -38,7 +38,8 @@ import type {
   MerchantWeeklyHours,
   MerchantOperatingDay,
   Review,
-  RiderReview
+  RiderReview,
+  MerchantSpecialRadius
 } from '../types';
 import { FOOD_CATEGORIES, CONVENIENCE_CATEGORIES } from '../constants';
 import {
@@ -79,7 +80,11 @@ import {
   FolderTree,
   Check,
   Sun,
-  Moon
+  Moon,
+  Radio,
+  Compass,
+  Save,
+  Sparkles
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
@@ -414,7 +419,16 @@ export const Merchants: React.FC = () => {
 
   // Selected Merchant for detail
   const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(null);
-  const [activeTab, setActiveTab] = useState<'details' | 'status' | 'location' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet' | 'reviews'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'status' | 'location' | 'radius' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet' | 'reviews'>('details');
+
+  // Special Radius State (merchants/{id}.specialRadius & settings/dispatch.searchRadiusKm)
+  const [globalDispatchRadiusKm, setGlobalDispatchRadiusKm] = useState<number>(5);
+  const [specialRadiusEnabled, setSpecialRadiusEnabled] = useState<boolean>(false);
+  const [specialRadiusKm, setSpecialRadiusKm] = useState<number>(5);
+  const [specialCustomerExtraFee, setSpecialCustomerExtraFee] = useState<number>(0);
+  const [specialRiderExtraFee, setSpecialRiderExtraFee] = useState<number>(0);
+  const [savingSpecialRadius, setSavingSpecialRadius] = useState<boolean>(false);
+  const [confirmSaveSpecialRadiusModalOpen, setConfirmSaveSpecialRadiusModalOpen] = useState<boolean>(false);
 
   // Reviews State (two tabs: from customers, from drivers)
   const [merchantReviews, setMerchantReviews] = useState<Review[]>([]);
@@ -595,6 +609,7 @@ export const Merchants: React.FC = () => {
           pauseUntilTime: dt.pauseUntilTime,
           closedUntil: dt.closedUntil || null,
           openUntil: dt.openUntil || null,
+          specialRadius: dt.specialRadius || null,
           createdAt: dt.createdAt
         });
       });
@@ -609,7 +624,7 @@ export const Merchants: React.FC = () => {
 
   useEffect(() => {
     fetchMerchants();
-    // Load platform timezone and service switches
+    // Load platform timezone, service switches, and dispatch global radius
     const fetchPlatformSettings = async () => {
       try {
         const snap = await getDoc(doc(db, 'settings', 'platform'));
@@ -630,6 +645,18 @@ export const Merchants: React.FC = () => {
         }
       } catch (err) {
         console.warn('Could not load platform settings:', err);
+      }
+
+      try {
+        const dSnap = await getDoc(doc(db, 'settings', 'dispatch'));
+        if (dSnap.exists()) {
+          const dData = dSnap.data();
+          if (typeof dData.searchRadiusKm === 'number') {
+            setGlobalDispatchRadiusKm(dData.searchRadiusKm);
+          }
+        }
+      } catch (err) {
+        console.warn('Could not load dispatch settings:', err);
       }
     };
     fetchPlatformSettings();
@@ -653,6 +680,13 @@ export const Merchants: React.FC = () => {
     // Initialize Hours & AutoSchedule
     setMerchantHours(selectedMerchant.hours || DEFAULT_WEEKLY_HOURS);
     setMerchantAutoSchedule(Boolean(selectedMerchant.autoSchedule));
+
+    // Initialize Special Radius
+    const sr = selectedMerchant.specialRadius;
+    setSpecialRadiusEnabled(Boolean(sr?.enabled));
+    setSpecialRadiusKm(sr?.radiusKm ?? (globalDispatchRadiusKm || 5));
+    setSpecialCustomerExtraFee(sr?.customerExtraFee ?? 0);
+    setSpecialRiderExtraFee(sr?.riderExtraFee ?? 0);
 
     // Fetch Wallet Data
     fetchMerchantWallet(selectedMerchant);
@@ -1269,6 +1303,58 @@ export const Merchants: React.FC = () => {
       showError(err);
     } finally {
       setSavingHours(false);
+    }
+  };
+
+  // Save Special Radius for Merchant
+  const handleConfirmSaveSpecialRadius = async (reason?: string) => {
+    if (!selectedMerchant) return;
+    try {
+      setSavingSpecialRadius(true);
+      const radKm = Math.max(0.5, Number(specialRadiusKm) || globalDispatchRadiusKm || 5);
+      const custExtra = Math.max(0, Number(specialCustomerExtraFee) || 0);
+      const riderExtra = Math.max(0, Number(specialRiderExtraFee) || 0);
+
+      const specialRadiusData: MerchantSpecialRadius = {
+        enabled: specialRadiusEnabled,
+        radiusKm: radKm,
+        customerExtraFee: custExtra,
+        riderExtraFee: riderExtra,
+        updatedAt: Timestamp.now(),
+        updatedBy: adminProfile?.uid || 'admin'
+      };
+
+      const mRef = doc(db, 'merchants', selectedMerchant.id);
+      await updateDoc(mRef, {
+        specialRadius: specialRadiusData
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'UPDATE_MERCHANT_SPECIAL_RADIUS',
+        entityType: 'merchant',
+        entityId: selectedMerchant.id,
+        reason: reason || undefined,
+        details: `Updated special radius for "${selectedMerchant.name}". Enabled: ${specialRadiusEnabled}, Radius: ${radKm}km (global: ${globalDispatchRadiusKm}km), Customer extra: +₱${custExtra}, Rider extra: +₱${riderExtra}`
+      });
+
+      setSelectedMerchant((prev) =>
+        prev ? { ...prev, specialRadius: specialRadiusData } : null
+      );
+      setMerchants((prev) =>
+        prev.map((m) =>
+          m.id === selectedMerchant.id ? { ...m, specialRadius: specialRadiusData } : m
+        )
+      );
+
+      showSuccess(`Special radius settings for "${selectedMerchant.name}" saved.`);
+      setConfirmSaveSpecialRadiusModalOpen(false);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSavingSpecialRadius(false);
     }
   };
 
@@ -2863,6 +2949,7 @@ export const Merchants: React.FC = () => {
                 { id: 'status', label: 'Status & Hours' },
                 { id: 'wallet', label: 'Wallet' },
                 { id: 'location', label: 'Location Map' },
+                { id: 'radius', label: 'Delivery Radius' },
                 { id: 'menu', label: `Menu (${menuItems.length})` },
                 { id: 'reviews', label: `Reviews (${merchantReviews.length})` },
                 { id: 'orders', label: 'Orders & Payouts' },
@@ -3608,6 +3695,213 @@ export const Merchants: React.FC = () => {
                       {savingLocation && <Loader2 className="w-4 h-4 animate-spin" />}
                       Save Store Pin
                     </button>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB: DELIVERY RADIUS (merchants/{id}.specialRadius) */}
+              {activeTab === 'radius' && (
+                <div className="space-y-6">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-gray-100 dark:border-zinc-800">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <Compass className="w-5 h-5 text-amber-500" />
+                        <h4 className="font-extrabold text-base text-gray-900 dark:text-white">
+                          Delivery Radius & Zone Adjustments
+                        </h4>
+                        {specialRadiusEnabled ? (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300">
+                            Custom Radius Active
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400">
+                            Using Global Settings ({globalDispatchRadiusKm} km)
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        Saved in <code className="font-mono text-amber-600">merchants/{'{id}'}.specialRadius</code>. Overrides courier pooling distance and sets customer/rider delivery adjustments.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setConfirmSaveSpecialRadiusModalOpen(true)}
+                      disabled={savingSpecialRadius}
+                      className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs self-start sm:self-auto"
+                    >
+                      {savingSpecialRadius ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                      <span>Save Delivery Radius</span>
+                    </button>
+                  </div>
+
+                  {/* Global Radius Reference Banner */}
+                  <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 flex items-start gap-3">
+                    <Radio className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+                    <div className="space-y-1 text-xs">
+                      <div className="flex items-center gap-2">
+                        <span className="font-extrabold text-gray-900 dark:text-white uppercase tracking-wider">
+                          Platform Global Radius:
+                        </span>
+                        <span className="px-2 py-0.5 rounded-md text-xs font-black bg-amber-400 text-black">
+                          {globalDispatchRadiusKm} km
+                        </span>
+                        <span className="text-[10px] text-gray-400 font-mono">
+                          (settings/dispatch.searchRadiusKm)
+                        </span>
+                      </div>
+                      <p className="text-gray-600 dark:text-zinc-400 leading-relaxed">
+                        By default, dispatch searches drivers within {globalDispatchRadiusKm} km of this merchant. Activating a special radius overrides driver search distance for this shop and allows applying extra fees.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Toggle Card */}
+                  <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 flex items-center justify-between">
+                    <div>
+                      <div className="font-bold text-sm text-gray-900 dark:text-white">
+                        Special Delivery Radius for {selectedMerchant.name}
+                      </div>
+                      <p className="text-xs text-gray-500">
+                        {specialRadiusEnabled
+                          ? 'Active: couriers within the custom radius can receive orders from this shop.'
+                          : 'Disabled: orders use the global platform radius of ' + globalDispatchRadiusKm + ' km.'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSpecialRadiusEnabled(!specialRadiusEnabled)}
+                      className={`px-4 py-2 rounded-xl text-xs font-extrabold transition-all shadow-xs ${
+                        specialRadiusEnabled
+                          ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                          : 'bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300 hover:bg-gray-300'
+                      }`}
+                    >
+                      {specialRadiusEnabled ? 'Enabled' : 'Disabled'}
+                    </button>
+                  </div>
+
+                  {/* Settings Grid */}
+                  <div className={`grid grid-cols-1 md:grid-cols-3 gap-4 transition-opacity ${specialRadiusEnabled ? 'opacity-100' : 'opacity-50'}`}>
+                    {/* Radius Km */}
+                    <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-2">
+                      <label className="block text-xs font-extrabold uppercase text-gray-700 dark:text-zinc-300">
+                        Special Radius (km)
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min="0.5"
+                          max="50"
+                          step="0.5"
+                          disabled={!specialRadiusEnabled}
+                          value={specialRadiusKm}
+                          onChange={(e) => setSpecialRadiusKm(Number(e.target.value))}
+                          className="w-full px-3 py-2 text-xs font-black rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                        />
+                        <span className="text-xs font-bold text-gray-400">km</span>
+                      </div>
+                      <p className="text-[11px] text-gray-500 dark:text-zinc-400">
+                        Rider search for orders from this shop will search up to this distance.
+                      </p>
+                    </div>
+
+                    {/* Customer Extra Fee */}
+                    <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-2">
+                      <label className="block text-xs font-extrabold uppercase text-gray-700 dark:text-zinc-300">
+                        Customer Extra Fee (₱)
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-gray-400">₱</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          disabled={!specialRadiusEnabled}
+                          value={specialCustomerExtraFee}
+                          onChange={(e) => setSpecialCustomerExtraFee(Math.max(0, Number(e.target.value)))}
+                          className="w-full px-3 py-2 text-xs font-black rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-amber-600"
+                        />
+                      </div>
+                      <p className="text-[11px] text-gray-500 dark:text-zinc-400">
+                        Added to customer delivery fee (combined, never itemized to the customer).
+                      </p>
+                    </div>
+
+                    {/* Rider Extra Fee */}
+                    <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-2">
+                      <label className="block text-xs font-extrabold uppercase text-gray-700 dark:text-zinc-300">
+                        Rider Extra Fee (₱)
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-gray-400">₱</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          disabled={!specialRadiusEnabled}
+                          value={specialRiderExtraFee}
+                          onChange={(e) => setSpecialRiderExtraFee(Math.max(0, Number(e.target.value)))}
+                          className="w-full px-3 py-2 text-xs font-black rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-emerald-600"
+                        />
+                      </div>
+                      <p className="text-[11px] text-gray-500 dark:text-zinc-400">
+                        Added to driver earnings for delivering this shop's order (shown as one total).
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Admin Live Preview Box */}
+                  <div className="p-5 rounded-2xl bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 space-y-3">
+                    <div className="flex items-center justify-between pb-2 border-b border-amber-200/60 dark:border-amber-900/40">
+                      <span className="font-extrabold text-xs uppercase tracking-wider text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
+                        <Sparkles className="w-4 h-4 text-amber-600" />
+                        Admin Impact Preview
+                      </span>
+                      <span className="text-[11px] text-amber-700 dark:text-amber-400 font-semibold">
+                        Sample order with Base ₱45 delivery / ₱35 rider pay
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="p-3.5 rounded-xl bg-white dark:bg-zinc-900 border border-amber-200 dark:border-zinc-800">
+                        <span className="text-[11px] font-bold text-gray-500 uppercase block mb-1">
+                          Customer View (Combined Delivery Fee)
+                        </span>
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-2xl font-black text-gray-900 dark:text-white">
+                            ₱{(45 + (specialRadiusEnabled ? Number(specialCustomerExtraFee) || 0 : 0)).toFixed(2)}
+                          </span>
+                          {specialRadiusEnabled && Number(specialCustomerExtraFee) > 0 && (
+                            <span className="text-xs font-bold text-amber-600">
+                              (₱45 base + ₱{Number(specialCustomerExtraFee).toFixed(2)} extra combined)
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[10px] text-gray-400 mt-1 block">
+                          Customer sees one clean total; never itemized as extra surcharge.
+                        </span>
+                      </div>
+
+                      <div className="p-3.5 rounded-xl bg-white dark:bg-zinc-900 border border-amber-200 dark:border-zinc-800">
+                        <span className="text-[11px] font-bold text-gray-500 uppercase block mb-1">
+                          Rider View (Combined Delivery Payout)
+                        </span>
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-2xl font-black text-emerald-600">
+                            ₱{(35 + (specialRadiusEnabled ? Number(specialRiderExtraFee) || 0 : 0)).toFixed(2)}
+                          </span>
+                          {specialRadiusEnabled && Number(specialRiderExtraFee) > 0 && (
+                            <span className="text-xs font-bold text-emerald-700 dark:text-emerald-400">
+                              (₱35 base + ₱{Number(specialRiderExtraFee).toFixed(2)} extra)
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[10px] text-gray-400 mt-1 block">
+                          Driver sees one combined payout total for accepting and delivering this shop.
+                        </span>
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}
@@ -5823,6 +6117,21 @@ export const Merchants: React.FC = () => {
           reasonRequired={true}
           reasonPlaceholder="Provide the administrative reason for unlinking..."
           isDestructive={true}
+        />
+      )}
+
+      {/* Confirmation Modal to Save Special Radius */}
+      {confirmSaveSpecialRadiusModalOpen && selectedMerchant && (
+        <ConfirmationModal
+          isOpen={confirmSaveSpecialRadiusModalOpen}
+          onClose={() => setConfirmSaveSpecialRadiusModalOpen(false)}
+          onConfirm={(reason) => handleConfirmSaveSpecialRadius(reason)}
+          title={`Save Delivery Radius for "${selectedMerchant.name}"?`}
+          message={`Are you sure you want to update delivery radius settings? Status: ${specialRadiusEnabled ? 'CUSTOM RADIUS ENABLED' : 'DISABLED (Using global ' + globalDispatchRadiusKm + ' km)'}. Radius: ${specialRadiusKm} km, Customer Extra Fee: +₱${specialCustomerExtraFee}, Rider Extra Fee: +₱${specialRiderExtraFee}. This will be logged to auditLogs.`}
+          confirmLabel={savingSpecialRadius ? 'Saving...' : 'Save Radius Settings'}
+          reasonRequired={false}
+          reasonPlaceholder="Optional administrative note..."
+          isDestructive={false}
         />
       )}
     </div>

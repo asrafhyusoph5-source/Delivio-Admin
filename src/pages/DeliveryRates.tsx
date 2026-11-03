@@ -14,11 +14,23 @@ import { useCity } from '../context/CityContext';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
-import type { City, DeliveryRatesConfig, ServiceRates, OrderServiceType, DeliveryServiceType, TaxiVehicleRates } from '../types';
+import type {
+  City,
+  DeliveryRatesConfig,
+  ServiceRates,
+  OrderServiceType,
+  DeliveryServiceType,
+  TaxiVehicleRates,
+  RiderPayConfig,
+  DispatchSettings,
+  DeliveryOptionType
+} from '../types';
 import {
   VEHICLE_TYPES,
   VEHICLE_LABELS,
   DEFAULT_TAXI_RATES,
+  DEFAULT_RIDER_PAY,
+  DEFAULT_DISPATCH_SETTINGS,
   type VehicleType
 } from '../constants';
 import {
@@ -40,7 +52,13 @@ import {
   Clock,
   ShieldCheck,
   DollarSign,
-  Percent
+  Percent,
+  Wallet,
+  HelpCircle,
+  Navigation,
+  Info,
+  ArrowUpRight,
+  UserCheck
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { CityServicesMatrix } from './ServicesByCity';
@@ -74,14 +92,17 @@ export const DeliveryRates: React.FC = () => {
   const [loadingRates, setLoadingRates] = useState(false);
   const [ratesConfig, setRatesConfig] = useState<DeliveryRatesConfig | null>(null);
 
-  // Tab between "Delivery Rates", "Taxi Fares", and "City Services"
-  const [activeMainTab, setActiveMainTab] = useState<'delivery' | 'taxi' | 'services'>('delivery');
+  // Tab between "Customer Delivery Rates", "Taxi Fares", "Rider Pay", and "City Services"
+  const [activeMainTab, setActiveMainTab] = useState<'delivery' | 'taxi' | 'riderPay' | 'services'>('delivery');
 
   // Selected Service sub-tab for Delivery Rates config
   const [activeServiceTab, setActiveServiceTab] = useState<DeliveryServiceType>('food');
 
   // Selected Vehicle sub-tab for Taxi Fares config
   const [activeVehicleTab, setActiveVehicleTab] = useState<VehicleType>('motorcycle');
+
+  // Dispatch Settings for delivery option previews
+  const [dispatchSettings, setDispatchSettings] = useState<DispatchSettings>(DEFAULT_DISPATCH_SETTINGS);
 
   // Add / Edit City Modal
   const [cityModalOpen, setCityModalOpen] = useState(false);
@@ -107,6 +128,13 @@ export const DeliveryRates: React.FC = () => {
   const [calcExtraStops, setCalcExtraStops] = useState<number>(0);
   const [calcTaxiTimeOfDay, setCalcTaxiTimeOfDay] = useState<'day' | 'peak' | 'night'>('day');
 
+  // Rider Pay Calculator States
+  const [calcRiderPayMode, setCalcRiderPayMode] = useState<'single' | 'double' | 'triple'>('single');
+  const [calcRiderPickupDist, setCalcRiderPickupDist] = useState<number>(1.2);
+  const [calcRiderOrder1Dist, setCalcRiderOrder1Dist] = useState<number>(3.5);
+  const [calcRiderOrder2Dist, setCalcRiderOrder2Dist] = useState<number>(4.0);
+  const [calcRiderOrder3Dist, setCalcRiderOrder3Dist] = useState<number>(2.8);
+
   // Confirm save rates modal
   const [confirmSaveRatesModal, setConfirmSaveRatesModal] = useState(false);
   const [savingRates, setSavingRates] = useState(false);
@@ -124,7 +152,22 @@ export const DeliveryRates: React.FC = () => {
     }
   }, [cities, activeCityId]);
 
-  // Fetch Delivery & Taxi Rates for active city
+  // Fetch Global Dispatch Settings
+  useEffect(() => {
+    const fetchDispatchSettings = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', 'dispatch'));
+        if (snap.exists()) {
+          setDispatchSettings(snap.data() as DispatchSettings);
+        }
+      } catch (e) {
+        console.error('Error fetching dispatch settings:', e);
+      }
+    };
+    fetchDispatchSettings();
+  }, []);
+
+  // Fetch Delivery & Taxi Rates & Rider Pay for active city
   useEffect(() => {
     if (!activeCityId) return;
 
@@ -152,6 +195,7 @@ export const DeliveryRates: React.FC = () => {
               request_rider: svcs.request_rider || dt.request_rider || { ...DEFAULT_SERVICE_RATES, baseFare: 50 }
             },
             rideRates: dt.rideRates || { ...DEFAULT_TAXI_RATES },
+            riderPay: dt.riderPay || { ...DEFAULT_RIDER_PAY },
             riderCommissionPercent: dt.riderCommissionPercent ?? 80,
             surcharges: dt.surcharges || {
               peak: { enabled: false, multiplier: 1.2 },
@@ -159,7 +203,7 @@ export const DeliveryRates: React.FC = () => {
             }
           });
         } else {
-          // Provide default template including DEFAULT_TAXI_RATES
+          // Provide default template including DEFAULT_TAXI_RATES and DEFAULT_RIDER_PAY
           setRatesConfig({
             id: activeCityId,
             food: { ...DEFAULT_SERVICE_RATES },
@@ -175,6 +219,7 @@ export const DeliveryRates: React.FC = () => {
               request_rider: { ...DEFAULT_SERVICE_RATES, baseFare: 50 }
             },
             rideRates: { ...DEFAULT_TAXI_RATES },
+            riderPay: { ...DEFAULT_RIDER_PAY },
             riderCommissionPercent: 80,
             surcharges: {
               peak: { enabled: false, multiplier: 1.2 },
@@ -361,6 +406,49 @@ export const DeliveryRates: React.FC = () => {
     });
   };
 
+  // Update Rider Pay Single or Pickup field
+  const updateRiderPayField = (
+    tier: 'single' | 'pickup',
+    field: string,
+    value: any
+  ) => {
+    if (!ratesConfig) return;
+    const currentPay = ratesConfig.riderPay || DEFAULT_RIDER_PAY;
+    setRatesConfig({
+      ...ratesConfig,
+      riderPay: {
+        ...currentPay,
+        [tier]: {
+          ...currentPay[tier],
+          [field]: Math.max(0, Number(value))
+        }
+      }
+    });
+  };
+
+  // Update Rider Pay Double sub-tier field (first, second, third)
+  const updateRiderPayDoubleField = (
+    subtier: 'first' | 'second' | 'third',
+    field: string,
+    value: any
+  ) => {
+    if (!ratesConfig) return;
+    const currentPay = ratesConfig.riderPay || DEFAULT_RIDER_PAY;
+    setRatesConfig({
+      ...ratesConfig,
+      riderPay: {
+        ...currentPay,
+        double: {
+          ...currentPay.double,
+          [subtier]: {
+            ...currentPay.double[subtier],
+            [field]: Math.max(0, Number(value))
+          }
+        }
+      }
+    });
+  };
+
   // Save Rates to Firestore
   const handleSaveRates = async () => {
     if (!ratesConfig || !activeCityId) return;
@@ -382,6 +470,7 @@ export const DeliveryRates: React.FC = () => {
         pabili: ratesConfig.pabili,
         request_rider: ratesConfig.request_rider,
         rideRates: ratesConfig.rideRates,
+        riderPay: ratesConfig.riderPay || DEFAULT_RIDER_PAY,
         updatedAt: Timestamp.now()
       };
 
@@ -393,7 +482,7 @@ export const DeliveryRates: React.FC = () => {
         action: 'UPDATE_DELIVERY_AND_TAXI_RATES',
         entityType: 'deliveryRates',
         entityId: activeCityId,
-        details: `Saved rates & fares (services[service] & rideRates[vehicle]) for city ${activeCityId}`
+        details: `Saved rates & fares (services, rideRates & riderPay) for city ${activeCityId}`
       });
 
       showSuccess('Rates & Fares schedule saved successfully.');
@@ -404,6 +493,46 @@ export const DeliveryRates: React.FC = () => {
       setSavingRates(false);
     }
   };
+
+  // Rider Pay Memo Calculation
+  const calculatedRiderPay = useMemo(() => {
+    const payConfig = ratesConfig?.riderPay || DEFAULT_RIDER_PAY;
+    const pickupFare = payConfig.pickup.minFare + Math.max(0, calcRiderPickupDist - payConfig.pickup.freeKm) * payConfig.pickup.perKmExtra;
+
+    let booking1Fare = 0;
+    let booking2Fare = 0;
+    let booking3Fare = 0;
+
+    if (calcRiderPayMode === 'single') {
+      booking1Fare = payConfig.single.minFare + Math.max(0, calcRiderOrder1Dist - payConfig.single.includedKm) * payConfig.single.perKmExtra;
+    } else {
+      // First booking uses double.first
+      booking1Fare = payConfig.double.first.minFare + Math.max(0, calcRiderOrder1Dist - payConfig.double.first.includedKm) * payConfig.double.first.perKmExtra;
+      // Second booking uses double.second
+      booking2Fare = payConfig.double.second.minFare + Math.max(0, calcRiderOrder2Dist - payConfig.double.second.includedKm) * payConfig.double.second.perKmExtra;
+      if (calcRiderPayMode === 'triple') {
+        // Third booking uses double.third
+        booking3Fare = payConfig.double.third.minFare + Math.max(0, calcRiderOrder3Dist - payConfig.double.third.includedKm) * payConfig.double.third.perKmExtra;
+      }
+    }
+
+    const totalBookings = booking1Fare + booking2Fare + booking3Fare;
+    const totalRiderPay = pickupFare + totalBookings;
+    const orderCount = calcRiderPayMode === 'single' ? 1 : calcRiderPayMode === 'double' ? 2 : 3;
+    const avgPerBooking = totalRiderPay / orderCount;
+
+    return {
+      pickupFare,
+      booking1Fare,
+      booking2Fare,
+      booking3Fare,
+      totalBookings,
+      totalRiderPay,
+      orderCount,
+      avgPerBooking,
+      payConfig
+    };
+  }, [ratesConfig, calcRiderPayMode, calcRiderPickupDist, calcRiderOrder1Dist, calcRiderOrder2Dist, calcRiderOrder3Dist]);
 
   // 1. Delivery Fee Simulator Calculation (Percent applies to items subtotal + delivery fee)
   const calculatedDeliveryFee = useMemo(() => {
@@ -559,6 +688,38 @@ export const DeliveryRates: React.FC = () => {
     };
   }, [ratesConfig, calcTaxiVehicle, calcTaxiDistance, calcExtraStops, calcTaxiTimeOfDay]);
 
+  // 3. Delivery Option Previews (settings/dispatch adjustment preview on base fee)
+  const deliveryOptionPreviews = useMemo(() => {
+    const dSettings = dispatchSettings || DEFAULT_DISPATCH_SETTINGS;
+    const baseFee = calculatedDeliveryFee.totalDeliveryFee;
+
+    const calcFee = (opt: typeof dSettings.options.priority) => {
+      if (opt.feeAdjustType === 'percent') {
+        const adjusted = baseFee * (1 + (Number(opt.feeAdjustValue) || 0) / 100);
+        return Math.max(0, Math.round(adjusted));
+      }
+      return Math.max(0, baseFee + (Number(opt.feeAdjustValue) || 0));
+    };
+
+    return {
+      priority: {
+        config: dSettings.options.priority,
+        fee: calcFee(dSettings.options.priority),
+        diff: dSettings.options.priority.feeAdjustValue
+      },
+      standard: {
+        config: dSettings.options.standard,
+        fee: calcFee(dSettings.options.standard),
+        diff: dSettings.options.standard.feeAdjustValue
+      },
+      saver: {
+        config: dSettings.options.saver,
+        fee: calcFee(dSettings.options.saver),
+        diff: dSettings.options.saver.feeAdjustValue
+      }
+    };
+  }, [dispatchSettings, calculatedDeliveryFee]);
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -651,8 +812,8 @@ export const DeliveryRates: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Mode Tabs: Delivery Rates vs. Taxi Fares */}
-      <div className="flex gap-3 border-b border-gray-200 dark:border-zinc-800 pb-2">
+      {/* Main Mode Tabs: Customer Delivery Rates vs. Rider Pay vs. Taxi Fares */}
+      <div className="flex flex-wrap gap-2.5 border-b border-gray-200 dark:border-zinc-800 pb-2">
         <button
           onClick={() => setActiveMainTab('delivery')}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-extrabold transition-all ${
@@ -662,7 +823,19 @@ export const DeliveryRates: React.FC = () => {
           }`}
         >
           <Bike className="w-4 h-4" />
-          <span>Delivery Rates</span>
+          <span>Customer Delivery Rates</span>
+        </button>
+
+        <button
+          onClick={() => setActiveMainTab('riderPay')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-extrabold transition-all ${
+            activeMainTab === 'riderPay'
+              ? 'bg-amber-400 text-black shadow-xs'
+              : 'bg-white dark:bg-zinc-900 text-gray-600 dark:text-zinc-400 hover:bg-gray-100 border border-gray-200 dark:border-zinc-800'
+          }`}
+        >
+          <Wallet className="w-4 h-4" />
+          <span>Rider Pay</span>
         </button>
 
         <button
@@ -690,18 +863,23 @@ export const DeliveryRates: React.FC = () => {
         </button>
       </div>
 
-      {/* 1. DELIVERY RATES SECTION */}
+      {/* 1. CUSTOMER DELIVERY RATES SECTION */}
       {ratesConfig && activeMainTab === 'delivery' && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Delivery Rates Form */}
           <div className="lg:col-span-2 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-5 shadow-xs space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 dark:border-zinc-800 pb-4">
               <div>
-                <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
-                  Delivery Rates for {cities.find((c) => c.id === activeCityId)?.name || activeCityId}
-                </h3>
+                <div className="flex items-center gap-2">
+                  <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                    Customer Delivery Rates for {cities.find((c) => c.id === activeCityId)?.name || activeCityId}
+                  </h3>
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300">
+                    Customer Fee
+                  </span>
+                </div>
                 <p className="text-xs text-gray-500">
-                  Configure base fare, per km additions, and driver commission.
+                  Customer-facing delivery pricing schedule (base fare, distance per km, and platform fees). For courier compensation, see the <strong>Rider Pay</strong> tab.
                 </p>
               </div>
 
@@ -1136,11 +1314,576 @@ export const DeliveryRates: React.FC = () => {
                 </div>
               </div>
             </div>
+
+            {/* Delivery Option Price Previews (Priority / Standard / Saver) */}
+            <div className="p-4 rounded-2xl bg-white dark:bg-zinc-850 border border-gray-200 dark:border-zinc-700/80 space-y-3 text-xs">
+              <div className="flex items-center justify-between pb-2 border-b border-gray-100 dark:border-zinc-700">
+                <span className="font-extrabold text-[11px] uppercase tracking-wider text-gray-700 dark:text-zinc-300 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                  Option Price Preview (settings/dispatch)
+                </span>
+                <span className="text-[10px] text-gray-400 font-semibold">
+                  Base Fee: ₱{calculatedDeliveryFee.totalDeliveryFee.toFixed(2)}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-300 dark:border-amber-800">
+                  <span className="block font-black text-xs text-amber-700 dark:text-amber-400">Priority</span>
+                  <span className="block font-black text-sm text-gray-900 dark:text-white mt-0.5">
+                    ₱{deliveryOptionPreviews.priority.fee.toFixed(2)}
+                  </span>
+                  <span className="block text-[9px] font-bold text-amber-600 mt-0.5">
+                    {deliveryOptionPreviews.priority.diff >= 0 ? `+₱${deliveryOptionPreviews.priority.diff}` : `-₱${Math.abs(deliveryOptionPreviews.priority.diff)}`}
+                  </span>
+                  <span className="block text-[8px] text-gray-400 mt-1">Direct (0m hold)</span>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-blue-500/10 border border-blue-300 dark:border-blue-800">
+                  <span className="block font-black text-xs text-blue-700 dark:text-blue-400">Standard</span>
+                  <span className="block font-black text-sm text-gray-900 dark:text-white mt-0.5">
+                    ₱{deliveryOptionPreviews.standard.fee.toFixed(2)}
+                  </span>
+                  <span className="block text-[9px] font-bold text-blue-600 mt-0.5">
+                    {deliveryOptionPreviews.standard.diff === 0 ? 'Base' : `${deliveryOptionPreviews.standard.diff >= 0 ? '+' : ''}₱${deliveryOptionPreviews.standard.diff}`}
+                  </span>
+                  <span className="block text-[8px] text-gray-400 mt-1">Batch 2 (5m hold)</span>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-300 dark:border-emerald-800">
+                  <span className="block font-black text-xs text-emerald-700 dark:text-emerald-400">Saver</span>
+                  <span className="block font-black text-sm text-gray-900 dark:text-white mt-0.5">
+                    ₱{deliveryOptionPreviews.saver.fee.toFixed(2)}
+                  </span>
+                  <span className="block text-[9px] font-bold text-emerald-600 mt-0.5">
+                    {deliveryOptionPreviews.saver.diff <= 0 ? `-₱${Math.abs(deliveryOptionPreviews.saver.diff)}` : `+₱${deliveryOptionPreviews.saver.diff}`}
+                  </span>
+                  <span className="block text-[8px] text-gray-400 mt-1">Batch 3 (10m hold)</span>
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-dashed border-gray-200 dark:border-zinc-700 text-[10px] text-gray-500 dark:text-zinc-400 flex items-start gap-1.5">
+                <Info className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+                <span>
+                  <strong>Customer Delivery Fee:</strong> What the customer pays on checkout. <strong>Rider Pay:</strong> The actual compensation paid to the driver per booking + pickup, managed in the Rider Pay tab.
+                </span>
+              </div>
+            </div>
           </div>
         </div>
       )}
 
-      {/* 2. TAXI FARES SECTION */}
+      {/* 2. RIDER PAY SECTION */}
+      {ratesConfig && activeMainTab === 'riderPay' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Rider Pay Configuration Form */}
+          <div className="lg:col-span-2 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-5 shadow-xs space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 dark:border-zinc-800 pb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                    Rider Pay Rates for {cities.find((c) => c.id === activeCityId)?.name || activeCityId}
+                  </h3>
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
+                    Courier Earnings
+                  </span>
+                </div>
+                <p className="text-xs text-gray-500">
+                  Saved in <code className="font-mono text-amber-600">deliveryRates/{'{cityId}'}.riderPay</code>. Governs driver compensation for single & batched deliveries.
+                </p>
+              </div>
+
+              <button
+                onClick={() => setConfirmSaveRatesModal(true)}
+                disabled={savingRates}
+                className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs self-start sm:self-auto"
+              >
+                {savingRates ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                Save Rider Pay
+              </button>
+            </div>
+
+            {/* Explanatory Rule Banner */}
+            <div className="p-4 rounded-2xl bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800/60 flex items-start gap-3">
+              <HelpCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div className="space-y-1.5 text-xs text-gray-700 dark:text-zinc-300">
+                <span className="font-black text-amber-900 dark:text-amber-200 block uppercase tracking-wider">
+                  How Rider Pay is Calculated
+                </span>
+                <p className="leading-relaxed">
+                  A booking pays <strong>minFare + max(0, km - includedKm) &times; perKmExtra</strong> with <strong>km</strong> = road distance merchant to customer.
+                </p>
+                <p className="leading-relaxed">
+                  The pickup fee is paid once per batch: <strong>minFare + max(0, km - freeKm) &times; perKmExtra</strong> with <strong>km</strong> = road distance from the rider at accept time to the first merchant.
+                </p>
+                <div className="pt-1 text-[11px] text-amber-800 dark:text-amber-400 font-bold flex items-center gap-1">
+                  <Check className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>"Customer delivery fee" (rates above) is what the user pays &ne; "Rider pay" (guaranteed driver payout).</span>
+                </div>
+              </div>
+            </div>
+
+            {/* 1. Single Booking Tier */}
+            <div className="p-4 rounded-2xl bg-gray-50/70 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-3">
+              <div className="flex items-center justify-between pb-2 border-b border-gray-200 dark:border-zinc-700/60">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 rounded-lg bg-amber-400 text-black">
+                    <UserCheck className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="font-black text-xs uppercase tracking-wider text-gray-900 dark:text-white">
+                      Single Booking Pay (riderPay.single)
+                    </h4>
+                    <p className="text-[11px] text-gray-400">
+                      Applied when an order is completed alone (Priority or non-batched delivery)
+                    </p>
+                  </div>
+                </div>
+                <span className="text-[10px] font-bold text-gray-400">Defaults: 35 / 2km / ₱8</span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-600 dark:text-zinc-400 mb-1">
+                    Minimum Fare (₱)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={ratesConfig.riderPay?.single?.minFare ?? 35}
+                    onChange={(e) => updateRiderPayField('single', 'minFare', e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-gray-900 dark:text-white"
+                  />
+                  <span className="text-[10px] text-gray-400 mt-0.5 block">Default: ₱35</span>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-600 dark:text-zinc-400 mb-1">
+                    Included Distance (km)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value={ratesConfig.riderPay?.single?.includedKm ?? 2}
+                    onChange={(e) => updateRiderPayField('single', 'includedKm', e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-gray-900 dark:text-white"
+                  />
+                  <span className="text-[10px] text-gray-400 mt-0.5 block">Default: 2 km</span>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-600 dark:text-zinc-400 mb-1">
+                    Extra per Km (₱/km)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value={ratesConfig.riderPay?.single?.perKmExtra ?? 8}
+                    onChange={(e) => updateRiderPayField('single', 'perKmExtra', e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-amber-600"
+                  />
+                  <span className="text-[10px] text-gray-400 mt-0.5 block">Default: ₱8/km</span>
+                </div>
+              </div>
+            </div>
+
+            {/* 2. Batched Bookings Tier (Double & Triple+) */}
+            <div className="p-4 rounded-2xl bg-gray-50/70 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-4">
+              <div className="flex items-center justify-between pb-2 border-b border-gray-200 dark:border-zinc-700/60">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 rounded-lg bg-blue-500 text-white">
+                    <Layers className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="font-black text-xs uppercase tracking-wider text-gray-900 dark:text-white">
+                      Batched Bookings Pay (riderPay.double)
+                    </h4>
+                    <p className="text-[11px] text-gray-400">
+                      Tiered payout per booking when 2 or more orders are grouped in a single trip
+                    </p>
+                  </div>
+                </div>
+                <span className="text-[10px] font-bold text-gray-400">Multi-drop batching</span>
+              </div>
+
+              {/* 1st Booking */}
+              <div className="p-3 rounded-xl bg-white dark:bg-zinc-800/80 border border-gray-200 dark:border-zinc-700/70 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-extrabold text-xs text-gray-900 dark:text-white flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-blue-500" />
+                    1st Booking in Batch (double.first)
+                  </span>
+                  <span className="text-[10px] text-gray-400 font-semibold">Defaults: 35 / 2km / ₱8</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-0.5">Min Fare (₱)</label>
+                    <input
+                      type="number"
+                      value={ratesConfig.riderPay?.double?.first?.minFare ?? 35}
+                      onChange={(e) => updateRiderPayDoubleField('first', 'minFare', e.target.value)}
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-850 font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-0.5">Included Km</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={ratesConfig.riderPay?.double?.first?.includedKm ?? 2}
+                      onChange={(e) => updateRiderPayDoubleField('first', 'includedKm', e.target.value)}
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-850 font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-0.5">Extra per Km (₱)</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={ratesConfig.riderPay?.double?.first?.perKmExtra ?? 8}
+                      onChange={(e) => updateRiderPayDoubleField('first', 'perKmExtra', e.target.value)}
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-850 font-bold text-blue-600"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* 2nd Booking */}
+              <div className="p-3 rounded-xl bg-white dark:bg-zinc-800/80 border border-gray-200 dark:border-zinc-700/70 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-extrabold text-xs text-gray-900 dark:text-white flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                    2nd Booking in Batch (double.second)
+                  </span>
+                  <span className="text-[10px] text-gray-400 font-semibold">Defaults: 25 / 2km / ₱6</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-0.5">Min Fare (₱)</label>
+                    <input
+                      type="number"
+                      value={ratesConfig.riderPay?.double?.second?.minFare ?? 25}
+                      onChange={(e) => updateRiderPayDoubleField('second', 'minFare', e.target.value)}
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-850 font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-0.5">Included Km</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={ratesConfig.riderPay?.double?.second?.includedKm ?? 2}
+                      onChange={(e) => updateRiderPayDoubleField('second', 'includedKm', e.target.value)}
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-850 font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-0.5">Extra per Km (₱)</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={ratesConfig.riderPay?.double?.second?.perKmExtra ?? 6}
+                      onChange={(e) => updateRiderPayDoubleField('second', 'perKmExtra', e.target.value)}
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-850 font-bold text-emerald-600"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* 3rd & Later Booking */}
+              <div className="p-3 rounded-xl bg-white dark:bg-zinc-800/80 border border-gray-200 dark:border-zinc-700/70 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-extrabold text-xs text-gray-900 dark:text-white flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-purple-500" />
+                    3rd & Any Later Booking (double.third)
+                  </span>
+                  <span className="text-[10px] text-gray-400 font-semibold">Defaults: 20 / 2km / ₱5</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-0.5">Min Fare (₱)</label>
+                    <input
+                      type="number"
+                      value={ratesConfig.riderPay?.double?.third?.minFare ?? 20}
+                      onChange={(e) => updateRiderPayDoubleField('third', 'minFare', e.target.value)}
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-850 font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-0.5">Included Km</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={ratesConfig.riderPay?.double?.third?.includedKm ?? 2}
+                      onChange={(e) => updateRiderPayDoubleField('third', 'includedKm', e.target.value)}
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-850 font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-0.5">Extra per Km (₱)</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={ratesConfig.riderPay?.double?.third?.perKmExtra ?? 5}
+                      onChange={(e) => updateRiderPayDoubleField('third', 'perKmExtra', e.target.value)}
+                      className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-850 font-bold text-purple-600"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* 3. Pickup Fee Tier */}
+            <div className="p-4 rounded-2xl bg-gray-50/70 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-3">
+              <div className="flex items-center justify-between pb-2 border-b border-gray-200 dark:border-zinc-700/60">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 rounded-lg bg-amber-400 text-black">
+                    <Navigation className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="font-black text-xs uppercase tracking-wider text-gray-900 dark:text-white">
+                      Batch Pickup Fee (riderPay.pickup)
+                    </h4>
+                    <p className="text-[11px] text-gray-400">
+                      Paid once per batch: rider acceptance point &rarr; first merchant store
+                    </p>
+                  </div>
+                </div>
+                <span className="text-[10px] font-bold text-gray-400">Defaults: 10 / 1km free / ₱6</span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-600 dark:text-zinc-400 mb-1">
+                    Base / Min Pickup Fare (₱)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={ratesConfig.riderPay?.pickup?.minFare ?? 10}
+                    onChange={(e) => updateRiderPayField('pickup', 'minFare', e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-gray-900 dark:text-white"
+                  />
+                  <span className="text-[10px] text-gray-400 mt-0.5 block">Default: ₱10</span>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-600 dark:text-zinc-400 mb-1">
+                    Free Pickup Distance (km)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value={ratesConfig.riderPay?.pickup?.freeKm ?? 1}
+                    onChange={(e) => updateRiderPayField('pickup', 'freeKm', e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-gray-900 dark:text-white"
+                  />
+                  <span className="text-[10px] text-gray-400 mt-0.5 block">Default: 1 km</span>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-600 dark:text-zinc-400 mb-1">
+                    Extra per Km (₱/km)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value={ratesConfig.riderPay?.pickup?.perKmExtra ?? 6}
+                    onChange={(e) => updateRiderPayField('pickup', 'perKmExtra', e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-amber-600"
+                  />
+                  <span className="text-[10px] text-gray-400 mt-0.5 block">Default: ₱6/km</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Interactive Rider Pay Calculator */}
+          <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-5 shadow-xs space-y-5">
+            <div className="flex items-center gap-2">
+              <Calculator className="w-5 h-5 text-amber-500" />
+              <h3 className="font-bold text-base text-gray-900 dark:text-white">
+                Rider Pay Calculator
+              </h3>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              {/* Batch Mode Selector */}
+              <div>
+                <label className="block uppercase font-bold text-gray-500 mb-1.5">
+                  Trip Batch Type
+                </label>
+                <div className="grid grid-cols-3 gap-1.5 p-1 bg-gray-100 dark:bg-zinc-800 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setCalcRiderPayMode('single')}
+                    className={`py-1.5 rounded-lg font-bold text-xs transition-all ${
+                      calcRiderPayMode === 'single'
+                        ? 'bg-amber-400 text-black shadow-xs'
+                        : 'text-gray-600 dark:text-zinc-400 hover:text-black dark:hover:text-white'
+                    }`}
+                  >
+                    Single (1)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCalcRiderPayMode('double')}
+                    className={`py-1.5 rounded-lg font-bold text-xs transition-all ${
+                      calcRiderPayMode === 'double'
+                        ? 'bg-amber-400 text-black shadow-xs'
+                        : 'text-gray-600 dark:text-zinc-400 hover:text-black dark:hover:text-white'
+                    }`}
+                  >
+                    Double (2)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCalcRiderPayMode('triple')}
+                    className={`py-1.5 rounded-lg font-bold text-xs transition-all ${
+                      calcRiderPayMode === 'triple'
+                        ? 'bg-amber-400 text-black shadow-xs'
+                        : 'text-gray-600 dark:text-zinc-400 hover:text-black dark:hover:text-white'
+                    }`}
+                  >
+                    Triple (3)
+                  </button>
+                </div>
+              </div>
+
+              {/* Pickup Distance */}
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="uppercase font-bold text-gray-500">
+                    Pickup Distance ({calcRiderPickupDist} km)
+                  </label>
+                  <span className="text-[10px] text-gray-400">Rider &rarr; 1st Shop</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="10"
+                  step="0.1"
+                  value={calcRiderPickupDist}
+                  onChange={(e) => setCalcRiderPickupDist(Number(e.target.value))}
+                  className="w-full accent-amber-500"
+                />
+              </div>
+
+              {/* Order 1 Distance */}
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="uppercase font-bold text-gray-500">
+                    Order 1 Distance ({calcRiderOrder1Dist} km)
+                  </label>
+                  <span className="text-[10px] text-gray-400">Shop 1 &rarr; Customer 1</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.5"
+                  max="20"
+                  step="0.5"
+                  value={calcRiderOrder1Dist}
+                  onChange={(e) => setCalcRiderOrder1Dist(Number(e.target.value))}
+                  className="w-full accent-amber-500"
+                />
+              </div>
+
+              {/* Order 2 Distance (if double or triple) */}
+              {(calcRiderPayMode === 'double' || calcRiderPayMode === 'triple') && (
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="uppercase font-bold text-gray-500">
+                      Order 2 Distance ({calcRiderOrder2Dist} km)
+                    </label>
+                    <span className="text-[10px] text-gray-400">Shop 2 &rarr; Customer 2</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="20"
+                    step="0.5"
+                    value={calcRiderOrder2Dist}
+                    onChange={(e) => setCalcRiderOrder2Dist(Number(e.target.value))}
+                    className="w-full accent-blue-500"
+                  />
+                </div>
+              )}
+
+              {/* Order 3 Distance (if triple) */}
+              {calcRiderPayMode === 'triple' && (
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="uppercase font-bold text-gray-500">
+                      Order 3 Distance ({calcRiderOrder3Dist} km)
+                    </label>
+                    <span className="text-[10px] text-gray-400">Shop 3 &rarr; Customer 3</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="20"
+                    step="0.5"
+                    value={calcRiderOrder3Dist}
+                    onChange={(e) => setCalcRiderOrder3Dist(Number(e.target.value))}
+                    className="w-full accent-purple-500"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Calculated Breakdown Card */}
+            <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 space-y-2.5 text-xs">
+              <span className="font-extrabold text-[11px] uppercase tracking-wider text-amber-900 dark:text-amber-200 block pb-1 border-b border-amber-200/60 dark:border-amber-900/40">
+                Courier Payout Breakdown ({calcRiderPayMode.toUpperCase()})
+              </span>
+
+              <div className="flex justify-between text-gray-700 dark:text-zinc-300">
+                <span>Batch Pickup Fee ({calcRiderPickupDist} km):</span>
+                <span className="font-bold text-gray-900 dark:text-white">₱{calculatedRiderPay.pickupFare.toFixed(2)}</span>
+              </div>
+
+              <div className="flex justify-between text-gray-700 dark:text-zinc-300">
+                <span>Booking 1 Fare ({calcRiderOrder1Dist} km):</span>
+                <span className="font-bold text-gray-900 dark:text-white">₱{calculatedRiderPay.booking1Fare.toFixed(2)}</span>
+              </div>
+
+              {(calcRiderPayMode === 'double' || calcRiderPayMode === 'triple') && (
+                <div className="flex justify-between text-gray-700 dark:text-zinc-300">
+                  <span>Booking 2 Fare ({calcRiderOrder2Dist} km):</span>
+                  <span className="font-bold text-gray-900 dark:text-white">₱{calculatedRiderPay.booking2Fare.toFixed(2)}</span>
+                </div>
+              )}
+
+              {calcRiderPayMode === 'triple' && (
+                <div className="flex justify-between text-gray-700 dark:text-zinc-300">
+                  <span>Booking 3 Fare ({calcRiderOrder3Dist} km):</span>
+                  <span className="font-bold text-gray-900 dark:text-white">₱{calculatedRiderPay.booking3Fare.toFixed(2)}</span>
+                </div>
+              )}
+
+              <div className="pt-2 border-t border-amber-300 dark:border-amber-800 flex justify-between font-black text-sm text-gray-900 dark:text-white">
+                <span>Rider Batch Total:</span>
+                <span className="text-amber-600 text-base">₱{calculatedRiderPay.totalRiderPay.toFixed(2)}</span>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-white/70 dark:bg-zinc-900/80 border border-amber-200 dark:border-amber-900/40 flex justify-between items-center text-xs">
+                <span className="font-bold text-gray-600 dark:text-zinc-400">
+                  Average Pay per Booking ({calculatedRiderPay.orderCount}):
+                </span>
+                <span className="font-black text-emerald-600">
+                  ₱{calculatedRiderPay.avgPerBooking.toFixed(2)} / order
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 3. TAXI FARES SECTION */}
       {ratesConfig && activeMainTab === 'taxi' && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Taxi Rates Form */}

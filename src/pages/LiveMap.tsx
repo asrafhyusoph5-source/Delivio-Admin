@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import L from 'leaflet';
 import {
   db,
@@ -78,16 +78,27 @@ export const LiveMap: React.FC = () => {
     merchants: L.LayerGroup;
     customers: L.LayerGroup;
     routes: L.LayerGroup;
+    batchGroup: L.LayerGroup;
   }>({
     riders: L.layerGroup(),
     merchants: L.layerGroup(),
     customers: L.layerGroup(),
-    routes: L.layerGroup()
+    routes: L.layerGroup(),
+    batchGroup: L.layerGroup()
   });
 
   const { selectedCity, selectedCityId } = useCity();
   const { showSuccess, showError } = useToast();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const batchIdParam = searchParams.get('batchId') || '';
+  const [selectedBatchId, setSelectedBatchId] = useState<string>(batchIdParam);
+
+  useEffect(() => {
+    if (batchIdParam) {
+      setSelectedBatchId(batchIdParam);
+    }
+  }, [batchIdParam]);
 
   // Layer Visibility Toggles
   const [showRiders, setShowRiders] = useState(true);
@@ -133,6 +144,7 @@ export const LiveMap: React.FC = () => {
     layerGroupsRef.current.merchants.addTo(map);
     layerGroupsRef.current.customers.addTo(map);
     layerGroupsRef.current.routes.addTo(map);
+    layerGroupsRef.current.batchGroup.addTo(map);
 
     mapInstanceRef.current = map;
 
@@ -274,6 +286,10 @@ export const LiveMap: React.FC = () => {
               dropoff: dt.dropoff,
               stops: dt.stops,
               cityId: dt.cityId,
+              batchId: dt.batchId,
+              bookingRank: dt.bookingRank,
+              batchTotalBookings: dt.batchTotalBookings,
+              deliveryOption: dt.deliveryOption,
               createdAt: dt.createdAt
             });
           }
@@ -339,6 +355,33 @@ export const LiveMap: React.FC = () => {
     if (selectedCityId === 'all') return activeOrders;
     return activeOrders.filter((o) => o.cityId === selectedCityId);
   }, [activeOrders, selectedCityId]);
+
+  // Available batches in current view
+  const availableBatches = useMemo(() => {
+    const map = new Map<string, Order[]>();
+    filteredActiveOrders.forEach((o) => {
+      if (o.batchId) {
+        const arr = map.get(o.batchId) || [];
+        arr.push(o);
+        map.set(o.batchId, arr);
+      }
+    });
+    return Array.from(map.entries()).map(([bId, bOrders]) => {
+      bOrders.sort((a, b) => Number(a.bookingRank || 1) - Number(b.bookingRank || 1));
+      return {
+        batchId: bId,
+        orders: bOrders,
+        riderName: bOrders[0]?.riderName || 'Unassigned',
+        riderPhone: bOrders[0]?.riderPhone,
+        riderLocation: bOrders[0]?.riderLocation
+      };
+    });
+  }, [filteredActiveOrders]);
+
+  const currentBatch = useMemo(() => {
+    if (!selectedBatchId) return null;
+    return availableBatches.find((b) => b.batchId === selectedBatchId) || null;
+  }, [availableBatches, selectedBatchId]);
 
   // 4. Update Map view on City Change
   useEffect(() => {
@@ -473,6 +516,9 @@ export const LiveMap: React.FC = () => {
     // D. Active Order Routes
     if (showRoutes) {
       filteredActiveOrders.forEach((o) => {
+        // If a specific batch is selected, suppress individual routes for batched orders to avoid clutter
+        if (selectedBatchId && o.batchId === selectedBatchId) return;
+
         if (o.pickup?.lat && o.pickup?.lng && o.dropoff?.lat && o.dropoff?.lng) {
           const latlngs: L.LatLngExpression[] = [
             [o.pickup.lat, o.pickup.lng],
@@ -492,6 +538,98 @@ export const LiveMap: React.FC = () => {
         }
       });
     }
+
+    // E. Planned Batch Route (Green pins M1, M2... and Red pins C1, C2...)
+    layerGroupsRef.current.batchGroup.clearLayers();
+    if (currentBatch && currentBatch.orders.length > 0) {
+      const waypoints: L.LatLngExpression[] = [];
+
+      // Rider initial location if known
+      if (currentBatch.riderLocation?.lat && currentBatch.riderLocation?.lng) {
+        waypoints.push([currentBatch.riderLocation.lat, currentBatch.riderLocation.lng]);
+      }
+
+      // 1. Pickups: Green numbered merchant pins (M1, M2...)
+      currentBatch.orders.forEach((ord, idx) => {
+        if (ord.pickup?.lat && ord.pickup?.lng) {
+          waypoints.push([ord.pickup.lat, ord.pickup.lng]);
+          const greenIcon = L.divIcon({
+            html: `
+              <div class="flex items-center justify-center w-8 h-8 rounded-full bg-emerald-600 text-white font-black text-xs border-2 border-white shadow-xl cursor-pointer ring-3 ring-emerald-400">
+                M${idx + 1}
+              </div>
+            `,
+            className: 'delivio-batch-merchant-pin',
+            iconSize: [32, 32],
+            iconAnchor: [16, 16]
+          });
+          const marker = L.marker([ord.pickup.lat, ord.pickup.lng], { icon: greenIcon });
+          marker.bindTooltip(
+            `Pickup M${idx + 1}: ${ord.merchantName || ord.pickup?.address || 'Merchant'} (Order #${ord.orderNumber})`,
+            { permanent: true, direction: 'top', className: 'font-bold text-xs' }
+          );
+          marker.on('click', () => {
+            setSelectedEntity({
+              type: 'merchant',
+              data: { name: ord.merchantName || 'Merchant', address: ord.pickup?.address || '' }
+            });
+          });
+          marker.addTo(layerGroupsRef.current.batchGroup);
+        }
+      });
+
+      // 2. Drop-offs: Red numbered customer pins (C1, C2...)
+      currentBatch.orders.forEach((ord, idx) => {
+        if (ord.dropoff?.lat && ord.dropoff?.lng) {
+          waypoints.push([ord.dropoff.lat, ord.dropoff.lng]);
+          const redIcon = L.divIcon({
+            html: `
+              <div class="flex items-center justify-center w-8 h-8 rounded-full bg-red-600 text-white font-black text-xs border-2 border-white shadow-xl cursor-pointer ring-3 ring-red-400">
+                C${idx + 1}
+              </div>
+            `,
+            className: 'delivio-batch-customer-pin',
+            iconSize: [32, 32],
+            iconAnchor: [16, 16]
+          });
+          const marker = L.marker([ord.dropoff.lat, ord.dropoff.lng], { icon: redIcon });
+          marker.bindTooltip(
+            `Drop-off C${idx + 1}: ${ord.customerName} - ${ord.dropoff?.address || 'Customer'} (Order #${ord.orderNumber})`,
+            { permanent: true, direction: 'bottom', className: 'font-bold text-xs' }
+          );
+          marker.on('click', () => {
+            setSelectedEntity({
+              type: 'customer',
+              data: { name: ord.customerName, address: ord.dropoff?.address || '', phone: ord.customerPhone }
+            });
+          });
+          marker.addTo(layerGroupsRef.current.batchGroup);
+        }
+      });
+
+      // 3. Planned Route Polyline
+      if (waypoints.length >= 2) {
+        const polyline = L.polyline(waypoints, {
+          color: '#7c3aed',
+          weight: 5,
+          opacity: 0.95,
+          dashArray: '10, 6'
+        });
+        polyline.bindTooltip(
+          `Batch #${currentBatch.batchId} Planned Route (${currentBatch.orders.length} bookings, ${currentBatch.orders.length * 2} stops)`,
+          { sticky: true }
+        );
+        polyline.addTo(layerGroupsRef.current.batchGroup);
+
+        // Auto zoom and pan to fit planned batch route
+        if (mapInstanceRef.current) {
+          mapInstanceRef.current.fitBounds(L.latLngBounds(waypoints), {
+            padding: [60, 60],
+            maxZoom: 15
+          });
+        }
+      }
+    }
   }, [
     filteredRiders,
     filteredMerchants,
@@ -500,7 +638,9 @@ export const LiveMap: React.FC = () => {
     showRiders,
     showMerchants,
     showCustomers,
-    showRoutes
+    showRoutes,
+    currentBatch,
+    selectedBatchId
   ]);
 
   // Quick Action: Suspend / Unsuspend Driver
@@ -586,6 +726,35 @@ export const LiveMap: React.FC = () => {
             <Route className="w-3.5 h-3.5" />
             <span>Routes ({filteredActiveOrders.length})</span>
           </button>
+
+          {/* Batch Selector Dropdown */}
+          <div className="flex items-center gap-1.5 pl-1">
+            <span className="text-gray-300 dark:text-zinc-700">|</span>
+            <div className="flex items-center gap-1">
+              <Layers className="w-3.5 h-3.5 text-purple-600" />
+              <select
+                value={selectedBatchId}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setSelectedBatchId(val);
+                  if (val) {
+                    setSearchParams({ batchId: val });
+                  } else {
+                    searchParams.delete('batchId');
+                    setSearchParams(searchParams);
+                  }
+                }}
+                className="bg-purple-50 dark:bg-purple-950/60 text-purple-950 dark:text-purple-200 border border-purple-300 dark:border-purple-800 text-xs font-bold rounded-xl px-2.5 py-1.5 focus:outline-hidden focus:ring-2 focus:ring-purple-400"
+              >
+                <option value="">All Routes (Normal View)</option>
+                {availableBatches.map((b) => (
+                  <option key={b.batchId} value={b.batchId}>
+                    Batch #{b.batchId.slice(-6)} ({b.orders.length} bookings • {b.riderName})
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
         </div>
 
         {/* Vehicle-Type Filter Chips (Only shown when Drivers layer is enabled) */}
@@ -672,6 +841,117 @@ export const LiveMap: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Floating Planned Batch Route Card when a batch is active */}
+      {currentBatch && (
+        <div className="absolute top-20 right-4 z-20 w-80 sm:w-96 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md rounded-2xl border border-purple-300 dark:border-purple-800 shadow-2xl p-4 text-xs space-y-3 animate-in slide-in-from-right duration-200">
+          <div className="flex items-center justify-between border-b border-gray-100 dark:border-zinc-800 pb-2.5">
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 rounded-lg bg-purple-600 text-white shadow-xs">
+                <Route className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="font-extrabold text-sm text-purple-950 dark:text-purple-200">
+                  Planned Batch Route
+                </h4>
+                <span className="font-mono text-[11px] text-gray-500">
+                  Batch #{currentBatch.batchId}
+                </span>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setSelectedBatchId('');
+                searchParams.delete('batchId');
+                setSearchParams(searchParams);
+              }}
+              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-zinc-800 transition-colors"
+              title="Close Batch Route View"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Rider summary */}
+          <div className="flex items-center justify-between p-2.5 rounded-xl bg-purple-50/70 dark:bg-purple-950/40 text-[11px]">
+            <div className="flex items-center gap-1.5 font-bold text-gray-900 dark:text-white">
+              <Car className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+              <span>{currentBatch.riderName}</span>
+            </div>
+            <span className="text-gray-500 font-mono">{currentBatch.riderPhone || 'In transit'}</span>
+          </div>
+
+          {/* Planned Sequence */}
+          <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+            <div className="text-[10px] uppercase font-bold text-gray-400">
+              Sequence of Stops ({currentBatch.orders.length * 2} total):
+            </div>
+            {/* Merchant pickups M1, M2 */}
+            {currentBatch.orders.map((ord, idx) => (
+              <div
+                key={`m-${ord.id}`}
+                className="flex items-start gap-2 p-2 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/60 dark:border-emerald-800/60"
+              >
+                <span className="w-5 h-5 rounded-full bg-emerald-600 text-white font-black text-[10px] flex items-center justify-center shrink-0 shadow-2xs">
+                  M{idx + 1}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 block">
+                    Pickup M{idx + 1} (#{ord.orderNumber})
+                  </span>
+                  <p className="text-[11px] font-medium text-gray-900 dark:text-white truncate">
+                    {ord.merchantName || ord.pickup?.address || 'Pickup Point'}
+                  </p>
+                </div>
+              </div>
+            ))}
+            {/* Customer dropoffs C1, C2 */}
+            {currentBatch.orders.map((ord, idx) => (
+              <div
+                key={`c-${ord.id}`}
+                className="flex items-start gap-2 p-2 rounded-xl bg-red-50/70 dark:bg-red-950/30 border border-red-200/60 dark:border-red-800/60"
+              >
+                <span className="w-5 h-5 rounded-full bg-red-600 text-white font-black text-[10px] flex items-center justify-center shrink-0 shadow-2xs">
+                  C{idx + 1}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <span className="text-[10px] font-bold text-red-700 dark:text-red-400 block">
+                    Drop-off C{idx + 1} (#{ord.orderNumber})
+                  </span>
+                  <p className="text-[11px] font-medium text-gray-900 dark:text-white truncate">
+                    {ord.customerName} - {ord.dropoff?.address || 'Customer destination'}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Quick buttons */}
+          <div className="pt-2 border-t border-gray-100 dark:border-zinc-800 flex items-center gap-2">
+            <button
+              onClick={() => navigate('/orders')}
+              className="flex-1 py-1.5 rounded-xl border border-gray-200 dark:border-zinc-800 font-bold text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-800 transition-colors text-center"
+            >
+              View Orders
+            </button>
+            <button
+              onClick={() => {
+                const waypoints: L.LatLngExpression[] = [];
+                currentBatch.orders.forEach((o) => {
+                  if (o.pickup?.lat && o.pickup?.lng) waypoints.push([o.pickup.lat, o.pickup.lng]);
+                  if (o.dropoff?.lat && o.dropoff?.lng) waypoints.push([o.dropoff.lat, o.dropoff.lng]);
+                });
+                if (mapInstanceRef.current && waypoints.length > 0) {
+                  mapInstanceRef.current.fitBounds(L.latLngBounds(waypoints), { padding: [60, 60] });
+                }
+              }}
+              className="flex-1 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-bold transition-colors text-center shadow-xs"
+            >
+              Center Route
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Map Element */}
       <div ref={mapContainerRef} className="h-full w-full z-10" />
