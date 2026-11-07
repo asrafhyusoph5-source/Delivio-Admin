@@ -21,7 +21,8 @@ import {
   Sparkles,
   ArrowLeftRight,
   Layers,
-  Headphones
+  Headphones,
+  Trophy
 } from 'lucide-react';
 import { useBadgeCounts } from '../../context/BadgeCountsContext';
 
@@ -60,6 +61,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-amber-500'
     },
     { name: 'Drivers', path: '/riders', icon: Car },
+    { name: 'Quests', path: '/quests', icon: Trophy },
     {
       name: 'Applications',
       path: '/applications',

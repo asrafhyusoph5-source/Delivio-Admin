@@ -847,7 +847,7 @@ export const DeliveryRates: React.FC = () => {
           }`}
         >
           <Car className="w-4 h-4" />
-          <span>Taxi Fares (Per Vehicle)</span>
+          <span>Delivio Taxi Fares (Per Vehicle)</span>
         </button>
 
         <button
@@ -1891,7 +1891,7 @@ export const DeliveryRates: React.FC = () => {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 dark:border-zinc-800 pb-4">
               <div>
                 <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
-                  Taxi Fares for {cities.find((c) => c.id === activeCityId)?.name || activeCityId}
+                  Delivio Taxi Fares for {cities.find((c) => c.id === activeCityId)?.name || activeCityId}
                 </h3>
                 <p className="text-xs text-gray-500">
                   Saved in <code className="font-mono text-amber-600">deliveryRates/{'{cityId}'}.rideRates.{'{vehicleType}'}</code>
@@ -1902,7 +1902,7 @@ export const DeliveryRates: React.FC = () => {
                 onClick={() => setConfirmSaveRatesModal(true)}
                 className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs self-start sm:self-auto"
               >
-                <Save className="w-4 h-4" /> Save Taxi Fares
+                <Save className="w-4 h-4" /> Save Delivio Taxi Fares
               </button>
             </div>
 
@@ -1944,7 +1944,7 @@ export const DeliveryRates: React.FC = () => {
                   <div className="p-3.5 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-850 flex items-center justify-between">
                     <div>
                       <span className="font-bold text-xs text-gray-900 dark:text-white block">
-                        Enable Taxi Service for {VEHICLE_LABELS[activeVehicleTab]} in {cities.find((c) => c.id === activeCityId)?.name}
+                        Enable Delivio Taxi for {VEHICLE_LABELS[activeVehicleTab]} in {cities.find((c) => c.id === activeCityId)?.name}
                       </span>
                       <span className="text-[11px] text-gray-500">
                         When disabled, customers in this city cannot book {VEHICLE_LABELS[activeVehicleTab]} rides.
@@ -2145,7 +2145,7 @@ export const DeliveryRates: React.FC = () => {
             <div className="flex items-center gap-2">
               <Calculator className="w-5 h-5 text-amber-500" />
               <h3 className="font-bold text-base text-gray-900 dark:text-white">
-                Taxi Fare Calculator
+                Delivio Taxi Fare Calculator
               </h3>
             </div>
 
@@ -2304,7 +2304,7 @@ export const DeliveryRates: React.FC = () => {
               </span>
             </h3>
             <p className="text-xs text-gray-500 dark:text-zinc-400 mt-0.5">
-              Manage city-level service availability for Food, Convenience, Parcel Express, Pabili, and Taxi rides. Toggling off a service automatically closes affected stores and locks driver dispatches in this city.
+              Manage city-level service availability for Delivio Food, Delivio Mart, Delivio Parcel, Delivio Pabili, Delivio Instant, and Delivio Taxi. Toggling off a service automatically closes affected stores and locks driver dispatches in this city.
             </p>
           </div>
 

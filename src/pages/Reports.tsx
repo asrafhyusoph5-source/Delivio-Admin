@@ -15,6 +15,7 @@ import type { Order } from '../types';
 import {
   VEHICLE_TYPES,
   VEHICLE_LABELS,
+  SERVICE_LABELS,
   type VehicleType
 } from '../constants';
 import {
@@ -149,12 +150,12 @@ export const Reports: React.FC = () => {
 
     // Orders and revenue by service type
     const serviceMap: Record<string, { name: string; orders: number; revenue: number; color: string }> = {
-      food: { name: 'Food Delivery', orders: 0, revenue: 0, color: '#FFC107' },
-      convenience: { name: 'Convenience', orders: 0, revenue: 0, color: '#3B82F6' },
-      parcel: { name: 'Parcel Express', orders: 0, revenue: 0, color: '#10B981' },
-      pabili: { name: 'Pabili Service', orders: 0, revenue: 0, color: '#EC4899' },
-      request_rider: { name: 'Request Driver', orders: 0, revenue: 0, color: '#8B5CF6' },
-      taxi: { name: 'Taxi Service', orders: 0, revenue: 0, color: '#0EA5E9' }
+      food: { name: 'Delivio Food', orders: 0, revenue: 0, color: '#FFC107' },
+      convenience: { name: 'Delivio Mart', orders: 0, revenue: 0, color: '#3B82F6' },
+      parcel: { name: 'Delivio Parcel', orders: 0, revenue: 0, color: '#10B981' },
+      pabili: { name: 'Delivio Pabili', orders: 0, revenue: 0, color: '#EC4899' },
+      request_rider: { name: 'Delivio Instant', orders: 0, revenue: 0, color: '#8B5CF6' },
+      taxi: { name: 'Delivio Taxi', orders: 0, revenue: 0, color: '#0EA5E9' }
     };
 
     // Taxi orders & revenue by vehicle type
@@ -299,8 +300,8 @@ export const Reports: React.FC = () => {
   const handleExportCsv = () => {
     const rows = filteredOrders.map((o) => ({
       OrderNumber: o.orderNumber,
-      Fulfillment: o.serviceType === 'taxi' ? 'Taxi Ride' : o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
-      Service: o.serviceType,
+      Fulfillment: o.serviceType === 'taxi' ? 'Delivio Taxi Ride' : o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
+      Service: SERVICE_LABELS[o.serviceType] || o.serviceType,
       VehicleType: o.vehicleType || o.riderVehicle?.vehicleType || '',
       Status: o.status,
       Customer: o.customerName,
@@ -447,7 +448,7 @@ export const Reports: React.FC = () => {
             <div>
               <h3 className="font-extrabold text-base text-gray-900 dark:text-white flex items-center gap-2">
                 <Car className="w-5 h-5 text-blue-500" />
-                Taxi Service by Vehicle Type
+                Delivio Taxi by Vehicle Type
               </h3>
               <p className="text-xs text-gray-400 mt-0.5">
                 Passenger rides and revenue split by motorcycle, tricycle, and cars.

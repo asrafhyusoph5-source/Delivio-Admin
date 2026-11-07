@@ -39,9 +39,12 @@ import type {
   MerchantOperatingDay,
   Review,
   RiderReview,
-  MerchantSpecialRadius
+  MerchantSpecialRadius,
+  MerchantBestSellers,
+  BestSellerItem
 } from '../types';
 import { FOOD_CATEGORIES, CONVENIENCE_CATEGORIES } from '../constants';
+import { formatOrderNumber } from '../utils/orderNumber';
 import {
   Search,
   Store,
@@ -419,16 +422,25 @@ export const Merchants: React.FC = () => {
 
   // Selected Merchant for detail
   const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(null);
-  const [activeTab, setActiveTab] = useState<'details' | 'status' | 'location' | 'radius' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet' | 'reviews'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'status' | 'location' | 'radius' | 'specialRadius' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet' | 'reviews'>('details');
 
   // Special Radius State (merchants/{id}.specialRadius & settings/dispatch.searchRadiusKm)
   const [globalDispatchRadiusKm, setGlobalDispatchRadiusKm] = useState<number>(5);
+  const [globalSearchRadiusInput, setGlobalSearchRadiusInput] = useState<number>(5);
+  const [savingGlobalRadius, setSavingGlobalRadius] = useState<boolean>(false);
+  const [confirmGlobalRadiusModalOpen, setConfirmGlobalRadiusModalOpen] = useState<boolean>(false);
   const [specialRadiusEnabled, setSpecialRadiusEnabled] = useState<boolean>(false);
   const [specialRadiusKm, setSpecialRadiusKm] = useState<number>(5);
   const [specialCustomerExtraFee, setSpecialCustomerExtraFee] = useState<number>(0);
   const [specialRiderExtraFee, setSpecialRiderExtraFee] = useState<number>(0);
   const [savingSpecialRadius, setSavingSpecialRadius] = useState<boolean>(false);
   const [confirmSaveSpecialRadiusModalOpen, setConfirmSaveSpecialRadiusModalOpen] = useState<boolean>(false);
+
+  // Best Sellers (merchants/{id}/stats/bestSellers)
+  const [bestSellers, setBestSellers] = useState<MerchantBestSellers | null>(null);
+  const [loadingBestSellers, setLoadingBestSellers] = useState(false);
+  const [recomputingSingle, setRecomputingSingle] = useState(false);
+  const [recomputingAll, setRecomputingAll] = useState(false);
 
   // Reviews State (two tabs: from customers, from drivers)
   const [merchantReviews, setMerchantReviews] = useState<Review[]>([]);
@@ -568,6 +580,7 @@ export const Merchants: React.FC = () => {
   const [searchingNominatim, setSearchingNominatim] = useState(false);
   const [nominatimResults, setNominatimResults] = useState<any[]>([]);
   const [savingLocation, setSavingLocation] = useState(false);
+  const [resettingLocationCooldown, setResettingLocationCooldown] = useState(false);
 
   // 1. Fetch Merchants
   const fetchMerchants = async () => {
@@ -653,6 +666,7 @@ export const Merchants: React.FC = () => {
           const dData = dSnap.data();
           if (typeof dData.searchRadiusKm === 'number') {
             setGlobalDispatchRadiusKm(dData.searchRadiusKm);
+            setGlobalSearchRadiusInput(dData.searchRadiusKm);
           }
         }
       } catch (err) {
@@ -701,7 +715,130 @@ export const Merchants: React.FC = () => {
     fetchMerchantReviews(selectedMerchant.id);
     // Fetch Edit History
     fetchEditHistory(selectedMerchant.id);
+    // Fetch Best Sellers
+    fetchMerchantBestSellers(selectedMerchant.id);
   }, [selectedMerchant]);
+
+  // Fetch Best Sellers stats document
+  const fetchMerchantBestSellers = async (merchantId: string) => {
+    try {
+      setLoadingBestSellers(true);
+      const snap = await getDoc(doc(db, 'merchants', merchantId, 'stats', 'bestSellers'));
+      if (snap.exists()) {
+        setBestSellers(snap.data() as MerchantBestSellers);
+      } else {
+        setBestSellers(null);
+      }
+    } catch (err) {
+      console.warn('Failed to load merchant bestSellers:', err);
+      setBestSellers(null);
+    } finally {
+      setLoadingBestSellers(false);
+    }
+  };
+
+  // Recompute best sellers from delivered orders in last 30 days
+  const recomputeBestSellersForMerchant = async (merchantId: string): Promise<MerchantBestSellers | null> => {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const qOrders = query(
+      collection(db, 'orders'),
+      where('merchantId', '==', merchantId),
+      limit(500)
+    );
+    const snap = await getDocs(qOrders);
+
+    const itemStatsMap: Record<string, { id: string; name: string; qty: number; revenue: number; categoryId?: string }> = {};
+    let matchingOrdersCount = 0;
+
+    snap.forEach((d) => {
+      const ord = d.data();
+      const st = (ord.status || '').toLowerCase();
+      if (st !== 'delivered' && st !== 'completed') return;
+
+      const orderDate = ord.deliveredAt?.toDate
+        ? ord.deliveredAt.toDate()
+        : ord.createdAt?.toDate
+        ? ord.createdAt.toDate()
+        : new Date(ord.createdAt);
+
+      if (orderDate < thirtyDaysAgo) return;
+
+      matchingOrdersCount += 1;
+
+      if (Array.isArray(ord.items)) {
+        for (const it of ord.items) {
+          const key = it.id || it.name || 'Item';
+          const qty = Number(it.qty) || 1;
+          const price = Number(it.price) || 0;
+          const rev = price * qty;
+
+          if (!itemStatsMap[key]) {
+            itemStatsMap[key] = {
+              id: it.id || key,
+              name: it.name || key,
+              qty: 0,
+              revenue: 0,
+              categoryId: it.categoryId
+            };
+          }
+          itemStatsMap[key].qty += qty;
+          itemStatsMap[key].revenue += rev;
+        }
+      }
+    });
+
+    const sortedItems: BestSellerItem[] = Object.values(itemStatsMap).sort((a, b) => {
+      if (b.qty !== a.qty) return b.qty - a.qty;
+      return b.revenue - a.revenue;
+    });
+
+    const bestSellersData: MerchantBestSellers = {
+      items: sortedItems,
+      orderCount: matchingOrdersCount,
+      last30DaysOrderCount: matchingOrdersCount,
+      recomputedAt: Timestamp.now(),
+      recomputedBy: adminProfile?.name || adminProfile?.email || 'Admin'
+    };
+
+    await setDoc(doc(db, 'merchants', merchantId, 'stats', 'bestSellers'), bestSellersData);
+
+    return bestSellersData;
+  };
+
+  const handleRecomputeSingleBestSellers = async () => {
+    if (!selectedMerchant) return;
+    try {
+      setRecomputingSingle(true);
+      const res = await recomputeBestSellersForMerchant(selectedMerchant.id);
+      setBestSellers(res);
+      showSuccess(`Recomputed best sellers for ${selectedMerchant.name}: ${res?.items?.length || 0} items identified from ${res?.orderCount || 0} delivered orders.`);
+    } catch (err) {
+      showError(err);
+    } finally {
+      setRecomputingSingle(false);
+    }
+  };
+
+  const handleRecomputeAllBestSellers = async () => {
+    try {
+      setRecomputingAll(true);
+      let count = 0;
+      for (const m of filteredMerchants) {
+        await recomputeBestSellersForMerchant(m.id);
+        count += 1;
+      }
+      showSuccess(`Successfully recomputed best sellers for ${count} shop(s) based on delivered orders in the last 30 days.`);
+      if (selectedMerchant) {
+        await fetchMerchantBestSellers(selectedMerchant.id);
+      }
+    } catch (err) {
+      showError(err);
+    } finally {
+      setRecomputingAll(false);
+    }
+  };
 
   // Fetch Merchant Reviews (reviews from customers, and driver ratings from riderReviews; sort in code)
   const fetchMerchantReviews = async (merchantId: string) => {
@@ -1358,6 +1495,40 @@ export const Merchants: React.FC = () => {
     }
   };
 
+  // Save Merchant Radius (All Merchants) -> settings/dispatch.searchRadiusKm
+  const handleSaveGlobalMerchantRadius = async () => {
+    try {
+      setSavingGlobalRadius(true);
+      const val = Math.max(0.5, Number(globalSearchRadiusInput) || 5);
+      await setDoc(
+        doc(db, 'settings', 'dispatch'),
+        {
+          searchRadiusKm: val,
+          updatedAt: Timestamp.now(),
+          updatedBy: adminProfile?.uid || 'admin'
+        },
+        { merge: true }
+      );
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        action: 'UPDATE_MERCHANT_SEARCH_RADIUS',
+        entityType: 'settings',
+        entityId: 'dispatch',
+        details: `Updated global merchant search radius to ${val} km`
+      });
+
+      setGlobalDispatchRadiusKm(val);
+      setConfirmGlobalRadiusModalOpen(false);
+      showSuccess(`Merchant radius updated to ${val} km.`);
+    } catch (err) {
+      showError(err);
+    } finally {
+      setSavingGlobalRadius(false);
+    }
+  };
+
   // Fetch Menu Categories, Subcategories & Items
   const fetchMenuData = async (merchantId: string) => {
     try {
@@ -1597,6 +1768,35 @@ export const Merchants: React.FC = () => {
       showError(err);
     } finally {
       setSavingLocation(false);
+    }
+  };
+
+  // Allow merchant to change location now (clears cooldown)
+  const handleResetLocationCooldown = async () => {
+    if (!selectedMerchant) return;
+    try {
+      setResettingLocationCooldown(true);
+      const mRef = doc(db, 'merchants', selectedMerchant.id);
+      await updateDoc(mRef, {
+        locationChangedAt: null,
+        updatedAt: Timestamp.now()
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        action: 'ALLOW_MERCHANT_LOCATION_CHANGE',
+        entityType: 'merchant',
+        entityId: selectedMerchant.id,
+        details: `Reset 30-day merchant location cooldown for ${selectedMerchant.name}`
+      });
+
+      setSelectedMerchant((prev) => (prev ? { ...prev, locationChangedAt: null } : null));
+      showSuccess('Merchant is now allowed to change location immediately.');
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setResettingLocationCooldown(false);
     }
   };
 
@@ -2443,6 +2643,30 @@ export const Merchants: React.FC = () => {
         batch.update(mRef, { name: req.newValue });
       } else if (req.kind === 'email') {
         batch.update(mRef, { email: req.newValue });
+      } else if (req.kind === 'location') {
+        const val = req.requestedValue || req.newValue;
+        if (val) {
+          const newAddress = val.address || locAddress;
+          const newLat = Number(val.lat || locLat);
+          const newLng = Number(val.lng || locLng);
+          batch.update(mRef, {
+            address: newAddress,
+            lat: newLat,
+            lng: newLng,
+            locationChangedAt: Timestamp.now(),
+            updatedAt: Timestamp.now()
+          });
+          setLocAddress(newAddress);
+          setLocLat(newLat);
+          setLocLng(newLng);
+          if (markerRef.current && mapInstanceRef.current) {
+            markerRef.current.setLatLng([newLat, newLng]);
+            mapInstanceRef.current.setView([newLat, newLng], 16);
+          }
+          setSelectedMerchant((prev) =>
+            prev ? { ...prev, address: newAddress, lat: newLat, lng: newLng, locationChangedAt: Timestamp.now() } : null
+          );
+        }
       }
 
       const reqRef = doc(db, 'changeRequests', req.id);
@@ -2456,9 +2680,13 @@ export const Merchants: React.FC = () => {
 
       // Automatic inbox notice to merchant
       try {
+        const displayVal =
+          req.kind === 'location'
+            ? (req.requestedValue?.address || req.newValue?.address || 'Updated Coordinates')
+            : String(req.newValue);
         await addDoc(collection(db, 'inbox'), {
           title: `Change Request Approved: ${req.kind}`,
-          body: `Your request to update ${req.kind} has been approved and applied. (New value: ${req.newValue})`,
+          body: `Your request to update ${req.kind} has been approved and applied. (New value: ${displayVal})`,
           category: 'update',
           imageUrl: null,
           link: null,
@@ -2486,11 +2714,15 @@ export const Merchants: React.FC = () => {
   // Change Requests: Reject
   const handleRejectChange = async (reason: string) => {
     if (!targetChangeRequest) return;
+    if (!reason || !reason.trim()) {
+      showError('A reason is required to reject this change request.');
+      return;
+    }
     try {
       const reqRef = doc(db, 'changeRequests', targetChangeRequest.id);
       await updateDoc(reqRef, {
         status: 'Rejected',
-        rejectReason: reason,
+        rejectReason: reason.trim(),
         reviewedBy: adminProfile?.name || 'Admin',
         reviewedAt: Timestamp.now()
       });
@@ -2607,6 +2839,51 @@ export const Merchants: React.FC = () => {
         </button>
       </div>
 
+      {/* Merchant radius (all merchants) Card */}
+      <div className="p-4 sm:p-5 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Radio className="w-5 h-5 text-amber-500" />
+            <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+              Merchant radius (all merchants)
+            </h3>
+            <span className="px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700">
+              {globalDispatchRadiusKm} km active
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 dark:text-zinc-400">
+            How far from a merchant the system looks for riders, in km (default 5).
+          </p>
+          <p className="text-[11px] font-semibold text-amber-700 dark:text-amber-400">
+            Merchants with a Special Radius use their own value.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2.5 self-start sm:self-auto">
+          <div className="flex items-center gap-1.5 bg-gray-50 dark:bg-zinc-800 px-3 py-1.5 rounded-xl border border-gray-200 dark:border-zinc-700">
+            <input
+              type="number"
+              min="0.5"
+              max="50"
+              step="0.5"
+              value={globalSearchRadiusInput}
+              onChange={(e) => setGlobalSearchRadiusInput(Number(e.target.value))}
+              className="w-16 text-center text-xs font-black bg-transparent text-gray-900 dark:text-white focus:outline-hidden"
+            />
+            <span className="text-xs font-bold text-gray-400">km</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setConfirmGlobalRadiusModalOpen(true)}
+            disabled={savingGlobalRadius}
+            className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs"
+          >
+            {savingGlobalRadius ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+            <span>Save Radius</span>
+          </button>
+        </div>
+      </div>
+
       {/* Filter Toolbar */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-4 shadow-xs">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
@@ -2631,8 +2908,8 @@ export const Merchants: React.FC = () => {
               className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
             >
               <option value="all">All Types</option>
-              <option value="food">Food Delivery</option>
-              <option value="convenience">Convenience Store</option>
+              <option value="food">Delivio Food</option>
+              <option value="convenience">Delivio Mart</option>
             </select>
           </div>
 
@@ -2674,6 +2951,27 @@ export const Merchants: React.FC = () => {
               <option value="closed">Closed Now</option>
             </select>
           </div>
+        </div>
+
+        {/* Toolbar Bottom: Count & Recompute All Best Sellers */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 mt-3 border-t border-gray-100 dark:border-zinc-800">
+          <div className="text-xs font-semibold text-gray-500">
+            Showing {filteredMerchants.length} of {merchants.length} merchant partners
+          </div>
+          <button
+            type="button"
+            onClick={handleRecomputeAllBestSellers}
+            disabled={recomputingAll}
+            className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-extrabold flex items-center gap-2 shadow-xs self-start sm:self-auto"
+            title="Recomputes best sellers ranking for all merchants from delivered orders in the last 30 days"
+          >
+            {recomputingAll ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="w-3.5 h-3.5" />
+            )}
+            <span>Recompute All Best Sellers (30 Days)</span>
+          </button>
         </div>
       </div>
 
@@ -2949,7 +3247,7 @@ export const Merchants: React.FC = () => {
                 { id: 'status', label: 'Status & Hours' },
                 { id: 'wallet', label: 'Wallet' },
                 { id: 'location', label: 'Location Map' },
-                { id: 'radius', label: 'Delivery Radius' },
+                { id: 'specialRadius', label: 'Special Radius' },
                 { id: 'menu', label: `Menu (${menuItems.length})` },
                 { id: 'reviews', label: `Reviews (${merchantReviews.length})` },
                 { id: 'orders', label: 'Orders & Payouts' },
@@ -2974,7 +3272,78 @@ export const Merchants: React.FC = () => {
             <div className="flex-1 overflow-y-auto p-5 space-y-6">
               {/* TAB 1: DETAILS */}
               {activeTab === 'details' && (
-                <form onSubmit={handleSaveDetails} className="space-y-4">
+                <div className="space-y-5">
+                  {/* Best Sellers Card */}
+                  <div className="p-4 rounded-2xl border border-amber-300 dark:border-amber-900/60 bg-gradient-to-r from-amber-50 to-amber-100/30 dark:from-amber-950/20 dark:to-zinc-900 shadow-xs space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-start gap-2.5">
+                        <div className="p-2 rounded-xl bg-amber-400 text-black shadow-xs shrink-0 mt-0.5">
+                          <Sparkles className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h4 className="text-xs font-extrabold text-gray-900 dark:text-white uppercase tracking-wider">
+                              Best Sellers (Last 30 Days)
+                            </h4>
+                            {bestSellers && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                                {bestSellers.items?.length || 0} items ranked
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-gray-600 dark:text-zinc-400 mt-0.5">
+                            {bestSellers
+                              ? `Aggregated from ${bestSellers.orderCount || 0} delivered order(s) in the past 30 days. Last updated ${formatRelativeTime(bestSellers.recomputedAt)}.`
+                              : 'No best sellers calculated yet. Click recompute to scan delivered orders from the last 30 days.'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleRecomputeSingleBestSellers}
+                        disabled={recomputingSingle}
+                        className="delivio-btn-yellow px-3.5 py-1.5 rounded-xl text-xs font-extrabold flex items-center gap-1.5 shadow-xs shrink-0"
+                      >
+                        {recomputingSingle ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCw className="w-3.5 h-3.5" />}
+                        <span>Recompute Best Sellers</span>
+                      </button>
+                    </div>
+
+                    {bestSellers && bestSellers.items && bestSellers.items.length > 0 ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 pt-1">
+                        {bestSellers.items.slice(0, 6).map((item, idx) => (
+                          <div
+                            key={item.id || idx}
+                            className="p-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-amber-200/70 dark:border-zinc-800 text-xs flex items-center justify-between shadow-2xs"
+                          >
+                            <div className="flex items-center gap-2 overflow-hidden pr-2">
+                              <span className="w-5 h-5 rounded-full bg-amber-400 text-black font-extrabold text-[10px] flex items-center justify-center shrink-0">
+                                #{idx + 1}
+                              </span>
+                              <span className="font-bold text-gray-900 dark:text-white truncate" title={item.name}>
+                                {item.name}
+                              </span>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <span className="font-extrabold text-gray-900 dark:text-white block">
+                                {item.qty} sold
+                              </span>
+                              <span className="text-[10px] text-emerald-600 font-bold block">
+                                ₱{Number(item.revenue || 0).toLocaleString()}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : bestSellers && (
+                      <div className="text-xs text-gray-500 italic p-2 bg-white dark:bg-zinc-900 rounded-xl border border-gray-100 dark:border-zinc-800">
+                        No items were ordered from delivered orders in the last 30 days.
+                      </div>
+                    )}
+                  </div>
+
+                  <form onSubmit={handleSaveDetails} className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
@@ -3094,7 +3463,8 @@ export const Merchants: React.FC = () => {
                     </button>
                   </div>
                 </form>
-              )}
+              </div>
+            )}
 
               {/* TAB 2: STATUS & OPERATING HOURS */}
               {activeTab === 'status' && (
@@ -3631,6 +4001,72 @@ export const Merchants: React.FC = () => {
               {/* TAB 3: LOCATION MAP */}
               {activeTab === 'location' && (
                 <div className="space-y-4">
+                  {/* Cooldown Information Card */}
+                  {(() => {
+                    const parseDate = (val: any): Date | null => {
+                      if (!val) return null;
+                      if (typeof val.toDate === 'function') return val.toDate();
+                      if (val.seconds) return new Date(val.seconds * 1000);
+                      if (val instanceof Date) return val;
+                      const d = new Date(val);
+                      return isNaN(d.getTime()) ? null : d;
+                    };
+                    const locChangedDate = parseDate(selectedMerchant.locationChangedAt);
+                    const nextDate = locChangedDate ? new Date(locChangedDate.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
+                    const isCooldownActive = nextDate ? nextDate.getTime() > Date.now() : false;
+
+                    return (
+                      <div className="p-3.5 rounded-2xl bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-extrabold text-amber-900 dark:text-amber-200">
+                              Merchant Pin Cooldown:
+                            </span>
+                            {selectedMerchant.locationChangedAt ? (
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                  isCooldownActive
+                                    ? 'bg-amber-200 dark:bg-amber-900 text-amber-900 dark:text-amber-100'
+                                    : 'bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300'
+                                }`}
+                              >
+                                {isCooldownActive ? '30-Day Merchant Cooldown Active' : 'Eligible to Change'}
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300">
+                                No Cooldown (Can Change Now)
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-gray-600 dark:text-zinc-400">
+                            {selectedMerchant.locationChangedAt ? (
+                              <span>
+                                Last changed: <strong>{formatTimestamp(selectedMerchant.locationChangedAt)}</strong>. Next merchant change date: <strong>{nextDate?.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</strong>.
+                              </span>
+                            ) : (
+                              <span>Merchant currently has no location lock and can change their pin immediately.</span>
+                            )}
+                            <span className="block text-[10px] text-amber-700 dark:text-amber-400 font-semibold mt-0.5">
+                              * Administrators can reposition the pin and save at any time with no 30-day limit.
+                            </span>
+                          </div>
+                        </div>
+
+                        {selectedMerchant.locationChangedAt && (
+                          <button
+                            type="button"
+                            onClick={handleResetLocationCooldown}
+                            disabled={resettingLocationCooldown}
+                            className="shrink-0 px-3.5 py-2 rounded-xl border border-amber-300 dark:border-amber-800 bg-white dark:bg-zinc-850 text-amber-800 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-zinc-800 font-bold text-xs flex items-center gap-1.5 shadow-2xs"
+                          >
+                            {resettingLocationCooldown && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                            <span>Allow merchant to change now</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
+
                   {/* Address Search */}
                   <form onSubmit={handleNominatimSearch} className="flex gap-2">
                     <input
@@ -3699,23 +4135,23 @@ export const Merchants: React.FC = () => {
                 </div>
               )}
 
-              {/* TAB: DELIVERY RADIUS (merchants/{id}.specialRadius) */}
-              {activeTab === 'radius' && (
+              {/* TAB: SPECIAL RADIUS (merchants/{id}.specialRadius) */}
+              {(activeTab === 'specialRadius' || activeTab === 'radius') && (
                 <div className="space-y-6">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-gray-100 dark:border-zinc-800">
                     <div>
                       <div className="flex items-center gap-2">
                         <Compass className="w-5 h-5 text-amber-500" />
                         <h4 className="font-extrabold text-base text-gray-900 dark:text-white">
-                          Delivery Radius & Zone Adjustments
+                          Special Radius
                         </h4>
                         {specialRadiusEnabled ? (
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300">
-                            Custom Radius Active
+                            Custom Radius Active ({specialRadiusKm} km)
                           </span>
                         ) : (
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400">
-                            Using Global Settings ({globalDispatchRadiusKm} km)
+                            Using the global radius ({globalDispatchRadiusKm} km)
                           </span>
                         )}
                       </div>
@@ -3731,7 +4167,7 @@ export const Merchants: React.FC = () => {
                       className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs self-start sm:self-auto"
                     >
                       {savingSpecialRadius ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                      <span>Save Delivery Radius</span>
+                      <span>Save Special Radius</span>
                     </button>
                   </div>
 
@@ -3760,12 +4196,12 @@ export const Merchants: React.FC = () => {
                   <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 flex items-center justify-between">
                     <div>
                       <div className="font-bold text-sm text-gray-900 dark:text-white">
-                        Special Delivery Radius for {selectedMerchant.name}
+                        Special Radius for {selectedMerchant.name}
                       </div>
-                      <p className="text-xs text-gray-500">
+                      <p className="text-xs text-gray-500 mt-0.5">
                         {specialRadiusEnabled
-                          ? 'Active: couriers within the custom radius can receive orders from this shop.'
-                          : 'Disabled: orders use the global platform radius of ' + globalDispatchRadiusKm + ' km.'}
+                          ? `Active: couriers within ${specialRadiusKm} km can receive orders from this shop.`
+                          : `Using the global radius (${globalDispatchRadiusKm} km)`}
                       </p>
                     </div>
                     <button
@@ -3780,6 +4216,13 @@ export const Merchants: React.FC = () => {
                       {specialRadiusEnabled ? 'Enabled' : 'Disabled'}
                     </button>
                   </div>
+
+                  {!specialRadiusEnabled && (
+                    <div className="p-4 rounded-2xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-xs text-amber-800 dark:text-amber-300 font-bold flex items-center gap-2">
+                      <Radio className="w-4 h-4 text-amber-500 shrink-0" />
+                      <span>Using the global radius ({globalDispatchRadiusKm} km)</span>
+                    </div>
+                  )}
 
                   {/* Settings Grid */}
                   <div className={`grid grid-cols-1 md:grid-cols-3 gap-4 transition-opacity ${specialRadiusEnabled ? 'opacity-100' : 'opacity-50'}`}>
@@ -4472,10 +4915,36 @@ export const Merchants: React.FC = () => {
                             {req.status}
                           </span>
                         </div>
-                        <p className="text-gray-700 dark:text-zinc-300">
-                          Proposed value: <strong>{String(req.newValue)}</strong> (Old:{' '}
-                          <span className="line-through">{String(req.oldValue)}</span>)
-                        </p>
+                        {req.kind === 'location' ? (
+                          <div className="text-gray-700 dark:text-zinc-300 space-y-0.5">
+                            <p>
+                              <strong>Requested Location:</strong>{' '}
+                              {(() => {
+                                const val = req.requestedValue || req.newValue;
+                                if (typeof val === 'string') return val;
+                                if (val && typeof val === 'object') {
+                                  return `${val.address || 'Address'} (${val.lat}, ${val.lng})`;
+                                }
+                                return 'New Pin Location';
+                              })()}
+                            </p>
+                            {req.reason && (
+                              <p className="text-[11px] text-gray-500">
+                                Merchant note: {req.reason}
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <p className="text-gray-700 dark:text-zinc-300">
+                            Proposed value: <strong>{String(req.newValue)}</strong> (Old:{' '}
+                            <span className="line-through">{String(req.oldValue)}</span>)
+                          </p>
+                        )}
+                        {req.rejectReason && (
+                          <p className="text-xs text-red-600 dark:text-red-400 mt-1 font-semibold">
+                            Rejection Reason: {req.rejectReason}
+                          </p>
+                        )}
                         {req.status === 'Pending' && (
                           <div className="flex justify-end gap-2 pt-2">
                             <button
@@ -4718,9 +5187,9 @@ export const Merchants: React.FC = () => {
                                 </p>
 
                                 <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-gray-100 dark:border-zinc-800 text-[10px] text-gray-400">
-                                  {rev.orderNumber && (
+                                  {(rev.orderNumber || rev.orderId) && (
                                     <span className="font-mono font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 px-2 py-0.5 rounded">
-                                      Order #{rev.orderNumber}
+                                      Order {formatOrderNumber({ orderNumber: rev.orderNumber, id: rev.orderId })}
                                     </span>
                                   )}
                                   {rev.tags && rev.tags.length > 0 && rev.tags.map((tag, tIdx) => (
@@ -4821,9 +5290,9 @@ export const Merchants: React.FC = () => {
                                 </p>
 
                                 <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-gray-100 dark:border-zinc-800 text-[10px] text-gray-400">
-                                  {rev.orderNumber && (
+                                  {(rev.orderNumber || rev.orderId) && (
                                     <span className="font-mono font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 px-2 py-0.5 rounded">
-                                      Trip / Order #{rev.orderNumber}
+                                      Trip / Order {formatOrderNumber({ orderNumber: rev.orderNumber, id: rev.orderId })}
                                     </span>
                                   )}
                                   {rev.waitDurationMinutes !== undefined && (
@@ -6126,11 +6595,25 @@ export const Merchants: React.FC = () => {
           isOpen={confirmSaveSpecialRadiusModalOpen}
           onClose={() => setConfirmSaveSpecialRadiusModalOpen(false)}
           onConfirm={(reason) => handleConfirmSaveSpecialRadius(reason)}
-          title={`Save Delivery Radius for "${selectedMerchant.name}"?`}
-          message={`Are you sure you want to update delivery radius settings? Status: ${specialRadiusEnabled ? 'CUSTOM RADIUS ENABLED' : 'DISABLED (Using global ' + globalDispatchRadiusKm + ' km)'}. Radius: ${specialRadiusKm} km, Customer Extra Fee: +₱${specialCustomerExtraFee}, Rider Extra Fee: +₱${specialRiderExtraFee}. This will be logged to auditLogs.`}
-          confirmLabel={savingSpecialRadius ? 'Saving...' : 'Save Radius Settings'}
+          title={`Save Special Radius for "${selectedMerchant.name}"?`}
+          message={`Are you sure you want to update special radius settings? Status: ${specialRadiusEnabled ? 'CUSTOM RADIUS ENABLED' : 'DISABLED (Using global ' + globalDispatchRadiusKm + ' km)'}. Radius: ${specialRadiusKm} km, Customer Extra Fee: +₱${specialCustomerExtraFee}, Rider Extra Fee: +₱${specialRiderExtraFee}. This will be logged to auditLogs.`}
+          confirmLabel={savingSpecialRadius ? 'Saving...' : 'Save Special Radius'}
           reasonRequired={false}
           reasonPlaceholder="Optional administrative note..."
+          isDestructive={false}
+        />
+      )}
+
+      {/* Confirmation Modal to Save Merchant Radius (All Merchants) */}
+      {confirmGlobalRadiusModalOpen && (
+        <ConfirmationModal
+          isOpen={confirmGlobalRadiusModalOpen}
+          onClose={() => setConfirmGlobalRadiusModalOpen(false)}
+          onConfirm={handleSaveGlobalMerchantRadius}
+          title="Update Merchant Radius (All Merchants)?"
+          message={`Are you sure you want to update the default merchant search radius to ${globalSearchRadiusInput} km? All merchants without a Special Radius will look for riders up to ${globalSearchRadiusInput} km. Merchants with a Special Radius use their own value. This change writes settings/dispatch.searchRadiusKm and logs an audit record.`}
+          confirmLabel={savingGlobalRadius ? 'Saving...' : 'Confirm & Save Radius'}
+          reasonRequired={false}
           isDestructive={false}
         />
       )}

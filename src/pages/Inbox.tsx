@@ -1132,7 +1132,7 @@ export const Inbox: React.FC = () => {
                       : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 border-gray-200 dark:border-zinc-700'
                   }`}
                 >
-                  <ShoppingBag className="w-3.5 h-3.5" /> Food
+                  <ShoppingBag className="w-3.5 h-3.5" /> Delivio Food
                 </button>
                 <button
                   type="button"
@@ -1146,7 +1146,7 @@ export const Inbox: React.FC = () => {
                       : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 border-gray-200 dark:border-zinc-700'
                   }`}
                 >
-                  <Store className="w-3.5 h-3.5" /> Convenience
+                  <Store className="w-3.5 h-3.5" /> Delivio Mart
                 </button>
               </div>
 
@@ -1368,7 +1368,7 @@ export const Inbox: React.FC = () => {
                         </span>
                       ) : msg.link.category ? (
                         <span>
-                          Category: {msg.link.category === 'food' ? 'Food & Restaurants' : 'Convenience'}
+                          Category: {msg.link.category === 'food' ? 'Delivio Food' : 'Delivio Mart'}
                         </span>
                       ) : (
                         <span>Action Link</span>
@@ -1469,8 +1469,8 @@ export const Inbox: React.FC = () => {
                     {linkType === 'merchant'
                       ? merchants.find((m) => m.id === selectedMerchantId)?.businessName || 'Store'
                       : linkType === 'category_food'
-                      ? 'Food Category'
-                      : 'Convenience Category'}
+                      ? 'Delivio Food'
+                      : 'Delivio Mart'}
                   </span>
                 </div>
               )}

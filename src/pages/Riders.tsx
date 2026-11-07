@@ -8,6 +8,7 @@ import {
   limit,
   getDocs,
   doc,
+  setDoc,
   updateDoc,
   addDoc,
   increment,
@@ -22,6 +23,7 @@ import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
+import { formatOrderNumber } from '../utils/orderNumber';
 import type {
   Rider,
   Order,
@@ -67,7 +69,10 @@ import {
   User,
   Users,
   Wallet,
-  RotateCw
+  RotateCw,
+  Radio,
+  Save,
+  Compass
 } from 'lucide-react';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
@@ -87,7 +92,14 @@ export const Riders: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState(initialSearch);
   const [onlineFilter, setOnlineFilter] = useState<'all' | 'online' | 'offline'>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'suspended'>('all');
+  const [priorityFilter, setPriorityFilter] = useState<'all' | 'priority' | 'standard'>('all');
   const [vehicleFilter, setVehicleFilter] = useState<string>('all');
+
+  // Priority Rider Toggle Modal
+  const [priorityConfirmModalOpen, setPriorityConfirmModalOpen] = useState(false);
+  const [targetPriorityRider, setTargetPriorityRider] = useState<Rider | null>(null);
+  const [pendingPriorityValue, setPendingPriorityValue] = useState<boolean>(false);
+  const [updatingPriority, setUpdatingPriority] = useState<boolean>(false);
 
   // Selected Rider & Tabs
   const [selectedRider, setSelectedRider] = useState<Rider | null>(null);
@@ -103,6 +115,12 @@ export const Riders: React.FC = () => {
   // Driver Reviews states
   const [driverReviews, setDriverReviews] = useState<Review[]>([]);
   const [loadingDriverReviews, setLoadingDriverReviews] = useState(false);
+
+  // Global Dispatch Search Radius (settings/dispatch.searchRadiusKm)
+  const [globalDispatchRadiusKm, setGlobalDispatchRadiusKm] = useState<number>(5);
+  const [globalRadiusInput, setGlobalRadiusInput] = useState<number>(5);
+  const [savingGlobalRadius, setSavingGlobalRadius] = useState<boolean>(false);
+  const [confirmGlobalRadiusModalOpen, setConfirmGlobalRadiusModalOpen] = useState<boolean>(false);
 
   // Platform Services switches
   const [platformServices, setPlatformServices] = useState<Record<string, boolean>>({
@@ -219,6 +237,7 @@ export const Riders: React.FC = () => {
           walletBalance: Number(dt.walletBalance) || 0,
           cashRemitted: Number(dt.cashRemitted) || 0,
           rating: Number(dt.rating) || 5,
+          priorityRider: Boolean(dt.priorityRider),
           ridesThisMonth: Number(dt.ridesThisMonth) || 0,
           linkedCustomerUid: dt.linkedCustomerUid || null,
           linkedCustomerEmail: dt.linkedCustomerEmail || null,
@@ -274,9 +293,56 @@ export const Riders: React.FC = () => {
       } catch (e) {
         console.warn('Failed to load platform services:', e);
       }
+
+      try {
+        const dSnap = await getDoc(doc(db, 'settings', 'dispatch'));
+        if (dSnap.exists()) {
+          const dData = dSnap.data();
+          if (typeof dData.searchRadiusKm === 'number') {
+            setGlobalDispatchRadiusKm(dData.searchRadiusKm);
+            setGlobalRadiusInput(dData.searchRadiusKm);
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to load dispatch settings:', err);
+      }
     };
     fetchPlatform();
   }, [selectedCityId]);
+
+  // Save Merchant Radius (All Merchants) from Drivers page -> settings/dispatch.searchRadiusKm
+  const handleSaveGlobalMerchantRadius = async () => {
+    try {
+      setSavingGlobalRadius(true);
+      const val = Math.max(0.5, Number(globalRadiusInput) || 5);
+      await setDoc(
+        doc(db, 'settings', 'dispatch'),
+        {
+          searchRadiusKm: val,
+          updatedAt: Timestamp.now(),
+          updatedBy: adminProfile?.uid || 'admin'
+        },
+        { merge: true }
+      );
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        action: 'UPDATE_MERCHANT_SEARCH_RADIUS',
+        entityType: 'settings',
+        entityId: 'dispatch',
+        details: `Updated global merchant search radius to ${val} km from Drivers page`
+      });
+
+      setGlobalDispatchRadiusKm(val);
+      setConfirmGlobalRadiusModalOpen(false);
+      showSuccess(`Merchant radius updated to ${val} km.`);
+    } catch (err) {
+      showError(err);
+    } finally {
+      setSavingGlobalRadius(false);
+    }
+  };
 
   // Sync rider details when selected
   useEffect(() => {
@@ -591,11 +657,65 @@ export const Riders: React.FC = () => {
         if (!n.includes(q) && !p.includes(q) && !c.includes(q) && !pl.includes(q) && !m.includes(q))
           return false;
       }
+      if (priorityFilter === 'priority' && !r.priorityRider) return false;
+      if (priorityFilter === 'standard' && r.priorityRider) return false;
       return true;
     });
-  }, [riders, selectedCityId, onlineFilter, statusFilter, vehicleFilter, searchQuery]);
+  }, [riders, selectedCityId, onlineFilter, statusFilter, priorityFilter, vehicleFilter, searchQuery]);
 
   const onlineCount = useMemo(() => riders.filter((r) => r.isOnline).length, [riders]);
+  const priorityCount = useMemo(() => riders.filter((r) => r.priorityRider).length, [riders]);
+
+  // Priority Rider toggle handler
+  const handleRequestTogglePriority = (rider: Rider, newValue: boolean) => {
+    setTargetPriorityRider(rider);
+    setPendingPriorityValue(newValue);
+    setPriorityConfirmModalOpen(true);
+  };
+
+  const handleConfirmTogglePriority = async () => {
+    if (!targetPriorityRider) return;
+    try {
+      setUpdatingPriority(true);
+      await updateDoc(doc(db, 'riders', targetPriorityRider.id), {
+        priorityRider: pendingPriorityValue
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || adminProfile?.email || 'Admin',
+        action: 'SET_PRIORITY_RIDER',
+        entityType: 'rider',
+        entityId: targetPriorityRider.id,
+        details: JSON.stringify({
+          riderName: targetPriorityRider.name,
+          priorityRider: pendingPriorityValue
+        })
+      });
+
+      setRiders((prev) =>
+        prev.map((r) =>
+          r.id === targetPriorityRider.id ? { ...r, priorityRider: pendingPriorityValue } : r
+        )
+      );
+
+      if (selectedRider && selectedRider.id === targetPriorityRider.id) {
+        setSelectedRider((prev) => (prev ? { ...prev, priorityRider: pendingPriorityValue } : null));
+      }
+
+      showSuccess(
+        `Driver ${targetPriorityRider.name} is ${
+          pendingPriorityValue ? 'now designated as a Priority Rider' : 'no longer a Priority Rider'
+        }.`
+      );
+      setPriorityConfirmModalOpen(false);
+      setTargetPriorityRider(null);
+    } catch (err) {
+      showError(err);
+    } finally {
+      setUpdatingPriority(false);
+    }
+  };
 
   // Filter registered customers for linking type-ahead
   const filteredCandidates = useMemo(() => {
@@ -1369,6 +1489,51 @@ export const Riders: React.FC = () => {
         </button>
       </div>
 
+      {/* Merchant radius (all merchants) Card */}
+      <div className="p-4 sm:p-5 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Radio className="w-5 h-5 text-amber-500" />
+            <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+              Merchant radius (all merchants)
+            </h3>
+            <span className="px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700">
+              {globalDispatchRadiusKm} km active
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 dark:text-zinc-400">
+            How far from a merchant the system looks for riders, in km (default 5).
+          </p>
+          <p className="text-[11px] font-semibold text-amber-700 dark:text-amber-400">
+            Merchants with a Special Radius use their own value.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2.5 self-start sm:self-auto">
+          <div className="flex items-center gap-1.5 bg-gray-50 dark:bg-zinc-850 px-3 py-1.5 rounded-xl border border-gray-200 dark:border-zinc-750">
+            <input
+              type="number"
+              min="0.5"
+              max="50"
+              step="0.5"
+              value={globalRadiusInput}
+              onChange={(e) => setGlobalRadiusInput(Number(e.target.value))}
+              className="w-16 text-center text-xs font-black bg-transparent text-gray-900 dark:text-white focus:outline-hidden"
+            />
+            <span className="text-xs font-bold text-gray-400">km</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setConfirmGlobalRadiusModalOpen(true)}
+            disabled={savingGlobalRadius}
+            className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs"
+          >
+            {savingGlobalRadius ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+            <span>Save Radius</span>
+          </button>
+        </div>
+      </div>
+
       {/* Vehicle-Type Filter with Online / Total Count Chips */}
       <div className="flex flex-wrap items-center gap-2">
         <button
@@ -1418,7 +1583,7 @@ export const Riders: React.FC = () => {
 
       {/* Filter Toolbar */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-4 shadow-xs">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3.5 top-3 text-gray-400" />
             <input
@@ -1453,6 +1618,18 @@ export const Riders: React.FC = () => {
               <option value="suspended">Suspended Only</option>
             </select>
           </div>
+
+          <div>
+            <select
+              value={priorityFilter}
+              onChange={(e) => setPriorityFilter(e.target.value as any)}
+              className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium"
+            >
+              <option value="all">All Drivers ({riders.length})</option>
+              <option value="priority">Priority Riders Only ★ ({priorityCount})</option>
+              <option value="standard">Standard Riders ({riders.length - priorityCount})</option>
+            </select>
+          </div>
         </div>
       </div>
 
@@ -1485,8 +1662,13 @@ export const Riders: React.FC = () => {
                       )}
                     </div>
                     <div>
-                      <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
+                      <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5 flex-wrap">
                         {r.name}
+                        {r.priorityRider && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-extrabold bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 border border-amber-300 dark:border-amber-700/50 shadow-xs" title="Priority Rider">
+                            <Star className="w-2.5 h-2.5 fill-amber-400 text-amber-500" /> Priority
+                          </span>
+                        )}
                         <span className="flex items-center text-[10px] text-amber-500 font-bold">
                           <Star className="w-3 h-3 fill-amber-400" /> {r.rating || 5}
                         </span>
@@ -1554,6 +1736,35 @@ export const Riders: React.FC = () => {
                   </span>
                 </div>
 
+                {/* Priority Rider Switch on mobile card */}
+                <div
+                  className="px-2 py-1.5 rounded-xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/60 dark:border-amber-900/40 flex items-center justify-between"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-gray-800 dark:text-zinc-200">
+                    <Star className={`w-3.5 h-3.5 ${r.priorityRider ? 'fill-amber-400 text-amber-500' : 'text-gray-400'}`} />
+                    <span>Priority Rider</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleRequestTogglePriority(r, !r.priorityRider)}
+                      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+                        r.priorityRider ? 'bg-amber-500' : 'bg-gray-300 dark:bg-zinc-700'
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                          r.priorityRider ? 'translate-x-4' : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                    <span className={`text-[10px] font-bold ${r.priorityRider ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400'}`}>
+                      {r.priorityRider ? 'ON' : 'OFF'}
+                    </span>
+                  </div>
+                </div>
+
                 {/* Footer: Balance & Manage */}
                 <div className="flex items-center justify-between pt-1">
                   <div>
@@ -1584,7 +1795,7 @@ export const Riders: React.FC = () => {
       {/* DESKTOP VIEW: Drivers Table */}
       <div className="hidden md:block">
         {loading ? (
-          <TableSkeleton rows={8} cols={6} />
+          <TableSkeleton rows={8} cols={7} />
         ) : (
           <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl overflow-hidden shadow-xs">
             <div className="overflow-x-auto">
@@ -1595,6 +1806,7 @@ export const Riders: React.FC = () => {
                     <th className="px-4 py-3.5">Contact</th>
                     <th className="px-4 py-3.5">Vehicle & Plate</th>
                     <th className="px-4 py-3.5">Fleet Status</th>
+                    <th className="px-4 py-3.5">Priority Rider</th>
                     <th className="px-4 py-3.5">Wallet / Coins</th>
                     <th className="px-4 py-3.5 text-right">Actions</th>
                   </tr>
@@ -1602,7 +1814,7 @@ export const Riders: React.FC = () => {
                 <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 font-medium">
                   {filteredRiders.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="text-center py-12 text-gray-400 text-xs">
+                      <td colSpan={7} className="text-center py-12 text-gray-400 text-xs">
                         No matching drivers found.
                       </td>
                     </tr>
@@ -1631,8 +1843,13 @@ export const Riders: React.FC = () => {
                                 )}
                               </div>
                               <div>
-                                <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
+                                <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5 flex-wrap">
                                   {r.name}
+                                  {r.priorityRider && (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-extrabold bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 border border-amber-300 dark:border-amber-700/50 shadow-xs" title="Priority Rider">
+                                      <Star className="w-2.5 h-2.5 fill-amber-400 text-amber-500" /> Priority
+                                    </span>
+                                  )}
                                   <span className="flex items-center text-[10px] text-amber-500 font-bold">
                                     <Star className="w-3 h-3 fill-amber-400" /> {r.rating || 5}
                                   </span>
@@ -1699,6 +1916,27 @@ export const Riders: React.FC = () => {
                               })()}
                             </div>
                           </td>
+                          <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => handleRequestTogglePriority(r, !r.priorityRider)}
+                                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+                                  r.priorityRider ? 'bg-amber-500' : 'bg-gray-300 dark:bg-zinc-700'
+                                }`}
+                                title={r.priorityRider ? 'Click to remove Priority Rider' : 'Click to assign Priority Rider'}
+                              >
+                                <span
+                                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                                    r.priorityRider ? 'translate-x-4' : 'translate-x-0'
+                                  }`}
+                                />
+                              </button>
+                              <span className={`text-[11px] font-bold ${r.priorityRider ? 'text-amber-600 dark:text-amber-400 flex items-center gap-1' : 'text-gray-400'}`}>
+                                {r.priorityRider ? <><Star className="w-3 h-3 fill-amber-400 text-amber-500" /> Priority</> : 'Standard'}
+                              </span>
+                            </div>
+                          </td>
                           <td className="px-4 py-3">
                             <div className="font-bold text-emerald-600">
                               ₱{Number(r.walletBalance || 0).toFixed(2)}
@@ -1749,6 +1987,11 @@ export const Riders: React.FC = () => {
                 <div>
                   <h3 className="font-extrabold text-lg text-gray-900 dark:text-white flex items-center gap-2">
                     {selectedRider.name}
+                    {selectedRider.priorityRider && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 border border-amber-300 dark:border-amber-700/50 shadow-xs">
+                        <Star className="w-3 h-3 fill-amber-400 text-amber-500" /> Priority
+                      </span>
+                    )}
                     <span
                       className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
                         selectedRider.isOnline
@@ -1808,7 +2051,49 @@ export const Riders: React.FC = () => {
             <div className="flex-1 overflow-y-auto p-5 space-y-6">
               {/* TAB 1: DETAILS */}
               {activeTab === 'details' && (
-                <form onSubmit={handleSaveDetails} className="space-y-4">
+                <div className="space-y-5">
+                  {/* Priority Rider Banner & Switch */}
+                  <div className="p-4 rounded-2xl border border-amber-300 dark:border-amber-900/60 bg-gradient-to-r from-amber-50 to-amber-100/30 dark:from-amber-950/20 dark:to-zinc-900 shadow-xs flex items-center justify-between gap-4">
+                    <div className="flex items-start gap-3">
+                      <div className="p-2.5 rounded-xl bg-amber-400 text-black shadow-xs shrink-0 mt-0.5">
+                        <Star className="w-5 h-5 fill-black" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-sm font-extrabold text-gray-900 dark:text-white">Priority Rider Status</h4>
+                          {selectedRider.priorityRider ? (
+                            <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-amber-400 text-black shadow-xs">PRIORITY</span>
+                          ) : (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-gray-200 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400">STANDARD</span>
+                          )}
+                        </div>
+                        <p className="text-xs text-gray-600 dark:text-zinc-400 mt-1 max-w-xl leading-relaxed">
+                          A priority rider is offered every Food or Convenience order anywhere in their registered city (ignoring the radius), nearest priority rider first, and can carry up to priorityMaxBatch orders in a double booking (minimum 1); every other service stays single. Drivers never see this status.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleRequestTogglePriority(selectedRider, !selectedRider.priorityRider)}
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+                          selectedRider.priorityRider ? 'bg-amber-500' : 'bg-gray-300 dark:bg-zinc-700'
+                        }`}
+                        title={selectedRider.priorityRider ? 'Click to remove Priority Rider' : 'Click to enable Priority Rider'}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                            selectedRider.priorityRider ? 'translate-x-5' : 'translate-x-0'
+                          }`}
+                        />
+                      </button>
+                      <span className="text-[10px] font-bold text-gray-500 dark:text-zinc-400">
+                        {selectedRider.priorityRider ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <form onSubmit={handleSaveDetails} className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
@@ -1977,7 +2262,8 @@ export const Riders: React.FC = () => {
                     </button>
                   </div>
                 </form>
-              )}
+              </div>
+            )}
 
               {/* TAB 2: STATUS */}
               {activeTab === 'status' && (
@@ -2007,52 +2293,138 @@ export const Riders: React.FC = () => {
 
               {/* TAB 3: SERVICES */}
               {activeTab === 'services' && (() => {
-                const currentVType = (
-                  (selectedRider.vehicleType || 'motorcycle').toLowerCase() as VehicleType
-                );
-                const validServices = SERVICES_BY_VEHICLE[currentVType] || [];
+                const driverCity = cities.find((c) => c.id === selectedRider.cityId);
+                const currentVType = ((selectedRider.vehicleType || 'motorcycle').toLowerCase() as VehicleType);
                 const vConfig = VEHICLE_TYPES.find((v) => v.id === currentVType);
 
                 return (
                   <div className="space-y-4">
-                    <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/40 text-xs text-amber-900 dark:text-amber-300 flex items-center justify-between">
+                    <div className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/40 text-xs text-amber-900 dark:text-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                       <div>
-                        Vehicle Capabilities:{' '}
-                        <strong>{vConfig?.name || selectedRider.vehicleType}</strong>
+                        <div className="font-bold flex items-center gap-2">
+                          <span>Driver Services & Operational Blocks</span>
+                          <span className="font-mono text-[10px] px-2 py-0.5 rounded-full bg-amber-200 dark:bg-amber-900 text-amber-900 dark:text-amber-100">
+                            Vehicle: {vConfig?.name || selectedRider.vehicleType}
+                          </span>
+                        </div>
                         <p className="text-[11px] text-amber-800/80 dark:text-amber-400/80 mt-0.5">
-                          Toggles only control services valid for this vehicle. Disabling a service removes it from active trip dispatch.
+                          Each service shows three possible dispatch blocks: <strong>Driver block</strong> (individual toggle), <strong>City block</strong> ({driverCity?.name || 'City'}), and <strong>Platform-wide block</strong> (Platform settings).
                         </p>
                       </div>
                     </div>
 
-                    <div className="space-y-2">
-                      {validServices.map((srv) => {
-                        const isAllowed = (selectedRider.allowedServices || []).includes(srv);
-                        const srvMeta = ALL_SERVICES.find((s) => s.id === srv);
+                    <div className="space-y-3">
+                      {ALL_SERVICES.map((srv) => {
+                        const isDriverAllowed = (selectedRider.allowedServices || []).includes(srv.id);
+                        const isCityBlocked = driverCity ? driverCity.services?.[srv.id] === false : false;
+                        const isPlatformBlocked = platformServices[srv.id] === false;
+
+                        // If any block is active, order dispatch is blocked for this driver
+                        const isOperational = isDriverAllowed && !isCityBlocked && !isPlatformBlocked;
+
                         return (
                           <div
-                            key={srv}
-                            className="flex items-center justify-between p-3.5 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs shadow-xs"
+                            key={srv.id}
+                            className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs shadow-xs space-y-3"
                           >
-                            <div>
-                              <span className="font-bold uppercase tracking-wider text-gray-900 dark:text-zinc-100 block">
-                                {srvMeta?.label || srv.replace('_', ' ')}
-                              </span>
-                              <span className="text-[11px] text-gray-400">
-                                {srvMeta?.description || ''}
-                              </span>
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-gray-100 dark:border-zinc-800">
+                              <div>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-extrabold text-sm text-gray-900 dark:text-white">
+                                    {srv.label}
+                                  </span>
+                                  <span className="text-[11px] font-semibold text-gray-500">
+                                    • {srv.subtitle}
+                                  </span>
+                                  {isOperational ? (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300">
+                                      Active for Dispatch
+                                    </span>
+                                  ) : (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300 border border-red-300">
+                                      Blocked from Dispatch
+                                    </span>
+                                  )}
+                                </div>
+                                <span className="text-[11px] text-gray-400 mt-0.5 block">
+                                  {srv.description}
+                                </span>
+                              </div>
+
+                              {/* Driver Toggle Switch */}
+                              <div className="flex items-center gap-2 self-start sm:self-auto shrink-0">
+                                <span className="text-[11px] text-gray-500 font-bold uppercase">
+                                  Driver Toggle:
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleService(srv.id)}
+                                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shadow-2xs ${
+                                    isDriverAllowed
+                                      ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                                      : 'bg-gray-200 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400 hover:bg-gray-300'
+                                  }`}
+                                >
+                                  {isDriverAllowed ? 'Allowed' : 'Blocked (Disabled)'}
+                                </button>
+                              </div>
                             </div>
 
-                            <button
-                              onClick={() => handleToggleService(srv)}
-                              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-                                isAllowed
-                                  ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                                  : 'bg-gray-200 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400'
-                              }`}
-                            >
-                              {isAllowed ? 'Allowed' : 'Disabled'}
-                            </button>
+                            {/* Three Possible Blocks */}
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+                              {/* 1. Driver Block */}
+                              <div className={`p-2.5 rounded-xl border flex items-center justify-between gap-1.5 ${
+                                isDriverAllowed
+                                  ? 'bg-gray-50 dark:bg-zinc-850/60 border-gray-200 dark:border-zinc-800 text-gray-700 dark:text-zinc-300'
+                                  : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-900 text-red-800 dark:text-red-300'
+                              }`}>
+                                <div>
+                                  <span className="font-bold block uppercase text-[10px] text-gray-400">1. Driver Block</span>
+                                  <span>{isDriverAllowed ? 'Allowed by Driver' : 'Blocked by Driver Toggle'}</span>
+                                </div>
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                  isDriverAllowed ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-red-200 text-red-900 dark:bg-red-900 dark:text-red-200'
+                                }`}>
+                                  {isDriverAllowed ? 'Clear' : 'Blocked'}
+                                </span>
+                              </div>
+
+                              {/* 2. City Block */}
+                              <div className={`p-2.5 rounded-xl border flex items-center justify-between gap-1.5 ${
+                                !isCityBlocked
+                                  ? 'bg-gray-50 dark:bg-zinc-850/60 border-gray-200 dark:border-zinc-800 text-gray-700 dark:text-zinc-300'
+                                  : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-900 text-red-800 dark:text-red-300'
+                              }`}>
+                                <div>
+                                  <span className="font-bold block uppercase text-[10px] text-gray-400">2. City Block</span>
+                                  <span className="truncate block max-w-[120px]">
+                                    {isCityBlocked ? `Disabled in ${driverCity?.name || 'City'}` : `Active in ${driverCity?.name || 'City'}`}
+                                  </span>
+                                </div>
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                  !isCityBlocked ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-red-200 text-red-900 dark:bg-red-900 dark:text-red-200'
+                                }`}>
+                                  {!isCityBlocked ? 'Clear' : 'Blocked'}
+                                </span>
+                              </div>
+
+                              {/* 3. Platform-Wide Block */}
+                              <div className={`p-2.5 rounded-xl border flex items-center justify-between gap-1.5 ${
+                                !isPlatformBlocked
+                                  ? 'bg-gray-50 dark:bg-zinc-850/60 border-gray-200 dark:border-zinc-800 text-gray-700 dark:text-zinc-300'
+                                  : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-900 text-red-800 dark:text-red-300'
+                              }`}>
+                                <div>
+                                  <span className="font-bold block uppercase text-[10px] text-gray-400">3. Platform Block</span>
+                                  <span>{isPlatformBlocked ? 'Disabled Platform-Wide' : 'Active Platform-Wide'}</span>
+                                </div>
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                  !isPlatformBlocked ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-red-200 text-red-900 dark:bg-red-900 dark:text-red-200'
+                                }`}>
+                                  {!isPlatformBlocked ? 'Clear' : 'Blocked'}
+                                </span>
+                              </div>
+                            </div>
                           </div>
                         );
                       })}
@@ -2356,10 +2728,10 @@ export const Riders: React.FC = () => {
                                 )}
                               </p>
 
-                              {rev.orderNumber && (
+                              {(rev.orderNumber || rev.orderId) && (
                                 <div className="pt-1 border-t border-gray-100 dark:border-zinc-800 text-[10px] text-gray-400 flex items-center gap-2">
                                   <span className="font-mono font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 px-1.5 py-0.5 rounded">
-                                    Trip / Order #{rev.orderNumber}
+                                    Trip / Order {formatOrderNumber({ orderNumber: rev.orderNumber, id: rev.orderId })}
                                   </span>
                                 </div>
                               )}
@@ -2413,7 +2785,7 @@ export const Riders: React.FC = () => {
                         <div>
                           <div className="flex items-center gap-2">
                             <span className="font-mono font-bold text-gray-900 dark:text-white">
-                              #{ord.orderNumber}
+                              {formatOrderNumber(ord)}
                             </span>
                             <span className="capitalize px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-gray-200 dark:bg-zinc-800">
                               {ord.serviceType}
@@ -3224,6 +3596,41 @@ export const Riders: React.FC = () => {
           confirmLabel="Update Vehicle & Services"
           reasonRequired={false}
           isDestructive={false}
+        />
+      )}
+
+      {/* MODAL: MERCHANT RADIUS CONFIRMATION */}
+      {confirmGlobalRadiusModalOpen && (
+        <ConfirmationModal
+          isOpen={confirmGlobalRadiusModalOpen}
+          onClose={() => setConfirmGlobalRadiusModalOpen(false)}
+          onConfirm={handleSaveGlobalMerchantRadius}
+          title="Update Merchant Radius (All Merchants)?"
+          message={`Are you sure you want to update the default merchant search radius to ${globalRadiusInput} km? All merchants without a Special Radius will look for riders up to ${globalRadiusInput} km. Merchants with a Special Radius use their own value. This change writes settings/dispatch.searchRadiusKm and logs an audit record.`}
+          confirmLabel={savingGlobalRadius ? 'Saving...' : 'Confirm & Save Radius'}
+          reasonRequired={false}
+          isDestructive={false}
+        />
+      )}
+
+      {/* MODAL: PRIORITY RIDER CONFIRMATION */}
+      {priorityConfirmModalOpen && targetPriorityRider && (
+        <ConfirmationModal
+          isOpen={priorityConfirmModalOpen}
+          onClose={() => {
+            setPriorityConfirmModalOpen(false);
+            setTargetPriorityRider(null);
+          }}
+          onConfirm={handleConfirmTogglePriority}
+          title={`${pendingPriorityValue ? 'Designate as' : 'Remove'} Priority Rider?`}
+          message={`Are you sure you want to ${
+            pendingPriorityValue
+              ? `designate ${targetPriorityRider.name} as a Priority Rider? They will be offered every Food or Convenience order anywhere in their registered city (ignoring search radius), nearest priority rider first, and can carry up to priorityMaxBatch orders in a double booking.`
+              : `remove Priority Rider designation for ${targetPriorityRider.name}? They will return to standard radius and standard dispatch rules.`
+          } Note: Drivers never see this status in their app. This action writes auditLogs.`}
+          confirmLabel={updatingPriority ? 'Updating...' : pendingPriorityValue ? 'Set Priority Rider' : 'Remove Priority'}
+          reasonRequired={false}
+          isDestructive={!pendingPriorityValue}
         />
       )}
     </div>

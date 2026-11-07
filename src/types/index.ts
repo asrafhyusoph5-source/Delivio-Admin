@@ -41,6 +41,7 @@ export type OrderStatus =
   | 'Preparing'
   | 'Ready'
   | 'Rider is on the way'
+  | 'On another delivery'
   | 'Driver is on the way'
   | 'Driver arrived'
   | 'On trip'
@@ -109,12 +110,16 @@ export interface Order {
   batchTotalBookings?: number;
   splitOf?: string | null;
   splitOut?: {
-    childOrderId: string;
-    items: any[];
+    count?: number;
+    children?: { orderId: string; items: any[]; seq: number }[];
+    childOrderId?: string;
+    items?: any[];
     at: any;
     by: string;
   } | string | null;
   isSplitChild?: boolean;
+  seq?: number;
+  noCash?: boolean;
   excludeRiderIds?: string[];
   sourceCustomerId?: string | null;
   sourceMerchantId?: string | null;
@@ -207,6 +212,7 @@ export interface Order {
   editedByMerchant?: boolean;
   isEditedByMerchant?: boolean;
   editNote?: string;
+  isReady?: boolean;
   originalItems?: OrderItem[];
   originalTotal?: number;
   originalFees?: OrderFees;
@@ -307,6 +313,7 @@ export interface Merchant {
   closedUntil?: any;
   openUntil?: any;
   specialRadius?: MerchantSpecialRadius;
+  locationChangedAt?: any;
   createdAt?: any;
 }
 
@@ -396,6 +403,7 @@ export interface Rider {
   walletBalance?: number;
   cashRemitted?: number;
   rating?: number;
+  priorityRider?: boolean;
   ridesThisMonth?: number;
   linkedCustomerUid?: string | null;
   linkedCustomerEmail?: string | null;
@@ -581,6 +589,7 @@ export interface RiderApplication {
     franchiseUrl?: string;
     [key: string]: any;
   } | ApplicationDocument[] | any;
+  riderCode?: string;
   status: 'Pending' | 'Under Review' | 'Needs Info' | 'Approved' | 'Rejected';
   reviewNote?: string;
   reviewedBy?: string;
@@ -627,11 +636,15 @@ export interface ChangeRequest {
   id: string;
   merchantId: string;
   merchantName?: string;
-  kind: 'type' | 'shopName' | 'email';
+  kind: 'type' | 'shopName' | 'email' | 'location' | string;
   oldValue: any;
   newValue: any;
+  requestedValue?: any;
   status: 'Pending' | 'Approved' | 'Rejected';
   reason?: string;
+  rejectReason?: string;
+  reviewedBy?: string;
+  reviewedAt?: any;
   createdAt?: any;
 }
 
@@ -815,9 +828,10 @@ export interface DispatchOptionConfig {
   label: string;
   enabled: boolean;
   holdMinutes: number; // priority 0, standard 5, saver 10
-  maxBatch: number; // priority 1, standard 2, saver 3
+  maxBatch: number; // priority 1, standard 3, saver 3
   feeAdjustType: 'flat' | 'percent';
   feeAdjustValue: number; // priority +22, standard 0, saver -15
+  endsWhenReady?: boolean; // Priority: true, Standard: true, Saver: false
 }
 
 export interface DispatchSettings {
@@ -831,7 +845,125 @@ export interface DispatchSettings {
   waveSeconds: number; // default 8
   poolMaxPickupGapKm: number; // default 1.5
   poolMaxDropoffGapKm: number; // default 3
+  priorityHeadStartSeconds?: number; // default 10
+  priorityMaxBatch?: number; // default 4
   updatedAt?: any;
   updatedBy?: string;
 }
+
+export interface ReceiptCopyConfig {
+  enabled: boolean;
+  title: string; // "Merchant's Copy", "Customer's Copy"
+  showItemPrices: boolean;
+}
+
+export interface ReceiptDesignConfig {
+  brandLine: string; // default "Delivio"
+  headerLines: string[]; // 0 to 3 extra lines
+  footerText: string;
+  showOrderId: boolean;
+  showOrderedAt: boolean;
+  showCustomerName: boolean;
+  showNote: boolean;
+  showSetChoices: boolean;
+  fontSize: 'small' | 'medium' | 'large';
+  align: 'center' | 'left';
+  separator: 'dashes' | 'solid' | 'double';
+  merchantCopy: ReceiptCopyConfig;
+  customerCopy: ReceiptCopyConfig;
+  updatedAt?: any;
+  updatedBy?: string;
+}
+
+export interface MustTryCheckoutConfig {
+  enabled: boolean;
+  title: string; // default "Must try!"
+  description: string; // default "Add a favorite from this shop to go with your order"
+  maxItems: number; // default 8, max 12
+}
+
+export interface CheckoutSettings {
+  mustTry: MustTryCheckoutConfig;
+  updatedAt?: any;
+  updatedBy?: string;
+}
+
+export type QuestMetric = 'deliveries' | 'earnings';
+export type QuestStatus = 'draft' | 'active' | 'ended' | 'cancelled';
+export type QuestClaimStatus = 'Pending' | 'Credited' | 'Not achieved' | 'Rejected';
+
+export interface QuestGoal {
+  target: number; // e.g. 18 deliveries or ₱2500 earnings
+  reward: number; // e.g. ₱75 bonus
+}
+
+export interface Quest {
+  id: string;
+  title: string;
+  description: string;
+  status: QuestStatus;
+  startAt: any; // Timestamp (Philippine time)
+  endAt: any; // Timestamp (Philippine time)
+  metric: QuestMetric; // 'deliveries' | 'earnings'
+  hourFrom?: string; // "HH:mm" optional daily window
+  hourTo?: string; // "HH:mm"
+  services?: OrderServiceType[]; // empty = all
+  cityIds: string[];
+  vehicleTypes?: string[]; // empty = all
+  riderIds?: string[]; // empty = all
+  minAcceptanceRate?: number | null; // percent or null
+  maxNoShows?: number | null; // number or null
+  goals: QuestGoal[]; // sorted ascending by target
+  totalPaid?: number; // total reward credited (₱)
+  createdAt: any;
+  createdBy?: string;
+  updatedAt?: any;
+}
+
+export interface QuestClaim {
+  id: string;
+  questId: string;
+  questTitle: string;
+  riderId: string;
+  riderName?: string;
+  riderPhone?: string;
+  cityId?: string;
+  claimedTarget: number;
+  claimedReward: number;
+  achievedValue?: number;
+  status: QuestClaimStatus;
+  verifiedValues?: {
+    deliveries?: number;
+    earnings?: number;
+    acceptanceRate?: number;
+    noShows?: number;
+    eligible?: boolean;
+    computedReward?: number;
+    verifiedTarget?: number;
+  };
+  verifiedAt?: any;
+  verifiedBy?: string;
+  creditedAt?: any;
+  creditedBy?: string;
+  note?: string;
+  createdAt: any;
+  updatedAt?: any;
+}
+
+export interface BestSellerItem {
+  id: string;
+  name: string;
+  qty: number;
+  revenue: number;
+  categoryId?: string;
+}
+
+export interface MerchantBestSellers {
+  items: BestSellerItem[];
+  orderCount: number;
+  last30DaysOrderCount: number;
+  recomputedAt: any;
+  recomputedBy?: string;
+}
+
 

@@ -1,4 +1,4 @@
-import { OrderServiceType, DispatchSettings, RiderPayConfig } from '../types';
+import { OrderServiceType, DispatchSettings, RiderPayConfig, ReceiptDesignConfig, CheckoutSettings } from '../types';
 
 export const FOOD_CATEGORIES = [
   'Dessert',
@@ -86,13 +86,31 @@ export const SERVICES_BY_VEHICLE: Record<VehicleType, OrderServiceType[]> = {
   car8: ['parcel', 'taxi']
 };
 
-export const ALL_SERVICES: { id: OrderServiceType; label: string; description: string }[] = [
-  { id: 'food', label: 'Food Delivery', description: 'Restaurant food and meals' },
-  { id: 'convenience', label: 'Convenience', description: 'Grocery and convenience store delivery' },
-  { id: 'parcel', label: 'Parcel Express', description: 'Package pickup and delivery' },
-  { id: 'pabili', label: 'Pabili Service', description: 'Custom errand and buying service' },
-  { id: 'request_rider', label: 'Request Driver', description: 'Point-to-point dedicated driver' },
-  { id: 'taxi', label: 'Taxi Service', description: 'Passenger ride-hailing and transit' }
+export const SERVICE_LABELS: Record<OrderServiceType, string> = {
+  food: 'Delivio Food',
+  convenience: 'Delivio Mart',
+  parcel: 'Delivio Parcel',
+  pabili: 'Delivio Pabili',
+  request_rider: 'Delivio Instant',
+  taxi: 'Delivio Taxi'
+};
+
+export const SERVICE_SUBTITLES: Record<OrderServiceType, string> = {
+  food: 'Food Delivery',
+  convenience: 'Convenience Store',
+  parcel: 'Parcel Express',
+  pabili: 'Pabili Service',
+  request_rider: 'Request a Rider (merchant button)',
+  taxi: 'Taxi Service'
+};
+
+export const ALL_SERVICES: { id: OrderServiceType; label: string; subtitle: string; description: string }[] = [
+  { id: 'food', label: 'Delivio Food', subtitle: 'Food Delivery', description: 'Restaurant food and meal deliveries' },
+  { id: 'convenience', label: 'Delivio Mart', subtitle: 'Convenience Store', description: 'Grocery and convenience store delivery' },
+  { id: 'parcel', label: 'Delivio Parcel', subtitle: 'Parcel Express', description: 'Package pickup and courier express delivery' },
+  { id: 'pabili', label: 'Delivio Pabili', subtitle: 'Pabili Service', description: 'Custom errand and buying assistance service' },
+  { id: 'request_rider', label: 'Delivio Instant', subtitle: 'Request a Rider (merchant button)', description: 'Point-to-point dedicated merchant driver dispatch' },
+  { id: 'taxi', label: 'Delivio Taxi', subtitle: 'Taxi Service', description: 'Passenger ride-hailing and transit' }
 ];
 
 export const DEFAULT_TAXI_RATES: Record<VehicleType, {
@@ -210,6 +228,7 @@ export const DEFAULT_DISPATCH_SETTINGS: DispatchSettings = {
       enabled: true,
       holdMinutes: 0,
       maxBatch: 1,
+      endsWhenReady: true,
       feeAdjustType: 'flat',
       feeAdjustValue: 22
     },
@@ -217,7 +236,8 @@ export const DEFAULT_DISPATCH_SETTINGS: DispatchSettings = {
       label: 'Standard',
       enabled: true,
       holdMinutes: 5,
-      maxBatch: 2,
+      maxBatch: 3,
+      endsWhenReady: true,
       feeAdjustType: 'flat',
       feeAdjustValue: 0
     },
@@ -226,6 +246,7 @@ export const DEFAULT_DISPATCH_SETTINGS: DispatchSettings = {
       enabled: true,
       holdMinutes: 10,
       maxBatch: 3,
+      endsWhenReady: false,
       feeAdjustType: 'flat',
       feeAdjustValue: -15
     }
@@ -233,7 +254,9 @@ export const DEFAULT_DISPATCH_SETTINGS: DispatchSettings = {
   searchRadiusKm: 5,
   waveSeconds: 8,
   poolMaxPickupGapKm: 1.5,
-  poolMaxDropoffGapKm: 3
+  poolMaxDropoffGapKm: 3,
+  priorityHeadStartSeconds: 10,
+  priorityMaxBatch: 4
 };
 
 export const DEFAULT_RIDER_PAY: RiderPayConfig = {
@@ -265,5 +288,39 @@ export const DEFAULT_RIDER_PAY: RiderPayConfig = {
     perKmExtra: 6
   }
 };
+
+export const DEFAULT_RECEIPT_CONFIG: ReceiptDesignConfig = {
+  brandLine: 'Delivio',
+  headerLines: ['Official Delivery Receipt', 'Thank you for supporting local!'],
+  footerText: 'For customer support, reach us via in-app help or support@delivio.ph',
+  showOrderId: true,
+  showOrderedAt: true,
+  showCustomerName: true,
+  showNote: true,
+  showSetChoices: true,
+  fontSize: 'medium',
+  align: 'center',
+  separator: 'dashes',
+  merchantCopy: {
+    enabled: true,
+    title: "Merchant's Copy",
+    showItemPrices: true
+  },
+  customerCopy: {
+    enabled: true,
+    title: "Customer's Copy",
+    showItemPrices: true
+  }
+};
+
+export const DEFAULT_CHECKOUT_SETTINGS: CheckoutSettings = {
+  mustTry: {
+    enabled: true,
+    title: 'Must try!',
+    description: 'Add a favorite from this shop to go with your order',
+    maxItems: 8
+  }
+};
+
 
 

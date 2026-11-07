@@ -33,13 +33,15 @@ import {
   Utensils,
   ShoppingBag,
   Package,
-  Bike
+  Bike,
+  Zap
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
 export interface CityServiceConfig {
   id: OrderServiceType;
   label: string;
+  subtitle?: string;
   description: string;
   merchantType?: 'food' | 'convenience';
   icon: React.ComponentType<{ className?: string }>;
@@ -48,33 +50,45 @@ export interface CityServiceConfig {
 export const CITY_SERVICES_LIST: CityServiceConfig[] = [
   {
     id: 'food',
-    label: 'Food Delivery',
+    label: 'Delivio Food',
+    subtitle: 'Food Delivery',
     description: 'Hot meals & restaurant ordering',
     merchantType: 'food',
     icon: Utensils
   },
   {
     id: 'convenience',
-    label: 'Convenience',
+    label: 'Delivio Mart',
+    subtitle: 'Convenience Store',
     description: 'Groceries & daily essentials',
     merchantType: 'convenience',
     icon: ShoppingBag
   },
   {
     id: 'parcel',
-    label: 'Parcel Express',
+    label: 'Delivio Parcel',
+    subtitle: 'Parcel Express',
     description: 'Package pickup and delivery',
     icon: Package
   },
   {
     id: 'pabili',
-    label: 'Pabili Service',
+    label: 'Delivio Pabili',
+    subtitle: 'Pabili Service',
     description: 'Errand and buying assistance',
     icon: Bike
   },
   {
+    id: 'request_rider',
+    label: 'Delivio Instant',
+    subtitle: 'Request a Rider (merchant button)',
+    description: 'Dedicated merchant rider dispatch',
+    icon: Zap
+  },
+  {
     id: 'taxi',
-    label: 'Taxi Service',
+    label: 'Delivio Taxi',
+    subtitle: 'Taxi Service',
     description: 'Passenger rides & hailing',
     icon: Car
   }
@@ -438,7 +452,7 @@ export const CityServicesMatrix: React.FC<CityServicesMatrixProps> = ({ filterCi
                 title={`Platform global switch for ${srv.label}: ${isGlobalOn ? 'Active' : 'Turned OFF'}`}
               >
                 <span className={`w-1.5 h-1.5 rounded-full ${isGlobalOn ? 'bg-emerald-500' : 'bg-red-500'}`} />
-                {srv.label.split(' ')[0]}
+                {srv.label.replace('Delivio ', '')}
               </span>
             );
           })}
@@ -792,7 +806,7 @@ export const ServicesByCity: React.FC = () => {
           <span>Services by City</span>
         </h1>
         <p className="text-sm text-gray-500 dark:text-zinc-400 mt-1">
-          City-by-service operational matrix for Food, Convenience, Parcel Express, Pabili, and Taxi hailing.
+          City-by-service operational matrix for Delivio Food, Delivio Mart, Delivio Parcel, Delivio Pabili, Delivio Instant, and Delivio Taxi.
         </p>
       </div>
 

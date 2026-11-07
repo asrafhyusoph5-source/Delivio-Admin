@@ -21,10 +21,12 @@ import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
+import { formatOrderNumber, matchesOrderSearch } from '../utils/orderNumber';
 import type { Order, OrderStatus, OrderServiceType } from '../types';
 import {
   VEHICLE_TYPES,
   VEHICLE_LABELS,
+  SERVICE_LABELS,
   type VehicleType
 } from '../constants';
 import {
@@ -110,7 +112,7 @@ export const ServiceChips: React.FC<{ order: Order }> = ({ order }) => {
       <div className="flex flex-wrap items-center gap-1">
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-extrabold bg-blue-600 text-white shadow-xs">
           <Car className="w-3 h-3" />
-          <span>Taxi</span>
+          <span>Delivio Taxi</span>
         </span>
         <span className={`inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-bold border ${vConfig?.badgeColor || 'bg-gray-100 text-gray-800'}`}>
           {vConfig?.shortLabel || VEHICLE_LABELS[vType] || vType}
@@ -119,9 +121,11 @@ export const ServiceChips: React.FC<{ order: Order }> = ({ order }) => {
     );
   }
 
+  const label = SERVICE_LABELS[order.serviceType] || order.serviceType.replace('_', ' ');
+
   return (
-    <span className="capitalize px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
-      {order.serviceType.replace('_', ' ')}
+    <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
+      {label}
     </span>
   );
 };
@@ -329,11 +333,40 @@ export const HoldCountdown: React.FC<{ order: Order }> = ({ order }) => {
     return () => clearInterval(iv);
   }, [order.holdUntil]);
 
+  const opt = (order.deliveryOption || 'standard').toLowerCase();
+  if (opt === 'priority') {
+    return null;
+  }
+
+  const isSaver = opt === 'saver';
+  const isStandard = opt === 'standard';
+
+  // For Standard delivery, hold ends early if merchant marks order as Ready
+  const isReady =
+    order.status === 'Ready' ||
+    order.status?.toLowerCase() === 'ready' ||
+    Boolean(order.isReady);
+
+  if (isStandard && isReady) {
+    return (
+      <span
+        title="Standard: Hold released early because merchant marked order Ready"
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800"
+      >
+        <Clock className="w-3 h-3 text-emerald-600 shrink-0" />
+        <span>Hold released (Ready)</span>
+      </span>
+    );
+  }
+
   if (secondsLeft === null) return null;
 
   if (secondsLeft <= 0) {
     return (
-      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400">
+      <span
+        title={isSaver ? 'Saver: exact hold time ended' : 'Standard: hold time ended'}
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-zinc-800 text-gray-500 dark:text-zinc-400"
+      >
         <Clock className="w-2.5 h-2.5" /> Hold released
       </span>
     );
@@ -341,11 +374,19 @@ export const HoldCountdown: React.FC<{ order: Order }> = ({ order }) => {
 
   const m = Math.floor(secondsLeft / 60);
   const s = secondsLeft % 60;
+  const ruleText = isSaver ? 'Exact hold time' : 'Ends at Ready or hold time';
+  const ruleTooltip = isSaver
+    ? 'Saver: the order is held for the exact hold time, even if the merchant marks it Ready'
+    : 'Standard: the order is held for up to the hold time, and the hold ends early if the merchant marks it Ready';
 
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 dark:bg-amber-950/70 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 animate-pulse">
+    <span
+      title={`Hold countdown: ${m}:${s.toString().padStart(2, '0')} • Rule: ${ruleTooltip}`}
+      className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 dark:bg-amber-950/70 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 animate-pulse whitespace-nowrap"
+    >
       <Clock className="w-3 h-3 text-amber-600 shrink-0" />
       <span>Hold {m}:{s.toString().padStart(2, '0')}</span>
+      <span className="opacity-80 font-medium text-[9px]">({ruleText})</span>
     </span>
   );
 };
@@ -663,10 +704,11 @@ const EXACT_STATUSES: OrderStatus[] = [
   'Placed Order',
   'Preparing',
   'Ready',
+  'Rider is on the way',
+  'On another delivery',
   'Driver is on the way',
   'Driver arrived',
   'On trip',
-  'Rider is on the way',
   'Rider is on the way to sender',
   'Arrived at sender',
   'Rider is on the way to vendor',
@@ -912,20 +954,21 @@ export const LiveOrders: React.FC = () => {
       }
       // 7. Search Query
       if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase().trim();
-        const num = (order.orderNumber || '').toLowerCase();
-        const cName = (order.customerName || '').toLowerCase();
-        const cPhone = (order.customerPhone || '').toLowerCase();
-        const mName = (order.merchantName || '').toLowerCase();
-        const rName = (order.riderName || '').toLowerCase();
-        if (
-          !num.includes(q) &&
-          !cName.includes(q) &&
-          !cPhone.includes(q) &&
-          !mName.includes(q) &&
-          !rName.includes(q)
-        ) {
-          return false;
+        const matchesNumOrId = matchesOrderSearch(order, searchQuery);
+        if (!matchesNumOrId) {
+          const q = searchQuery.toLowerCase().trim();
+          const cName = (order.customerName || '').toLowerCase();
+          const cPhone = (order.customerPhone || '').toLowerCase();
+          const mName = (order.merchantName || '').toLowerCase();
+          const rName = (order.riderName || '').toLowerCase();
+          if (
+            !cName.includes(q) &&
+            !cPhone.includes(q) &&
+            !mName.includes(q) &&
+            !rName.includes(q)
+          ) {
+            return false;
+          }
         }
       }
       return true;
@@ -1316,13 +1359,48 @@ export const LiveOrders: React.FC = () => {
     }
   };
 
+  // Action: Mark On another delivery
+  const handleSetOnAnotherDelivery = async () => {
+    if (!selectedOrder) return;
+    try {
+      const orderRef = doc(db, 'orders', selectedOrder.id);
+      const now = Timestamp.now();
+      await updateDoc(orderRef, {
+        status: 'On another delivery',
+        statusHistory: arrayUnion({
+          status: 'On another delivery',
+          at: now,
+          note: `Marked as On another delivery by Admin (${adminProfile?.name || 'Operations'})`
+        }),
+        updatedAt: now
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'UPDATE_ORDER_STATUS',
+        entityType: 'order',
+        entityId: selectedOrder.id,
+        details: `Marked order #${selectedOrder.orderNumber} as On another delivery.`,
+        oldValue: { status: selectedOrder.status },
+        newValue: { status: 'On another delivery' }
+      });
+
+      setSelectedOrder((prev) => (prev ? { ...prev, status: 'On another delivery' } : null));
+      showSuccess(`Order #${selectedOrder.orderNumber} set to 'On another delivery'.`);
+    } catch (err: any) {
+      showError(err);
+    }
+  };
+
   // CSV Export
   const handleExportCsv = () => {
     const rows = filteredOrders.map((o) => ({
       OrderNumber: o.orderNumber,
-      Fulfillment: o.serviceType === 'taxi' ? 'Taxi Ride' : o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
+      Fulfillment: o.serviceType === 'taxi' ? 'Delivio Taxi Ride' : o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
       ScheduledFor: o.scheduledFor ? formatTimestamp(o.scheduledFor) : '',
-      Service: o.serviceType,
+      Service: SERVICE_LABELS[o.serviceType] || o.serviceType,
       VehicleType: o.vehicleType || o.riderVehicle?.vehicleType || '',
       Status: o.status,
       Customer: o.customerName,
@@ -1365,6 +1443,8 @@ export const LiveOrders: React.FC = () => {
       case 'Preparing':
       case 'Ready':
         return 'bg-purple-100 text-purple-800 dark:bg-purple-950/60 dark:text-purple-300 border-purple-300';
+      case 'On another delivery':
+        return 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300 border-indigo-300';
       case 'On trip':
         return 'bg-cyan-100 text-cyan-800 dark:bg-cyan-950/60 dark:text-cyan-300 border-cyan-300';
       case 'Driver arrived':
@@ -1528,12 +1608,12 @@ export const LiveOrders: React.FC = () => {
               className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400 font-semibold"
             >
               <option value="all">All Services</option>
-              <option value="taxi">Taxi Service</option>
-              <option value="food">Food Delivery</option>
-              <option value="convenience">Convenience / Mart</option>
-              <option value="parcel">Parcel Express</option>
-              <option value="pabili">Pabili Service</option>
-              <option value="request_rider">Request Driver</option>
+              <option value="food">Delivio Food</option>
+              <option value="convenience">Delivio Mart</option>
+              <option value="parcel">Delivio Parcel</option>
+              <option value="pabili">Delivio Pabili</option>
+              <option value="request_rider">Delivio Instant</option>
+              <option value="taxi">Delivio Taxi</option>
             </select>
           </div>
 
@@ -1621,7 +1701,7 @@ export const LiveOrders: React.FC = () => {
                       <td className="px-4 py-3 font-mono font-bold text-gray-900 dark:text-white">
                         <div className="flex flex-col gap-1 items-start">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <span>#{order.orderNumber}</span>
+                            <span>{formatOrderNumber(order)}</span>
                             <EditedByMerchantBadge order={order} />
                           </div>
                           <SplitLinksView
@@ -1762,6 +1842,7 @@ export const LiveOrders: React.FC = () => {
                     o.status === 'Driver arrived' ||
                     o.status === 'On trip' ||
                     o.status === 'Rider is on the way' ||
+                    o.status === 'On another delivery' ||
                     o.status.startsWith('Rider is on the way') ||
                     o.status.startsWith('Arrived')
                   );
@@ -1793,7 +1874,7 @@ export const LiveOrders: React.FC = () => {
                         <div className="flex items-center justify-between mb-1.5 gap-2">
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="font-mono font-bold text-xs text-gray-900 dark:text-white">
-                              #{ord.orderNumber}
+                              {formatOrderNumber(ord)}
                             </span>
                             <EditedByMerchantBadge order={ord} />
                           </div>
@@ -1975,7 +2056,7 @@ export const LiveOrders: React.FC = () => {
                             </span>
                             <div className="flex-1 min-w-0">
                               <span className="text-[10px] uppercase font-bold text-emerald-600">
-                                Pickup {idx + 1} (#{ord.orderNumber})
+                                Pickup {idx + 1} ({formatOrderNumber(ord)})
                               </span>
                               <p className="font-medium text-gray-900 dark:text-zinc-100 truncate">
                                 {ord.merchantName || ord.pickup?.address || 'Pickup Point'}
@@ -1991,7 +2072,7 @@ export const LiveOrders: React.FC = () => {
                             </span>
                             <div className="flex-1 min-w-0">
                               <span className="text-[10px] uppercase font-bold text-red-600">
-                                Drop-off {idx + 1} (#{ord.orderNumber})
+                                Drop-off {idx + 1} ({formatOrderNumber(ord)})
                               </span>
                               <p className="font-medium text-gray-900 dark:text-zinc-100 truncate">
                                 {ord.dropoff?.address || 'Customer destination'} ({ord.customerName})
@@ -2017,7 +2098,7 @@ export const LiveOrders: React.FC = () => {
                             <div className="space-y-1 min-w-0">
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 <span className="font-mono font-bold text-gray-900 dark:text-white">
-                                  #{ord.orderNumber}
+                                  {formatOrderNumber(ord)}
                                 </span>
                                 <span className="px-1.5 py-0.2 rounded bg-purple-100 dark:bg-purple-950 text-purple-900 dark:text-purple-300 font-extrabold text-[10px]">
                                   Rank #{ord.bookingRank || 1}
@@ -2065,7 +2146,7 @@ export const LiveOrders: React.FC = () => {
             <div className="p-4 sm:p-5 border-b border-gray-200 dark:border-zinc-800 flex items-center justify-between bg-white dark:bg-zinc-950">
               <div className="flex items-center gap-2.5 flex-wrap">
                 <span className="font-mono font-black text-lg text-gray-900 dark:text-white">
-                  #{selectedOrder.orderNumber}
+                  {formatOrderNumber(selectedOrder)}
                 </span>
                 <FulfillmentChip order={selectedOrder} />
                 <ServiceChips order={selectedOrder} />
@@ -2138,7 +2219,15 @@ export const LiveOrders: React.FC = () => {
                   selectedOrder.status !== 'Completed' &&
                   selectedOrder.status !== 'Cancelled' &&
                   selectedOrder.status !== 'Rejected' && (
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {selectedOrder.status !== 'On another delivery' && selectedOrder.riderId && (
+                        <button
+                          onClick={handleSetOnAnotherDelivery}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 shadow-xs transition-colors"
+                        >
+                          <Car className="w-3.5 h-3.5" /> On another delivery
+                        </button>
+                      )}
                       <button
                         onClick={handleMarkCompleted}
                         className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 shadow-xs transition-colors"
@@ -2169,6 +2258,23 @@ export const LiveOrders: React.FC = () => {
                   )}
               </div>
 
+              {/* Delivery Option & Dispatch Hold Rules Banner */}
+              {selectedOrder.deliveryOption && (
+                <div className="p-3.5 rounded-2xl bg-white dark:bg-zinc-850 border border-gray-200 dark:border-zinc-750 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-2xs">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <DeliveryOptionChip option={selectedOrder.deliveryOption} />
+                    <span className="font-bold text-gray-800 dark:text-zinc-200">
+                      {selectedOrder.deliveryOption.toLowerCase() === 'priority'
+                        ? 'Priority Booking: single rider, immediate dispatch (0 hold)'
+                        : selectedOrder.deliveryOption.toLowerCase() === 'saver'
+                        ? 'Saver: held for exact hold time to pair orders, even if marked Ready'
+                        : 'Standard: held up to hold time; ends early if marked Ready'}
+                    </span>
+                  </div>
+                  <HoldCountdown order={selectedOrder} />
+                </div>
+              )}
+
               {/* Stakeholders Contact Cards: Customer, Merchant/Service, Driver */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 {/* Customer */}
@@ -2195,7 +2301,7 @@ export const LiveOrders: React.FC = () => {
                 <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800 text-xs space-y-1">
                   <div className="flex items-center gap-1.5 text-gray-400 font-bold uppercase text-[10px]">
                     <Store className="w-3.5 h-3.5 text-amber-500" />
-                    <span>{selectedOrder.serviceType === 'taxi' ? 'Taxi Service' : 'Merchant'}</span>
+                    <span>{selectedOrder.serviceType === 'taxi' ? 'Delivio Taxi' : 'Merchant'}</span>
                   </div>
                   <div className="font-bold text-gray-900 dark:text-white truncate">
                     {selectedOrder.serviceType === 'taxi'
@@ -2516,9 +2622,26 @@ export const LiveOrders: React.FC = () => {
                 <div className="space-y-3 relative pl-4 border-l-2 border-amber-300 dark:border-zinc-800 ml-2">
                   {(selectedOrder.statusHistory || []).map((sh, idx) => (
                     <div key={idx} className="relative">
-                      <div className="absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full bg-amber-500 border border-white" />
-                      <div className="text-xs font-bold text-gray-900 dark:text-white">
-                        {sh.status}
+                      <div
+                        className={`absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full border border-white ${
+                          sh.status === 'On another delivery'
+                            ? 'bg-indigo-600 ring-2 ring-indigo-300'
+                            : sh.status === 'Delivered' || sh.status === 'Completed'
+                            ? 'bg-emerald-500'
+                            : sh.status === 'Cancelled'
+                            ? 'bg-red-500'
+                            : 'bg-amber-500'
+                        }`}
+                      />
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-gray-900 dark:text-white">
+                          {sh.status}
+                        </span>
+                        {sh.status === 'On another delivery' && (
+                          <span className="px-2 py-0.2 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300 border border-indigo-200">
+                            Multi-Drop In Flight
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] text-gray-400">{formatTimestamp(sh.at)}</div>
                       {sh.note && (

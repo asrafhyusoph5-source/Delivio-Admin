@@ -24,6 +24,7 @@ import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
+import { formatOrderNumber } from '../utils/orderNumber';
 import type { UserProfile, UserAddress, Order, EditHistoryEntry, WalletTransaction, Rider, WalletTransfer } from '../types';
 import {
   Search,
@@ -1766,7 +1767,7 @@ export const Customers: React.FC = () => {
                           >
                             <div className="flex items-center justify-between">
                               <span className="font-mono font-bold text-gray-900 dark:text-white">
-                                #{ord.orderNumber}
+                                {formatOrderNumber(ord)}
                               </span>
                               <span
                                 className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${

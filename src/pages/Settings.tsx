@@ -14,14 +14,26 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { useCity } from '../context/CityContext';
 import { logAuditEvent } from '../utils/audit';
-import type { PlatformSettings, OrderServiceType, PlatformVatConfig, DispatchSettings, DeliveryOptionType } from '../types';
+import type {
+  PlatformSettings,
+  OrderServiceType,
+  PlatformVatConfig,
+  DispatchSettings,
+  DeliveryOptionType,
+  ReceiptDesignConfig,
+  CheckoutSettings
+} from '../types';
 import {
   VEHICLE_TYPES,
   SERVICES_BY_VEHICLE,
   DEFAULT_TAXI_RATES,
   DEFAULT_DISPATCH_SETTINGS,
+  DEFAULT_RECEIPT_CONFIG,
+  DEFAULT_CHECKOUT_SETTINGS,
   type VehicleType
 } from '../constants';
+import { ReceiptDesignerTab } from '../components/settings/ReceiptDesignerTab';
+import { CheckoutMustTryTab } from '../components/settings/CheckoutMustTryTab';
 import {
   Settings as SettingsIcon,
   Shield,
@@ -54,7 +66,9 @@ import {
   Percent,
   Radio,
   Compass,
-  Zap
+  Zap,
+  Printer,
+  Star
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
@@ -116,6 +130,18 @@ export const Settings: React.FC = () => {
   const [loadingDispatch, setLoadingDispatch] = useState<boolean>(true);
   const [savingDispatch, setSavingDispatch] = useState<boolean>(false);
   const [confirmSaveDispatchModalOpen, setConfirmSaveDispatchModalOpen] = useState<boolean>(false);
+
+  // Sub-Tab Navigation
+  type SettingsTab = 'general' | 'receipt' | 'checkout' | 'dispatch' | 'taxes' | 'services' | 'tools';
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
+
+  // Receipt Designer (settings/receipt)
+  const [receiptConfig, setReceiptConfig] = useState<ReceiptDesignConfig>(DEFAULT_RECEIPT_CONFIG);
+  const [loadingReceipt, setLoadingReceipt] = useState<boolean>(true);
+
+  // Checkout Settings (settings/checkout)
+  const [checkoutSettings, setCheckoutSettings] = useState<CheckoutSettings>(DEFAULT_CHECKOUT_SETTINGS);
+  const [loadingCheckout, setLoadingCheckout] = useState<boolean>(true);
 
   // Initialize DB state
   const [initDbModalOpen, setInitDbModalOpen] = useState(false);
@@ -335,6 +361,7 @@ export const Settings: React.FC = () => {
                   enabled: dt.options?.priority?.enabled !== false,
                   holdMinutes: 0,
                   maxBatch: 1,
+                  endsWhenReady: true,
                   feeAdjustType: dt.options?.priority?.feeAdjustType || 'flat',
                   feeAdjustValue: Number(dt.options?.priority?.feeAdjustValue ?? 22)
                 },
@@ -342,7 +369,8 @@ export const Settings: React.FC = () => {
                   label: dt.options?.standard?.label || 'Standard',
                   enabled: dt.options?.standard?.enabled !== false,
                   holdMinutes: Number(dt.options?.standard?.holdMinutes ?? 5),
-                  maxBatch: Number(dt.options?.standard?.maxBatch ?? 2),
+                  maxBatch: Math.max(2, Number(dt.options?.standard?.maxBatch ?? 3)),
+                  endsWhenReady: dt.options?.standard?.endsWhenReady !== false,
                   feeAdjustType: dt.options?.standard?.feeAdjustType || 'flat',
                   feeAdjustValue: Number(dt.options?.standard?.feeAdjustValue ?? 0)
                 },
@@ -350,7 +378,8 @@ export const Settings: React.FC = () => {
                   label: dt.options?.saver?.label || 'Saver',
                   enabled: dt.options?.saver?.enabled !== false,
                   holdMinutes: Number(dt.options?.saver?.holdMinutes ?? 10),
-                  maxBatch: Number(dt.options?.saver?.maxBatch ?? 3),
+                  maxBatch: Math.max(2, Number(dt.options?.saver?.maxBatch ?? 3)),
+                  endsWhenReady: Boolean(dt.options?.saver?.endsWhenReady),
                   feeAdjustType: dt.options?.saver?.feeAdjustType || 'flat',
                   feeAdjustValue: Number(dt.options?.saver?.feeAdjustValue ?? -15)
                 }
@@ -358,7 +387,9 @@ export const Settings: React.FC = () => {
               searchRadiusKm: Number(dt.searchRadiusKm ?? 5),
               waveSeconds: Number(dt.waveSeconds ?? 8),
               poolMaxPickupGapKm: Number(dt.poolMaxPickupGapKm ?? 1.5),
-              poolMaxDropoffGapKm: Number(dt.poolMaxDropoffGapKm ?? 3)
+              poolMaxDropoffGapKm: Number(dt.poolMaxDropoffGapKm ?? 3),
+              priorityHeadStartSeconds: Number(dt.priorityHeadStartSeconds ?? 10),
+              priorityMaxBatch: Math.max(1, Number(dt.priorityMaxBatch ?? 4))
             });
             setDispatchExists(true);
           } else {
@@ -369,6 +400,65 @@ export const Settings: React.FC = () => {
           console.warn('Failed to load settings/dispatch:', e);
         } finally {
           setLoadingDispatch(false);
+        }
+
+        // Fetch settings/receipt
+        try {
+          setLoadingReceipt(true);
+          const rRef = doc(db, 'settings', 'receipt');
+          const rSnap = await getDoc(rRef);
+          if (rSnap.exists()) {
+            const dt = rSnap.data();
+            setReceiptConfig({
+              brandLine: dt.brandLine || DEFAULT_RECEIPT_CONFIG.brandLine,
+              headerLines: Array.isArray(dt.headerLines) ? dt.headerLines : DEFAULT_RECEIPT_CONFIG.headerLines,
+              footerText: dt.footerText !== undefined ? dt.footerText : DEFAULT_RECEIPT_CONFIG.footerText,
+              showOrderId: dt.showOrderId !== false,
+              showOrderedAt: dt.showOrderedAt !== false,
+              showCustomerName: dt.showCustomerName !== false,
+              showNote: dt.showNote !== false,
+              showSetChoices: dt.showSetChoices !== false,
+              fontSize: dt.fontSize || DEFAULT_RECEIPT_CONFIG.fontSize,
+              align: dt.align || DEFAULT_RECEIPT_CONFIG.align,
+              separator: dt.separator || DEFAULT_RECEIPT_CONFIG.separator,
+              merchantCopy: {
+                enabled: dt.merchantCopy?.enabled !== false,
+                title: dt.merchantCopy?.title || DEFAULT_RECEIPT_CONFIG.merchantCopy.title,
+                showItemPrices: dt.merchantCopy?.showItemPrices !== false
+              },
+              customerCopy: {
+                enabled: dt.customerCopy?.enabled !== false,
+                title: dt.customerCopy?.title || DEFAULT_RECEIPT_CONFIG.customerCopy.title,
+                showItemPrices: dt.customerCopy?.showItemPrices !== false
+              }
+            });
+          }
+        } catch (e) {
+          console.warn('Failed to load settings/receipt:', e);
+        } finally {
+          setLoadingReceipt(false);
+        }
+
+        // Fetch settings/checkout
+        try {
+          setLoadingCheckout(true);
+          const cRef = doc(db, 'settings', 'checkout');
+          const cSnap = await getDoc(cRef);
+          if (cSnap.exists()) {
+            const dt = cSnap.data();
+            setCheckoutSettings({
+              mustTry: {
+                enabled: dt.mustTry?.enabled !== false,
+                title: dt.mustTry?.title || DEFAULT_CHECKOUT_SETTINGS.mustTry.title,
+                description: dt.mustTry?.description || DEFAULT_CHECKOUT_SETTINGS.mustTry.description,
+                maxItems: Number(dt.mustTry?.maxItems ?? DEFAULT_CHECKOUT_SETTINGS.mustTry.maxItems)
+              }
+            });
+          }
+        } catch (e) {
+          console.warn('Failed to load settings/checkout:', e);
+        } finally {
+          setLoadingCheckout(false);
         }
       } catch (err) {
         showError(err);
@@ -423,18 +513,21 @@ export const Settings: React.FC = () => {
             ...dispatchSettings.options.priority,
             holdMinutes: 0,
             maxBatch: 1,
+            endsWhenReady: true,
             feeAdjustValue: Number(dispatchSettings.options.priority.feeAdjustValue)
           },
           standard: {
             ...dispatchSettings.options.standard,
             holdMinutes: Math.max(1, Number(dispatchSettings.options.standard.holdMinutes) || 5),
-            maxBatch: Math.max(1, Number(dispatchSettings.options.standard.maxBatch) || 2),
+            maxBatch: Math.max(2, Number(dispatchSettings.options.standard.maxBatch) || 3),
+            endsWhenReady: dispatchSettings.options.standard.endsWhenReady !== false,
             feeAdjustValue: Number(dispatchSettings.options.standard.feeAdjustValue)
           },
           saver: {
             ...dispatchSettings.options.saver,
             holdMinutes: Math.max(1, Number(dispatchSettings.options.saver.holdMinutes) || 10),
-            maxBatch: Math.max(1, Number(dispatchSettings.options.saver.maxBatch) || 3),
+            maxBatch: Math.max(2, Number(dispatchSettings.options.saver.maxBatch) || 3),
+            endsWhenReady: Boolean(dispatchSettings.options.saver.endsWhenReady),
             feeAdjustValue: Number(dispatchSettings.options.saver.feeAdjustValue)
           }
         },
@@ -442,6 +535,8 @@ export const Settings: React.FC = () => {
         waveSeconds: Math.max(1, Number(dispatchSettings.waveSeconds) || 8),
         poolMaxPickupGapKm: Math.max(0.1, Number(dispatchSettings.poolMaxPickupGapKm) || 1.5),
         poolMaxDropoffGapKm: Math.max(0.1, Number(dispatchSettings.poolMaxDropoffGapKm) || 3),
+        priorityHeadStartSeconds: Math.max(0, Number(dispatchSettings.priorityHeadStartSeconds ?? 10)),
+        priorityMaxBatch: Math.max(1, Number(dispatchSettings.priorityMaxBatch ?? 4)),
         updatedAt: Timestamp.now(),
         updatedBy: adminProfile?.uid || 'admin'
       };
@@ -906,11 +1001,61 @@ export const Settings: React.FC = () => {
         </p>
       </div>
 
-      {/* Main Settings Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Settings Form */}
-        <div className="lg:col-span-2 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-6">
-          <div className="flex items-center gap-2 pb-3 border-b border-gray-100 dark:border-zinc-800">
+      {/* Sub-Tab Navigation Bar */}
+      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 border-b border-gray-200 dark:border-zinc-800">
+        {[
+          { id: 'general' as const, label: 'General', icon: SettingsIcon },
+          { id: 'receipt' as const, label: 'Print Receipt', icon: Printer },
+          { id: 'checkout' as const, label: 'Checkout (Must Try!)', icon: Sparkles },
+          { id: 'dispatch' as const, label: 'Dispatch', icon: Compass },
+          { id: 'taxes' as const, label: 'Taxes & Fees', icon: Percent },
+          { id: 'services' as const, label: 'Service Switches', icon: Layers },
+          { id: 'tools' as const, label: 'Database & Tools', icon: Database },
+        ].map((tab) => {
+          const Icon = tab.icon;
+          const isActive = settingsTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setSettingsTab(tab.id)}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-2xl text-xs font-extrabold whitespace-nowrap transition-all ${
+                isActive
+                  ? 'bg-amber-400 text-black shadow-xs'
+                  : 'text-gray-600 dark:text-zinc-400 hover:text-black dark:hover:text-white hover:bg-gray-100 dark:hover:bg-zinc-800'
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+              <span>{tab.label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* RECEIPT DESIGNER TAB */}
+      {settingsTab === 'receipt' && (
+        <ReceiptDesignerTab
+          receiptConfig={receiptConfig}
+          onConfigChange={setReceiptConfig}
+          loading={loadingReceipt}
+        />
+      )}
+
+      {/* CHECKOUT / MUST TRY! TAB */}
+      {settingsTab === 'checkout' && (
+        <CheckoutMustTryTab
+          checkoutSettings={checkoutSettings}
+          onSettingsChange={setCheckoutSettings}
+          loading={loadingCheckout}
+        />
+      )}
+
+      {/* GENERAL PLATFORM CONFIGURATION TAB */}
+      {settingsTab === 'general' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Settings Form */}
+          <div className="lg:col-span-2 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-6">
+            <div className="flex items-center gap-2 pb-3 border-b border-gray-100 dark:border-zinc-800">
             <SettingsIcon className="w-5 h-5 text-amber-500" />
             <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
               Platform Configuration
@@ -1050,8 +1195,10 @@ export const Settings: React.FC = () => {
           )}
         </div>
       </div>
+      )}
 
-      {/* Taxes & Fees (VAT & Platform Timezone) Panel */}
+      {/* TAXES & FEES TAB */}
+      {settingsTab === 'taxes' && (
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-gray-100 dark:border-zinc-800">
           <div className="flex items-center gap-3">
@@ -1379,8 +1526,10 @@ export const Settings: React.FC = () => {
           </div>
         </div>
       </div>
+      )}
 
-      {/* Dispatch Settings Panel (settings/dispatch) */}
+      {/* DISPATCH SETTINGS TAB */}
+      {settingsTab === 'dispatch' && (
       <div id="dispatch-settings" className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-gray-100 dark:border-zinc-800">
           <div className="flex items-center gap-3">
@@ -1440,12 +1589,12 @@ export const Settings: React.FC = () => {
               Dispatch Rules & Batching Engine
             </span>
             <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed">
-              <strong>Priority</strong> = one rider, one booking. <strong>Standard</strong> and <strong>Saver</strong> = the order waits up to <span className="font-semibold text-amber-700 dark:text-amber-400">holdMinutes</span> after the merchant accepts (or until Ready) to be combined with another order; if none is found it goes out as a single booking. <em>Priority must keep holdMinutes 0 and maxBatch 1.</em>
+              <strong>Priority</strong> = one rider, one booking. <strong>Standard</strong> = the order is held for up to holdMinutes after the merchant accepts it, and the hold ends early if the merchant marks it Ready. <strong>Saver</strong> = the order is held for the exact holdMinutes, even if the merchant marks it Ready. In both, if a compatible order is found the two go out together as a double booking immediately; otherwise the order goes out as a single booking when the hold ends. <em>maxBatch is the most orders one rider can carry (at least 2 for Standard and Saver; Priority stays 1).</em>
             </p>
           </div>
         </div>
 
-        {/* Global Dispatch & Pool Limits */}
+        {/* Global Dispatch & Pool Limits (Search radius is managed on Merchant Partners / Drivers pages) */}
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h4 className="text-xs font-extrabold uppercase tracking-wider text-gray-700 dark:text-zinc-300 flex items-center gap-2">
@@ -1473,31 +1622,7 @@ export const Settings: React.FC = () => {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800">
-              <label className="block text-[11px] font-extrabold uppercase text-gray-500 dark:text-zinc-400 mb-1">
-                Driver Search Radius
-              </label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  min="1"
-                  max="50"
-                  step="0.5"
-                  value={dispatchSettings.searchRadiusKm}
-                  onChange={(e) =>
-                    setDispatchSettings((prev) => ({
-                      ...prev,
-                      searchRadiusKm: Number(e.target.value)
-                    }))
-                  }
-                  className="w-full px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
-                />
-                <span className="text-xs font-extrabold text-gray-500 dark:text-zinc-400">km</span>
-              </div>
-              <span className="text-[10px] text-gray-400 mt-1 block">Default: 5 km</span>
-            </div>
-
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800">
               <label className="block text-[11px] font-extrabold uppercase text-gray-500 dark:text-zinc-400 mb-1">
                 Wave Dispatch Interval
@@ -1570,6 +1695,74 @@ export const Settings: React.FC = () => {
               <span className="text-[10px] text-gray-400 mt-1 block">Default: 3.0 km</span>
             </div>
           </div>
+        </div>
+
+        {/* Priority Rider Dispatch Configuration */}
+        <div className="p-4 rounded-3xl bg-amber-50/50 dark:bg-amber-950/20 border border-amber-300 dark:border-amber-800/60 space-y-3">
+          <div className="flex items-center gap-2">
+            <Star className="w-4 h-4 text-amber-500 fill-amber-400" />
+            <h4 className="text-xs font-black uppercase tracking-wider text-amber-950 dark:text-amber-200">
+              Priority Rider Dispatch Settings
+            </h4>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="p-3.5 rounded-2xl bg-white dark:bg-zinc-850 border border-amber-200 dark:border-amber-800/40">
+              <label className="block text-[11px] font-extrabold uppercase text-gray-600 dark:text-zinc-300 mb-1">
+                Priority Head Start Window
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  max="120"
+                  step="1"
+                  value={dispatchSettings.priorityHeadStartSeconds ?? 10}
+                  onChange={(e) =>
+                    setDispatchSettings((prev) => ({
+                      ...prev,
+                      priorityHeadStartSeconds: Number(e.target.value)
+                    }))
+                  }
+                  className="w-full px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-amber-600"
+                />
+                <span className="text-xs font-extrabold text-gray-500 dark:text-zinc-400">sec</span>
+              </div>
+              <span className="text-[10px] text-gray-500 mt-1 block">
+                Priority riders are offered first, others start this many seconds later (default: 10s).
+              </span>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-white dark:bg-zinc-850 border border-amber-200 dark:border-amber-800/40">
+              <label className="block text-[11px] font-extrabold uppercase text-gray-600 dark:text-zinc-300 mb-1">
+                Priority Rider Max Batch
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="1"
+                  max="10"
+                  step="1"
+                  value={dispatchSettings.priorityMaxBatch ?? 4}
+                  onChange={(e) =>
+                    setDispatchSettings((prev) => ({
+                      ...prev,
+                      priorityMaxBatch: Math.max(1, Number(e.target.value))
+                    }))
+                  }
+                  className="w-full px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-amber-600"
+                />
+                <span className="text-xs font-extrabold text-gray-500 dark:text-zinc-400">orders</span>
+              </div>
+              <span className="text-[10px] text-gray-500 mt-1 block">
+                Max batch capacity for priority riders on food/convenience double bookings (default: 4, min: 1).
+              </span>
+            </div>
+          </div>
+
+          <p className="text-[11px] text-amber-900 dark:text-amber-200/90 leading-relaxed bg-amber-100/60 dark:bg-amber-900/30 p-2.5 rounded-xl border border-amber-200 dark:border-amber-800/40">
+            <strong>Helper text:</strong> a priority rider is offered every Delivio Food or Delivio Mart order anywhere in their registered city (ignoring the radius), nearest priority rider first, and can carry up to priorityMaxBatch orders in a double booking (minimum 1); every other service stays single.
+          </p>
         </div>
 
         {/* Options Table / Cards: Priority, Standard, Saver */}
@@ -1667,6 +1860,19 @@ export const Settings: React.FC = () => {
                   </div>
                 </div>
 
+                {/* Ends when ready */}
+                <div className="p-2 rounded-xl bg-gray-100 dark:bg-zinc-800/60 border border-gray-200 dark:border-zinc-700 flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] font-bold text-gray-700 dark:text-zinc-300 block">
+                      Ends When Ready
+                    </span>
+                    <span className="text-[9px] text-gray-400">Immediate release</span>
+                  </div>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-extrabold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                    True
+                  </span>
+                </div>
+
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-[10px] font-bold text-gray-500 dark:text-zinc-400 mb-1">
@@ -1716,6 +1922,10 @@ export const Settings: React.FC = () => {
                     <span className="text-[9px] text-gray-400 mt-0.5 block">Default: +₱22</span>
                   </div>
                 </div>
+
+                <p className="text-[10px] text-gray-500 italic pt-1 border-t border-gray-200/60 dark:border-zinc-800">
+                  Priority = one rider, one booking. No batching hold.
+                </p>
               </div>
             </div>
 
@@ -1812,8 +2022,8 @@ export const Settings: React.FC = () => {
                     </label>
                     <input
                       type="number"
-                      min="1"
-                      max="5"
+                      min="2"
+                      max="6"
                       value={dispatchSettings.options.standard.maxBatch}
                       onChange={(e) =>
                         setDispatchSettings((prev) => ({
@@ -1822,15 +2032,44 @@ export const Settings: React.FC = () => {
                             ...prev.options,
                             standard: {
                               ...prev.options.standard,
-                              maxBatch: Math.max(1, Number(e.target.value))
+                              maxBatch: Math.max(2, Number(e.target.value))
                             }
                           }
                         }))
                       }
                       className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
                     />
-                    <span className="text-[9px] text-gray-400 mt-0.5 block">Default: 2 orders</span>
+                    <span className="text-[9px] text-gray-400 mt-0.5 block">Default: 3 (min 2)</span>
                   </div>
+                </div>
+
+                {/* Ends when ready */}
+                <div className="p-2.5 rounded-xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-700/80 flex items-center justify-between">
+                  <div>
+                    <span className="text-[11px] font-bold text-gray-800 dark:text-zinc-200 block">
+                      Ends When Ready
+                    </span>
+                    <span className="text-[9px] text-gray-400">Release hold early if merchant marks Ready</span>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={dispatchSettings.options.standard.endsWhenReady !== false}
+                      onChange={(e) =>
+                        setDispatchSettings((prev) => ({
+                          ...prev,
+                          options: {
+                            ...prev.options,
+                            standard: {
+                              ...prev.options.standard,
+                              endsWhenReady: e.target.checked
+                            }
+                          }
+                        }))
+                      }
+                      className="w-4 h-4 rounded text-amber-500 accent-amber-500"
+                    />
+                  </label>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
@@ -1882,6 +2121,10 @@ export const Settings: React.FC = () => {
                     <span className="text-[9px] text-gray-400 mt-0.5 block">Default: ₱0</span>
                   </div>
                 </div>
+
+                <p className="text-[10px] text-gray-600 dark:text-zinc-400 leading-relaxed pt-1 border-t border-gray-200/60 dark:border-zinc-800">
+                  Standard: the order is held for up to {dispatchSettings.options.standard.holdMinutes} minutes after the merchant accepts it, and the hold ends early if the merchant marks it Ready.
+                </p>
               </div>
             </div>
 
@@ -1978,7 +2221,7 @@ export const Settings: React.FC = () => {
                     </label>
                     <input
                       type="number"
-                      min="1"
+                      min="2"
                       max="6"
                       value={dispatchSettings.options.saver.maxBatch}
                       onChange={(e) =>
@@ -1988,15 +2231,44 @@ export const Settings: React.FC = () => {
                             ...prev.options,
                             saver: {
                               ...prev.options.saver,
-                              maxBatch: Math.max(1, Number(e.target.value))
+                              maxBatch: Math.max(2, Number(e.target.value))
                             }
                           }
                         }))
                       }
                       className="w-full px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
                     />
-                    <span className="text-[9px] text-gray-400 mt-0.5 block">Default: 3 orders</span>
+                    <span className="text-[9px] text-gray-400 mt-0.5 block">Default: 3 (min 2)</span>
                   </div>
+                </div>
+
+                {/* Ends when ready */}
+                <div className="p-2.5 rounded-xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-700/80 flex items-center justify-between">
+                  <div>
+                    <span className="text-[11px] font-bold text-gray-800 dark:text-zinc-200 block">
+                      Ends When Ready
+                    </span>
+                    <span className="text-[9px] text-gray-400">Fixed duration (even if merchant marks Ready)</span>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(dispatchSettings.options.saver.endsWhenReady)}
+                      onChange={(e) =>
+                        setDispatchSettings((prev) => ({
+                          ...prev,
+                          options: {
+                            ...prev.options,
+                            saver: {
+                              ...prev.options.saver,
+                              endsWhenReady: e.target.checked
+                            }
+                          }
+                        }))
+                      }
+                      className="w-4 h-4 rounded text-emerald-500 accent-emerald-500"
+                    />
+                  </label>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
@@ -2048,13 +2320,19 @@ export const Settings: React.FC = () => {
                     <span className="text-[9px] text-gray-400 mt-0.5 block">Default: -₱15</span>
                   </div>
                 </div>
+
+                <p className="text-[10px] text-gray-600 dark:text-zinc-400 leading-relaxed pt-1 border-t border-gray-200/60 dark:border-zinc-800">
+                  Saver: the order is held for the exact {dispatchSettings.options.saver.holdMinutes} minutes, even if the merchant marks it Ready.
+                </p>
               </div>
             </div>
           </div>
         </div>
       </div>
+      )}
 
-      {/* Service Types & Platform Switches Panel */}
+      {/* PLATFORM SERVICE SWITCHES TAB */}
+      {settingsTab === 'services' && (
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-gray-100 dark:border-zinc-800">
           <div className="flex items-center gap-3">
@@ -2087,12 +2365,12 @@ export const Settings: React.FC = () => {
           </h4>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
             {[
-              { id: 'food' as OrderServiceType, label: 'Food Delivery', desc: 'Restaurant meals & drinks' },
-              { id: 'convenience' as OrderServiceType, label: 'Convenience', desc: 'Grocery & store orders' },
-              { id: 'parcel' as OrderServiceType, label: 'Parcel Express', desc: 'Package courier services' },
-              { id: 'pabili' as OrderServiceType, label: 'Pabili Service', desc: 'Custom buy errands' },
-              { id: 'request_rider' as OrderServiceType, label: 'Request Driver', desc: 'Dedicated driver dispatch' },
-              { id: 'taxi' as OrderServiceType, label: 'Taxi Service', desc: 'Passenger ride-hailing & transit' }
+              { id: 'food' as OrderServiceType, label: 'Delivio Food', subtitle: 'Food Delivery', desc: 'Restaurant meals & drinks' },
+              { id: 'convenience' as OrderServiceType, label: 'Delivio Mart', subtitle: 'Convenience Store', desc: 'Grocery & daily essentials' },
+              { id: 'parcel' as OrderServiceType, label: 'Delivio Parcel', subtitle: 'Parcel Express', desc: 'Package courier services' },
+              { id: 'pabili' as OrderServiceType, label: 'Delivio Pabili', subtitle: 'Pabili Service', desc: 'Custom buy errands' },
+              { id: 'request_rider' as OrderServiceType, label: 'Delivio Instant', subtitle: 'Request a Rider (merchant button)', desc: 'Point-to-point dedicated driver' },
+              { id: 'taxi' as OrderServiceType, label: 'Delivio Taxi', subtitle: 'Taxi Service', desc: 'Passenger ride-hailing & transit' }
             ].map((svc) => {
               const isEnabled = platformServices[svc.id] !== false;
               return (
@@ -2106,14 +2384,17 @@ export const Settings: React.FC = () => {
                   }`}
                 >
                   <div>
-                    <span className="font-bold text-xs text-gray-900 dark:text-white block">
+                    <span className="font-extrabold text-xs text-gray-900 dark:text-white block">
                       {svc.label}
                     </span>
-                    <span className="text-[11px] text-gray-500">{svc.desc}</span>
+                    <span className="text-[11px] font-semibold text-amber-700 dark:text-amber-400 block">
+                      {svc.subtitle}
+                    </span>
+                    <span className="text-[10px] text-gray-400">{svc.desc}</span>
                   </div>
 
                   <span
-                    className={`px-2.5 py-1 rounded-full text-[11px] font-bold ${
+                    className={`px-2.5 py-1 rounded-full text-[11px] font-bold shrink-0 ${
                       isEnabled
                         ? 'bg-emerald-500 text-white'
                         : 'bg-gray-300 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300'
@@ -2167,7 +2448,11 @@ export const Settings: React.FC = () => {
           </div>
         </div>
       </div>
+      )}
 
+      {/* DATABASE & TOOLS TAB */}
+      {settingsTab === 'tools' && (
+      <>
       {/* Migration to Drivers & Taxi Panel */}
       <div className="bg-gradient-to-r from-amber-500/10 via-amber-400/5 to-transparent dark:from-amber-950/20 dark:via-zinc-900 border border-amber-200 dark:border-amber-900/40 rounded-3xl p-6 shadow-xs space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -2360,6 +2645,8 @@ export const Settings: React.FC = () => {
           </div>
         )}
       </div>
+      </>
+      )}
 
       {/* Migration Preview Modal */}
       {migrationPreviewOpen && migrationPreview && (

@@ -47,6 +47,7 @@ import {
   addDoc,
   updateDoc,
   query,
+  where,
   limit,
   onSnapshot,
   Timestamp,
@@ -66,6 +67,7 @@ import {
 } from '../constants';
 import { compressImageToDataUri } from '../utils/imageCompressor';
 import { formatRelativeTime, formatTimestamp, parseDate } from '../utils/date';
+import { formatOrderNumber, matchesOrderSearch } from '../utils/orderNumber';
 import type { SupportTicket, SupportTicketMessage, Order, SupportTicketStatus } from '../types';
 
 export const Support: React.FC = () => {
@@ -93,16 +95,17 @@ export const Support: React.FC = () => {
   const [relatedOrder, setRelatedOrder] = useState<Order | null>(null);
   const [loadingOrder, setLoadingOrder] = useState(false);
 
-  // Split Delivery Child Order live tracking
-  const [splitChildOrder, setSplitChildOrder] = useState<Order | null>(null);
+  // Split Delivery Child Orders live tracking
+  const [splitChildOrders, setSplitChildOrders] = useState<Order[]>([]);
   const [loadingChildOrder, setLoadingChildOrder] = useState(false);
+  const [cancellingChildId, setCancellingChildId] = useState<string | null>(null);
 
   // Split Delivery Modal
   const [splitModalOpen, setSplitModalOpen] = useState(false);
-  const [selectedSplitItemIndices, setSelectedSplitItemIndices] = useState<number[]>([]);
+  const [ridersNeeded, setRidersNeeded] = useState<number>(2);
+  const [itemAssignments, setItemAssignments] = useState<Record<number, number>>({});
   const [splitRiderFee, setSplitRiderFee] = useState<number>(45);
   const [splittingDelivery, setSplittingDelivery] = useState(false);
-  const [cancellingSplit, setCancellingSplit] = useState(false);
 
   // Chat thread
   const [messages, setMessages] = useState<SupportTicketMessage[]>([]);
@@ -328,34 +331,40 @@ export const Support: React.FC = () => {
     loadOrder();
   }, [selectedTicket?.orderId, selectedTicket?.orderNumber]);
 
-  // 4. Listen to child order live status (if split delivery created)
+  // 4. Listen to child orders live status (if split delivery created)
   useEffect(() => {
-    const childId = selectedTicket?.splitChildOrderId || (relatedOrder?.splitOut as any)?.childOrderId;
-    if (!childId) {
-      setSplitChildOrder(null);
+    const parentOrderId = relatedOrder?.id || selectedTicket?.orderId;
+    if (!parentOrderId) {
+      setSplitChildOrders([]);
       return;
     }
 
     setLoadingChildOrder(true);
-    const childRef = doc(db, 'orders', childId);
-    const unsubChild = onSnapshot(
-      childRef,
+    // Listen to all child orders created from this parent order
+    const qSplit = query(
+      collection(db, 'orders'),
+      where('splitOf', '==', parentOrderId)
+    );
+
+    const unsubSplit = onSnapshot(
+      qSplit,
       (snap) => {
-        if (snap.exists()) {
-          setSplitChildOrder({ id: snap.id, ...snap.data() } as Order);
-        } else {
-          setSplitChildOrder(null);
-        }
+        const list: Order[] = [];
+        snap.forEach((d) => {
+          list.push({ id: d.id, ...d.data() } as Order);
+        });
+        list.sort((a, b) => (Number(a.seq) || 2) - (Number(b.seq) || 2));
+        setSplitChildOrders(list);
         setLoadingChildOrder(false);
       },
       (err) => {
-        console.warn('Error loading split child order:', err);
+        console.warn('Error loading split child orders:', err);
         setLoadingChildOrder(false);
       }
     );
 
-    return () => unsubChild();
-  }, [selectedTicket?.splitChildOrderId, relatedOrder?.splitOut]);
+    return () => unsubSplit();
+  }, [relatedOrder?.id, selectedTicket?.orderId, relatedOrder?.splitOut, selectedTicket?.splitChildOrderId]);
 
   // Reason counts per audience
   const customerReasonCounts = useMemo(() => {
@@ -431,7 +440,7 @@ export const Support: React.FC = () => {
         const matchesCustomer = (t.customerName || '').toLowerCase().includes(q);
         const matchesRider = (t.riderName || '').toLowerCase().includes(q);
         const matchesEmail = (t.customerEmail || '').toLowerCase().includes(q);
-        const matchesOrder = (t.orderNumber || '').toLowerCase().includes(q);
+        const matchesOrder = matchesOrderSearch({ orderNumber: t.orderNumber, id: t.orderId }, searchQuery);
         const matchesBatch = (t.batchId || '').toLowerCase().includes(q);
         const matchesId = t.id.toLowerCase().includes(q);
 
@@ -493,7 +502,15 @@ export const Support: React.FC = () => {
       rLabel.includes('heavy');
     if (!isSplitReason) return false;
     // not already split
-    if (selectedTicket.splitChildOrderId || (relatedOrder?.splitOut as any)?.childOrderId) return false;
+    const splitOut = relatedOrder?.splitOut as any;
+    if (
+      selectedTicket.splitChildOrderId ||
+      (selectedTicket as any).splitChildOrderIds?.length > 0 ||
+      splitOut?.children?.length > 0 ||
+      splitOut?.childOrderId
+    ) {
+      return false;
+    }
     return true;
   }, [selectedTicket, relatedOrder]);
 
@@ -512,19 +529,30 @@ export const Support: React.FC = () => {
   const handleOpenSplitModal = () => {
     if (!selectedTicket) return;
 
-    // Default pre-select: if ticket has splitItems, select matching indexes; otherwise select all
+    setRidersNeeded(2);
+    const initialAssignments: Record<number, number> = {};
+
     if (selectedTicket.splitItems && selectedTicket.splitItems.length > 0 && candidateItems.length > 0) {
-      const preselected: number[] = [];
       const reportedNames = selectedTicket.splitItems.map((i: any) => (i.name || '').toLowerCase().trim());
       candidateItems.forEach((item, idx) => {
         if (reportedNames.includes((item.name || '').toLowerCase().trim())) {
-          preselected.push(idx);
+          initialAssignments[idx] = 2; // Hand over to Rider 2
+        } else {
+          initialAssignments[idx] = 1; // Keep with Rider 1 (current)
         }
       });
-      setSelectedSplitItemIndices(preselected.length > 0 ? preselected : [0]);
+      // If none matched, assign the first item to Rider 2
+      if (!Object.values(initialAssignments).includes(2) && candidateItems.length > 0) {
+        initialAssignments[0] = 2;
+      }
     } else {
-      setSelectedSplitItemIndices(candidateItems.map((_, idx) => idx));
+      // Default: assign item 0 to Rider 2, rest to Rider 1
+      candidateItems.forEach((_, idx) => {
+        initialAssignments[idx] = idx === 0 ? 2 : 1;
+      });
     }
+
+    setItemAssignments(initialAssignments);
 
     // Default rider fee: parent riderFeeEstimate total || deliveryFee || 45
     const defaultFee =
@@ -535,13 +563,6 @@ export const Support: React.FC = () => {
     setSplitModalOpen(true);
   };
 
-  // Toggle item selection for split
-  const toggleSplitItem = (index: number) => {
-    setSelectedSplitItemIndices((prev) =>
-      prev.includes(index) ? prev.filter((i) => i !== index) : [...prev, index]
-    );
-  };
-
   // Confirm and Execute Split Delivery in ONE atomic batch
   const handleExecuteSplitDelivery = async () => {
     if (!selectedTicket || !relatedOrder) {
@@ -549,9 +570,18 @@ export const Support: React.FC = () => {
       return;
     }
 
-    if (selectedSplitItemIndices.length === 0) {
-      showError('Please select at least one item to hand over to the second rider.');
+    if (candidateItems.length === 0) {
+      showError('No items available on order to split.');
       return;
+    }
+
+    // Verify that every extra rider (from 2 up to ridersNeeded) has at least 1 item assigned
+    for (let seq = 2; seq <= ridersNeeded; seq++) {
+      const extraItems = candidateItems.filter((_, idx) => (itemAssignments[idx] ?? 1) === seq);
+      if (extraItems.length === 0) {
+        showError(`Please assign at least one item to Rider ${seq}.`);
+        return;
+      }
     }
 
     try {
@@ -559,83 +589,93 @@ export const Support: React.FC = () => {
       const now = Timestamp.now();
       const adminName = adminProfile?.name || 'Delivio Support';
       const adminId = adminProfile?.uid || 'admin';
-
-      const chosenItems = selectedSplitItemIndices.map((idx) => candidateItems[idx]).filter(Boolean);
-
-      // Create new child order in Firestore
-      const childOrderRef = doc(collection(db, 'orders'));
-      const childOrderId = childOrderRef.id;
-      const parentNum = relatedOrder.orderNumber || selectedTicket.orderNumber || childOrderId.slice(0, 6);
-      const childOrderNum = `${parentNum}-B`;
+      const parentNum = relatedOrder.orderNumber || selectedTicket.orderNumber || relatedOrder.id.slice(0, 6);
 
       const batch = writeBatch(db);
+      const childSummaryList: any[] = [];
+      const childOrderIds: string[] = [];
 
-      // 1. Child order doc
-      const childOrderData = {
-        orderNumber: childOrderNum,
-        merchantName: relatedOrder.merchantName || '',
-        customerName: relatedOrder.customerName || selectedTicket.customerName || 'Customer',
-        customerPhone: relatedOrder.customerPhone || selectedTicket.customerPhone || '',
-        cityId: relatedOrder.cityId || selectedCityId || '',
-        serviceType: relatedOrder.serviceType || selectedTicket.serviceType || 'food',
-        pickup: relatedOrder.pickup || (relatedOrder.merchantAddress ? { address: relatedOrder.merchantAddress } : null),
-        dropoff: relatedOrder.dropoff || null,
-        fulfillment: 'delivery',
-        fulfillmentType: 'delivery',
-        items: chosenItems,
-        status: relatedOrder.status || 'Merchant accepted',
-        statusHistory: [
-          {
-            status: relatedOrder.status || 'Merchant accepted',
-            at: now,
-            note: `Split child order created from #${parentNum} by Support (${adminName})`
-          }
-        ],
-        customerId: null,
-        merchantId: null,
-        sourceCustomerId: relatedOrder.customerId || selectedTicket.customerId || null,
-        sourceMerchantId: relatedOrder.merchantId || null,
-        riderId: null,
-        riderName: null,
-        riderPhone: null,
-        isSplitChild: true,
-        splitOf: relatedOrder.id,
-        excludeRiderIds: relatedOrder.riderId
-          ? [relatedOrder.riderId]
-          : selectedTicket.riderId
-          ? [selectedTicket.riderId]
-          : [],
-        deliveryOption: 'priority',
-        dispatch: {
-          option: 'priority',
-          holdMinutes: 0,
-          maxBatch: 1,
-          poolable: false,
-          searchRadiusKm: relatedOrder.searchRadiusKm || 5
-        },
-        fees: {
-          subtotal: 0,
-          deliveryFee: Number(relatedOrder.fees?.deliveryFee || 0),
-          serviceFee: 0,
-          discount: 0,
-          total: 0
-        },
-        paymentMethod: 'split',
-        paymentStatus: 'paid',
-        cashToCollect: 0,
-        riderFeeFixed: Number(splitRiderFee) || 45,
-        createdAt: now,
-        updatedAt: now
-      };
+      // 1. Create N - 1 child orders (seq 2 to ridersNeeded)
+      for (let seq = 2; seq <= ridersNeeded; seq++) {
+        const assignedItems = candidateItems.filter((_, idx) => (itemAssignments[idx] ?? 1) === seq);
+        const childOrderRef = doc(collection(db, 'orders'));
+        const childOrderId = childOrderRef.id;
+        const childOrderNum = `${parentNum}-R${seq}`;
 
-      batch.set(childOrderRef, childOrderData);
+        const childOrderData = {
+          orderNumber: childOrderNum,
+          merchantName: relatedOrder.merchantName || '',
+          customerName: relatedOrder.customerName || selectedTicket.customerName || 'Customer',
+          customerPhone: relatedOrder.customerPhone || selectedTicket.customerPhone || '',
+          cityId: relatedOrder.cityId || selectedCityId || '',
+          serviceType: relatedOrder.serviceType || selectedTicket.serviceType || 'food',
+          pickup: relatedOrder.pickup || (relatedOrder.merchantAddress ? { address: relatedOrder.merchantAddress } : null),
+          dropoff: relatedOrder.dropoff || null,
+          fulfillment: 'delivery',
+          fulfillmentType: 'delivery',
+          items: assignedItems,
+          status: relatedOrder.status || 'Merchant accepted',
+          statusHistory: [
+            {
+              status: relatedOrder.status || 'Merchant accepted',
+              at: now,
+              note: `Split child order for Rider ${seq} of ${ridersNeeded} created from #${parentNum} by Support (${adminName})`
+            }
+          ],
+          customerId: null,
+          merchantId: null,
+          sourceCustomerId: relatedOrder.customerId || selectedTicket.customerId || null,
+          sourceMerchantId: relatedOrder.merchantId || null,
+          riderId: null,
+          riderName: null,
+          riderPhone: null,
+          isSplitChild: true,
+          seq: seq,
+          splitOf: relatedOrder.id,
+          excludeRiderIds: relatedOrder.riderId
+            ? [relatedOrder.riderId]
+            : selectedTicket.riderId
+            ? [selectedTicket.riderId]
+            : [],
+          deliveryOption: 'priority',
+          dispatch: {
+            option: 'priority',
+            holdMinutes: 0,
+            maxBatch: 1,
+            poolable: false,
+            searchRadiusKm: relatedOrder.searchRadiusKm || 5
+          },
+          fees: {
+            subtotal: 0,
+            deliveryFee: Number(relatedOrder.fees?.deliveryFee || 0),
+            serviceFee: 0,
+            discount: 0,
+            total: 0
+          },
+          paymentMethod: 'split',
+          paymentStatus: 'paid',
+          noCash: true,
+          cashToCollect: 0,
+          riderFeeFixed: Number(splitRiderFee) || 45,
+          createdAt: now,
+          updatedAt: now
+        };
+
+        batch.set(childOrderRef, childOrderData);
+        childSummaryList.push({
+          orderId: childOrderId,
+          items: assignedItems,
+          seq: seq
+        });
+        childOrderIds.push(childOrderId);
+      }
 
       // 2. Update parent order with splitOut
       const parentOrderRef = doc(db, 'orders', relatedOrder.id);
       batch.update(parentOrderRef, {
         splitOut: {
-          childOrderId,
-          items: chosenItems,
+          count: ridersNeeded,
+          children: childSummaryList,
           at: now,
           by: adminName
         },
@@ -648,19 +688,19 @@ export const Support: React.FC = () => {
         senderType: 'system',
         senderId: 'system',
         senderName: 'System',
-        text: 'Another rider is being dispatched',
+        text: `${ridersNeeded - 1} extra rider(s) dispatched for split delivery (${ridersNeeded} riders total).`,
         createdAt: now
       });
 
-      // 4. Create inbox message for customer
+      // 4. Create inbox notice for customer stating how many riders are delivering
       const customerTargetId = relatedOrder.customerId || selectedTicket.customerId;
       if (customerTargetId) {
         const inboxRef = doc(collection(db, 'inbox'));
         batch.set(inboxRef, {
           customerId: customerTargetId,
           category: 'order',
-          title: 'Two riders are delivering your order',
-          body: `Due to the size and weight of your order #${parentNum}, two riders are delivering your items safely and promptly.`,
+          title: `${ridersNeeded} riders are delivering your order`,
+          body: `Due to the size of your order #${parentNum}, ${ridersNeeded} riders are delivering your items safely and promptly. Only the first rider collects cash. Other riders show No Cash Collected.`,
           imageUrl: null,
           link: null,
           createdAt: now,
@@ -669,19 +709,20 @@ export const Support: React.FC = () => {
         });
       }
 
-      // 5. Link splitChildOrderId on supportTickets/{id}
+      // 5. Link child orders on supportTickets/{id}
       const ticketRef = doc(db, 'supportTickets', selectedTicket.id);
       batch.update(ticketRef, {
-        splitChildOrderId: childOrderId,
+        splitChildOrderIds: childOrderIds,
+        splitChildOrderId: childOrderIds[0],
         lastMessageAt: now,
-        lastMessagePreview: 'Split delivery: Another rider is being dispatched',
+        lastMessagePreview: `Split delivery: ${ridersNeeded} riders dispatched`,
         updatedAt: now
       });
 
       await batch.commit();
 
       setSplitModalOpen(false);
-      showSuccess(`Split delivery initiated! Child Order #${childOrderNum} dispatched to secondary riders.`);
+      showSuccess(`Split delivery initiated! ${ridersNeeded - 1} child order(s) dispatched for extra riders.`);
     } catch (err: any) {
       showError(err);
     } finally {
@@ -689,22 +730,22 @@ export const Support: React.FC = () => {
     }
   };
 
-  // Cancel Split Delivery (allowed before rider accepts)
-  const handleCancelSplitDelivery = async () => {
-    if (!splitChildOrder || !selectedTicket) return;
-    if (splitChildOrder.riderId) {
-      showError('Cannot cancel split delivery: A secondary rider has already accepted this booking.');
+  // Cancel Single Child Order (allowed before a rider accepts)
+  const handleCancelSingleSplitChild = async (childOrder: Order) => {
+    if (!childOrder || !selectedTicket) return;
+    if (childOrder.riderId) {
+      showError('Cannot cancel split delivery: A driver has already accepted this order.');
       return;
     }
 
     try {
-      setCancellingSplit(true);
+      setCancellingChildId(childOrder.id);
       const now = Timestamp.now();
       const adminName = adminProfile?.name || 'Delivio Support';
       const batch = writeBatch(db);
 
-      // 1. Cancel child order
-      const childRef = doc(db, 'orders', splitChildOrder.id);
+      // 1. Cancel this child order
+      const childRef = doc(db, 'orders', childOrder.id);
       batch.update(childRef, {
         status: 'Cancelled',
         cancelReason: 'Split delivery cancelled by admin',
@@ -712,39 +753,47 @@ export const Support: React.FC = () => {
         updatedAt: now
       });
 
-      // 2. Remove splitOut from parent order
+      // 2. Update parent order splitOut children list
       if (relatedOrder?.id) {
         const parentRef = doc(db, 'orders', relatedOrder.id);
-        batch.update(parentRef, {
-          splitOut: null,
-          updatedAt: now
-        });
+        const existingSplit = relatedOrder.splitOut as any;
+        if (existingSplit && Array.isArray(existingSplit.children)) {
+          const remaining = existingSplit.children.filter((c: any) => c.orderId !== childOrder.id);
+          if (remaining.length === 0) {
+            batch.update(parentRef, {
+              splitOut: null,
+              updatedAt: now
+            });
+          } else {
+            batch.update(parentRef, {
+              splitOut: {
+                ...existingSplit,
+                count: remaining.length + 1,
+                children: remaining,
+                updatedAt: now
+              },
+              updatedAt: now
+            });
+          }
+        }
       }
 
-      // 3. Remove splitChildOrderId from ticket
-      const ticketRef = doc(db, 'supportTickets', selectedTicket.id);
-      batch.update(ticketRef, {
-        splitChildOrderId: null,
-        updatedAt: now
-      });
-
-      // 4. Post system chat message
+      // 3. Post system chat message
       const sysMsgRef = doc(collection(db, 'supportTickets', selectedTicket.id, 'messages'));
       batch.set(sysMsgRef, {
         senderType: 'system',
         senderId: 'system',
         senderName: 'System',
-        text: `Split delivery was cancelled by ${adminName}.`,
+        text: `Split delivery child order for Rider ${childOrder.seq || 2} (#${childOrder.orderNumber || childOrder.id.slice(0, 6)}) was cancelled by ${adminName}.`,
         createdAt: now
       });
 
       await batch.commit();
-      setSplitChildOrder(null);
-      showSuccess('Split delivery successfully cancelled.');
+      showSuccess(`Split delivery for Rider ${childOrder.seq || 2} cancelled.`);
     } catch (err: any) {
       showError(err);
     } finally {
-      setCancellingSplit(false);
+      setCancellingChildId(null);
     }
   };
 
@@ -1458,12 +1507,12 @@ export const Support: React.FC = () => {
                 className="px-3 py-1.5 rounded-xl border border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium"
               >
                 <option value="all">All Services</option>
-                <option value="food">Food Delivery</option>
-                <option value="convenience">Convenience</option>
-                <option value="parcel">Parcel</option>
-                <option value="pabili">Pabili</option>
-                <option value="request_rider">Request Driver</option>
-                <option value="taxi">Taxi Service</option>
+                <option value="food">Delivio Food</option>
+                <option value="convenience">Delivio Mart</option>
+                <option value="parcel">Delivio Parcel</option>
+                <option value="pabili">Delivio Pabili</option>
+                <option value="request_rider">Delivio Instant</option>
+                <option value="taxi">Delivio Taxi</option>
               </select>
             </div>
           </div>
@@ -1549,9 +1598,9 @@ export const Support: React.FC = () => {
                           </span>
                         )}
 
-                        {ticket.orderNumber && (
+                        {(ticket.orderNumber || ticket.orderId) && (
                           <span className="text-gray-400 font-mono text-[10px]">
-                            #{ticket.orderNumber}
+                            {formatOrderNumber({ orderNumber: ticket.orderNumber, id: ticket.orderId })}
                           </span>
                         )}
 
@@ -1648,11 +1697,11 @@ export const Support: React.FC = () => {
                       <span>Customer: <strong>{selectedTicket.customerName || 'Customer'}</strong></span>
                     )}
 
-                    {selectedTicket.orderNumber && (
+                    {(selectedTicket.orderNumber || selectedTicket.orderId) && (
                       <>
                         <span>•</span>
                         <span className="font-mono text-amber-600 font-bold">
-                          Order #{selectedTicket.orderNumber}
+                          Order {formatOrderNumber({ orderNumber: selectedTicket.orderNumber, id: selectedTicket.orderId })}
                         </span>
                       </>
                     )}
@@ -1984,93 +2033,114 @@ export const Support: React.FC = () => {
                           className="w-full mt-1.5 py-1.5 text-xs font-bold delivio-btn-yellow rounded-xl flex items-center justify-center gap-1.5 shadow-xs"
                         >
                           <Split className="w-3.5 h-3.5" />
-                          <span>Dispatch 2nd Rider (Split)</span>
+                          <span>Split delivery</span>
                         </button>
                       )}
                     </div>
                   )}
 
-                  {/* Active Split Child Order Status Card */}
-                  {(splitChildOrder || selectedTicket.splitChildOrderId) && (
-                    <div className="p-3.5 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900 space-y-2.5">
+                  {/* Active Split Child Orders Status List */}
+                  {splitChildOrders.length > 0 && (
+                    <div className="space-y-3">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-700 dark:text-indigo-300 flex items-center gap-1">
                           <Split className="w-3.5 h-3.5 text-indigo-500" />
-                          Split Delivery (Child Order)
+                          Split Delivery ({splitChildOrders.length + 1} Riders Total)
                         </span>
-                        <span className="font-mono text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-indigo-200 dark:bg-indigo-900 text-indigo-900 dark:text-indigo-200">
-                          #{splitChildOrder?.orderNumber || selectedTicket.splitChildOrderId?.slice(0, 8)}
+                        <span className="text-[10px] font-bold text-gray-400">
+                          {splitChildOrders.length} extra child order(s)
                         </span>
                       </div>
 
-                      {loadingChildOrder ? (
-                        <div className="flex items-center gap-2 text-indigo-500 text-xs py-1">
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>Syncing secondary rider status...</span>
-                        </div>
-                      ) : splitChildOrder ? (
-                        <div className="space-y-2 text-[11px]">
-                          <div className="flex items-center justify-between">
-                            <span className="text-gray-500">Live Status:</span>
-                            <span className="font-bold px-2 py-0.5 rounded-full text-[10px] bg-indigo-100 dark:bg-indigo-900/60 text-indigo-800 dark:text-indigo-200">
-                              {splitChildOrder.status}
-                            </span>
-                          </div>
-
-                          <div className="flex items-center justify-between">
-                            <span className="text-gray-500">2nd Driver:</span>
-                            {splitChildOrder.riderName ? (
-                              <span className="font-bold text-gray-900 dark:text-white flex items-center gap-1">
-                                <Car className="w-3 h-3 text-indigo-500" />
-                                {splitChildOrder.riderName}
+                      {splitChildOrders.map((child, idx) => {
+                        const childSeq = child.seq || idx + 2;
+                        const canCancel = !child.riderId && child.status !== 'Cancelled';
+                        return (
+                          <div
+                            key={child.id}
+                            className="p-3.5 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900 space-y-2 text-[11px]"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-extrabold text-indigo-900 dark:text-indigo-200 flex items-center gap-1.5">
+                                <span className="w-5 h-5 rounded-full bg-indigo-200 dark:bg-indigo-800 text-indigo-900 dark:text-white flex items-center justify-center text-[10px] font-black">
+                                  {childSeq}
+                                </span>
+                                Rider {childSeq}
                               </span>
-                            ) : (
-                              <span className="text-amber-600 dark:text-amber-400 font-bold animate-pulse">
-                                Dispatch searching riders...
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="flex items-center justify-between">
-                            <span className="text-gray-500">Rider Pay (Fixed):</span>
-                            <span className="font-mono font-bold text-emerald-600">
-                              ₱{Number(splitChildOrder.riderFeeFixed || 45).toFixed(2)}
-                            </span>
-                          </div>
-
-                          {/* Items carried by child */}
-                          {splitChildOrder.items && splitChildOrder.items.length > 0 && (
-                            <div className="pt-1.5 border-t border-indigo-100 dark:border-indigo-900/60">
-                              <span className="text-[10px] uppercase font-bold text-gray-400">
-                                Handed-Over Items:
-                              </span>
-                              <div className="mt-1 space-y-0.5">
-                                {splitChildOrder.items.map((it: any, i: number) => (
-                                  <div key={i} className="text-gray-700 dark:text-zinc-300">
-                                    • {it.qty}x {it.name}
-                                  </div>
-                                ))}
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-mono text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-indigo-200 dark:bg-indigo-900 text-indigo-900 dark:text-indigo-200">
+                                  #{child.orderNumber || child.id.slice(0, 6)}
+                                </span>
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/60 text-indigo-800 dark:text-indigo-200">
+                                  {child.status}
+                                </span>
                               </div>
                             </div>
-                          )}
 
-                          {/* Cancel Split Delivery: allowed before a rider accepts */}
-                          {!splitChildOrder.riderId && splitChildOrder.status !== 'Cancelled' && (
-                            <button
-                              onClick={handleCancelSplitDelivery}
-                              disabled={cancellingSplit}
-                              className="w-full mt-2 py-1.5 px-2.5 rounded-xl border border-red-300 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 hover:bg-red-100 text-[11px] font-bold flex items-center justify-center gap-1.5"
-                            >
-                              {cancellingSplit ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <div className="flex items-center justify-between">
+                              <span className="text-gray-500">Assigned Driver:</span>
+                              {child.riderName ? (
+                                <span className="font-bold text-gray-900 dark:text-white flex items-center gap-1">
+                                  <Car className="w-3 h-3 text-indigo-500" />
+                                  {child.riderName}
+                                </span>
+                              ) : child.status === 'Cancelled' ? (
+                                <span className="text-red-500 font-bold">Cancelled</span>
                               ) : (
-                                <Ban className="w-3.5 h-3.5" />
+                                <span className="text-amber-600 dark:text-amber-400 font-bold animate-pulse">
+                                  Dispatch searching riders...
+                                </span>
                               )}
-                              <span>Cancel Split Delivery</span>
-                            </button>
-                          )}
-                        </div>
-                      ) : null}
+                            </div>
+
+                            <div className="flex items-center justify-between">
+                              <span className="text-gray-500">Rider Pay (Fixed):</span>
+                              <span className="font-mono font-bold text-emerald-600">
+                                ₱{Number(child.riderFeeFixed || 45).toFixed(2)}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center justify-between">
+                              <span className="text-gray-500">Cash Collection:</span>
+                              <span className="font-bold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-1.5 py-0.5 rounded text-[10px]">
+                                No Cash Collected
+                              </span>
+                            </div>
+
+                            {/* Assigned Items */}
+                            {child.items && child.items.length > 0 && (
+                              <div className="pt-1.5 border-t border-indigo-100 dark:border-indigo-900/60">
+                                <span className="text-[10px] uppercase font-bold text-gray-400">
+                                  Handed-Over Items:
+                                </span>
+                                <div className="mt-1 space-y-0.5">
+                                  {child.items.map((it: any, i: number) => (
+                                    <div key={i} className="text-gray-700 dark:text-zinc-300">
+                                      • {it.qty}x {it.name}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Cancel button per child before a rider accepts */}
+                            {canCancel && (
+                              <button
+                                onClick={() => handleCancelSingleSplitChild(child)}
+                                disabled={cancellingChildId === child.id}
+                                className="w-full mt-2 py-1.5 px-2.5 rounded-xl border border-red-300 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 hover:bg-red-100 text-[11px] font-bold flex items-center justify-center gap-1.5"
+                              >
+                                {cancellingChildId === child.id ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Ban className="w-3.5 h-3.5" />
+                                )}
+                                <span>Cancel Rider {childSeq} Delivery</span>
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
 
@@ -2082,9 +2152,9 @@ export const Support: React.FC = () => {
                   ) : !relatedOrder ? (
                     <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-850 text-center text-gray-400 space-y-2">
                       <p>No linked order record found for this ticket.</p>
-                      {selectedTicket.orderNumber && (
+                      {(selectedTicket.orderNumber || selectedTicket.orderId) && (
                         <p className="font-mono text-gray-600 dark:text-zinc-400">
-                          Order Number: #{selectedTicket.orderNumber}
+                          Order Number: {formatOrderNumber({ orderNumber: selectedTicket.orderNumber, id: selectedTicket.orderId })}
                         </p>
                       )}
                       <button
@@ -2104,7 +2174,7 @@ export const Support: React.FC = () => {
                       <div className="p-3 rounded-2xl bg-gray-50 dark:bg-zinc-850/60 border border-gray-100 dark:border-zinc-800 space-y-1.5">
                         <div className="flex items-center justify-between">
                           <span className="font-mono font-bold text-gray-900 dark:text-white">
-                            #{relatedOrder.orderNumber}
+                            {formatOrderNumber(relatedOrder)}
                           </span>
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300">
                             {relatedOrder.status}
@@ -2297,7 +2367,7 @@ export const Support: React.FC = () => {
       {/* MODAL 1: SPLIT DELIVERY DISPATCH MODAL */}
       {splitModalOpen && selectedTicket && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
-          <div className="w-full max-w-lg bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-2xl space-y-4">
+          <div className="w-full max-w-xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-gray-100 dark:border-zinc-800">
               <div className="flex items-center gap-2.5">
                 <div className="w-10 h-10 rounded-2xl bg-amber-400 flex items-center justify-center text-black font-extrabold shadow-sm">
@@ -2305,10 +2375,10 @@ export const Support: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
-                    Split Bulky Delivery
+                    Split Delivery with Several Riders
                   </h3>
                   <p className="text-xs text-gray-500">
-                    Dispatch a secondary rider with Priority delivery for excess items.
+                    Dispatch extra riders with Priority delivery for items exceeding vehicle capacity.
                   </p>
                 </div>
               </div>
@@ -2320,71 +2390,155 @@ export const Support: React.FC = () => {
               </button>
             </div>
 
-            <div className="p-3 rounded-2xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/60 text-xs text-blue-900 dark:text-blue-200 flex items-start gap-2">
-              <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
-              <div className="space-y-1">
-                <p className="font-bold">Automated Multi-Rider Dispatch</p>
-                <p className="text-[11px] leading-relaxed text-blue-800 dark:text-blue-300">
-                  A child order will be dispatched to nearby available drivers excluding the current rider (
-                  {relatedOrder?.riderName || selectedTicket.riderName || 'Driver'}). The customer will receive an
-                  inbox notification that two riders are delivering their order.
+            {/* Note on Cash Collection */}
+            <div className="p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800/80 text-xs text-amber-900 dark:text-amber-200 flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <p className="font-extrabold text-[12px]">Cash Collection Rule</p>
+                <p className="text-[11px] leading-relaxed text-amber-900 dark:text-amber-200 font-semibold">
+                  Only the first rider collects cash. Other riders show No Cash Collected.
                 </p>
               </div>
             </div>
 
-            {/* Checklist of Items to Hand Over */}
+            {/* Riders Needed Selector (2 to 5, default 2) */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-zinc-300">
+                  Riders Needed:
+                </label>
+                <span className="text-[11px] text-gray-500 font-semibold">
+                  Rider 1 is current driver ({relatedOrder?.riderName || selectedTicket.riderName || 'Assigned'})
+                </span>
+              </div>
+              <div className="grid grid-cols-4 gap-2">
+                {[2, 3, 4, 5].map((num) => (
+                  <button
+                    key={num}
+                    type="button"
+                    onClick={() => {
+                      setRidersNeeded(num);
+                      // If any item was assigned to a rider beyond num, cap it to num
+                      setItemAssignments((prev) => {
+                        const next = { ...prev };
+                        Object.keys(next).forEach((k) => {
+                          const idx = Number(k);
+                          if (next[idx] > num) {
+                            next[idx] = num;
+                          }
+                        });
+                        return next;
+                      });
+                    }}
+                    className={`py-2 px-3 rounded-2xl border text-xs font-extrabold flex flex-col items-center justify-center transition-all ${
+                      ridersNeeded === num
+                        ? 'bg-amber-400 text-black border-amber-500 shadow-xs'
+                        : 'bg-white dark:bg-zinc-800 border-gray-200 dark:border-zinc-700 text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-zinc-750'
+                    }`}
+                  >
+                    <span>{num} Riders</span>
+                    <span className="text-[10px] font-normal opacity-80">
+                      {num === 2 ? '1 extra rider' : `${num - 1} extra riders`}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Item Assignment Grid */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <label className="block text-xs font-bold uppercase tracking-wider text-gray-500">
-                  Select Items to Hand Over to 2nd Rider:
+                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-zinc-300">
+                  Item Assignment Grid:
                 </label>
-                <span className="text-[11px] font-bold text-amber-600">
-                  {selectedSplitItemIndices.length} item(s) selected
+                <span className="text-[11px] font-semibold text-gray-500">
+                  Assign each handed-over item to Rider 2{ridersNeeded > 2 ? `, Rider 3...` : ''}
                 </span>
               </div>
 
-              <div className="max-h-52 overflow-y-auto space-y-1.5 border border-gray-200 dark:border-zinc-800 rounded-2xl p-2.5 bg-gray-50/50 dark:bg-zinc-850/50">
+              <div className="max-h-56 overflow-y-auto space-y-2 border border-gray-200 dark:border-zinc-800 rounded-2xl p-2.5 bg-gray-50/50 dark:bg-zinc-850/50">
                 {candidateItems.length === 0 ? (
                   <p className="text-xs text-gray-400 text-center py-4">No items found on order.</p>
                 ) : (
                   candidateItems.map((item, idx) => {
-                    const isChecked = selectedSplitItemIndices.includes(idx);
+                    const assignedRider = itemAssignments[idx] ?? 1;
                     return (
                       <div
                         key={idx}
-                        onClick={() => toggleSplitItem(idx)}
-                        className={`p-2.5 rounded-xl border flex items-center justify-between cursor-pointer transition-colors ${
-                          isChecked
-                            ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800'
-                            : 'bg-white dark:bg-zinc-800 border-gray-200 dark:border-zinc-700 opacity-70'
-                        }`}
+                        className="p-2.5 rounded-xl border bg-white dark:bg-zinc-800 border-gray-200 dark:border-zinc-750 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-2xs"
                       >
-                        <div className="flex items-center gap-2.5">
-                          {isChecked ? (
-                            <CheckSquare className="w-4 h-4 text-amber-500 shrink-0" />
-                          ) : (
-                            <Square className="w-4 h-4 text-gray-400 shrink-0" />
-                          )}
-                          <span className="text-xs font-bold text-gray-900 dark:text-white">
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-bold text-gray-900 dark:text-white truncate">
                             {item.qty || 1}x {item.name}
-                          </span>
+                          </div>
+                          {item.price && (
+                            <div className="font-mono text-[11px] text-gray-500">
+                              ₱{Number(item.price * (item.qty || 1)).toFixed(2)}
+                            </div>
+                          )}
                         </div>
-                        {item.price && (
-                          <span className="font-mono text-xs text-gray-500">
-                            ₱{Number(item.price * (item.qty || 1)).toFixed(2)}
-                          </span>
-                        )}
+
+                        {/* Rider Assignment Options */}
+                        <div className="flex items-center gap-1 shrink-0 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => setItemAssignments((prev) => ({ ...prev, [idx]: 1 }))}
+                            className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all ${
+                              assignedRider === 1
+                                ? 'bg-zinc-900 text-white dark:bg-white dark:text-black shadow-2xs'
+                                : 'bg-gray-100 dark:bg-zinc-700 text-gray-600 dark:text-zinc-300 hover:bg-gray-200 dark:hover:bg-zinc-650'
+                            }`}
+                          >
+                            Rider 1 (Current)
+                          </button>
+                          {Array.from({ length: ridersNeeded - 1 }, (_, i) => i + 2).map((rNum) => (
+                            <button
+                              key={rNum}
+                              type="button"
+                              onClick={() => setItemAssignments((prev) => ({ ...prev, [idx]: rNum }))}
+                              className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all ${
+                                assignedRider === rNum
+                                  ? 'bg-amber-400 text-black font-extrabold shadow-2xs ring-1 ring-amber-500'
+                                  : 'bg-gray-100 dark:bg-zinc-700 text-gray-600 dark:text-zinc-300 hover:bg-gray-200 dark:hover:bg-zinc-650'
+                              }`}
+                            >
+                              Rider {rNum}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     );
                   })
                 )}
+              </div>
+
+              {/* Assignment Summary Pills */}
+              <div className="flex flex-wrap gap-2 pt-1">
+                <span className="px-2.5 py-0.5 rounded-lg text-[10px] font-bold bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-300">
+                  Rider 1 (Current): {candidateItems.filter((_, idx) => (itemAssignments[idx] ?? 1) === 1).length} item(s)
+                </span>
+                {Array.from({ length: ridersNeeded - 1 }, (_, i) => i + 2).map((rNum) => {
+                  const count = candidateItems.filter((_, idx) => (itemAssignments[idx] ?? 1) === rNum).length;
+                  return (
+                    <span
+                      key={rNum}
+                      className={`px-2.5 py-0.5 rounded-lg text-[10px] font-bold border ${
+                        count > 0
+                          ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 border-emerald-300'
+                          : 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 border-red-300'
+                      }`}
+                    >
+                      Rider {rNum}: {count} item(s) {count === 0 && '⚠ Need ≥ 1 item'}
+                    </span>
+                  );
+                })}
               </div>
             </div>
 
             {/* Rider Fee input */}
             <div>
               <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-1">
-                Fixed Payout for Secondary Rider (₱):
+                Fixed Payout per Extra Rider (₱):
               </label>
               <input
                 type="number"
@@ -2395,8 +2549,7 @@ export const Support: React.FC = () => {
                 className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
               />
               <p className="text-[10px] text-gray-400 mt-1">
-                Default derived from the original delivery fee structure (₱
-                {Number(relatedOrder?.fees?.deliveryFee || 45).toFixed(2)}).
+                Each extra rider (Riders 2..{ridersNeeded}) receives this fixed fee.
               </p>
             </div>
 
@@ -2412,11 +2565,11 @@ export const Support: React.FC = () => {
               <button
                 type="button"
                 onClick={handleExecuteSplitDelivery}
-                disabled={splittingDelivery || selectedSplitItemIndices.length === 0}
+                disabled={splittingDelivery}
                 className="delivio-btn-yellow px-5 py-2 text-xs font-extrabold rounded-xl flex items-center gap-1.5 shadow-sm disabled:opacity-50"
               >
                 {splittingDelivery && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                <span>Confirm & Dispatch 2nd Rider</span>
+                <span>Confirm & Dispatch {ridersNeeded - 1} Extra Rider(s)</span>
               </button>
             </div>
           </div>

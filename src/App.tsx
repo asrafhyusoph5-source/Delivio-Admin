@@ -22,6 +22,7 @@ import { BannersPromos } from './pages/BannersPromos';
 import { Inbox } from './pages/Inbox';
 import { Support } from './pages/Support';
 import { TiersCoins } from './pages/TiersCoins';
+import { Quests } from './pages/Quests';
 import { Notifications } from './pages/Notifications';
 import { Reports } from './pages/Reports';
 import { AuditLog } from './pages/AuditLog';
@@ -49,6 +50,7 @@ export default function App() {
                     <Route path="wallet-transfers" element={<WalletTransfers />} />
                     <Route path="merchants" element={<Merchants />} />
                     <Route path="riders" element={<Riders />} />
+                    <Route path="quests" element={<Quests />} />
                     <Route path="applications" element={<Applications />} />
                     <Route path="rates" element={<DeliveryRates />} />
                     <Route path="services-by-city" element={<ServicesByCity />} />

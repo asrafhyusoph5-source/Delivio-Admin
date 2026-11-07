@@ -13,6 +13,7 @@ import { useCity } from '../context/CityContext';
 import { useBadgeCounts } from '../context/BadgeCountsContext';
 import type { Order, Merchant, UserProfile } from '../types';
 import { VEHICLE_TYPES, VEHICLE_LABELS, type VehicleType } from '../constants';
+import { formatOrderNumber } from '../utils/orderNumber';
 import {
   ShoppingBag,
   DollarSign,
@@ -336,12 +337,12 @@ export const Dashboard: React.FC = () => {
     });
 
     return [
-      { name: 'Food', value: counts.food, color: '#FFC107' },
-      { name: 'Convenience', value: counts.convenience, color: '#3B82F6' },
-      { name: 'Parcel', value: counts.parcel, color: '#10B981' },
-      { name: 'Pabili', value: counts.pabili, color: '#EC4899' },
-      { name: 'Request Driver', value: counts.request_rider, color: '#8B5CF6' },
-      { name: 'Taxi Service', value: counts.taxi, color: '#0EA5E9' }
+      { name: 'Delivio Food', value: counts.food, color: '#FFC107' },
+      { name: 'Delivio Mart', value: counts.convenience, color: '#3B82F6' },
+      { name: 'Delivio Parcel', value: counts.parcel, color: '#10B981' },
+      { name: 'Delivio Pabili', value: counts.pabili, color: '#EC4899' },
+      { name: 'Delivio Instant', value: counts.request_rider, color: '#8B5CF6' },
+      { name: 'Delivio Taxi', value: counts.taxi, color: '#0EA5E9' }
     ];
   }, [filteredOrders]);
 
@@ -654,7 +655,7 @@ export const Dashboard: React.FC = () => {
                 >
                   <div>
                     <span className="font-bold text-xs text-gray-900 dark:text-white">
-                      #{ord.orderNumber}
+                      {formatOrderNumber(ord)}
                     </span>
                     <p className="text-[11px] text-gray-600 dark:text-zinc-400">
                       {ord.customerName} • {ord.merchantName || ord.serviceType}
@@ -966,7 +967,7 @@ export const Dashboard: React.FC = () => {
           <div>
             <h3 className="font-bold text-gray-900 dark:text-white text-base flex items-center gap-2">
               <Car className="w-5 h-5 text-amber-500" />
-              Taxi Service by Vehicle Type
+              Delivio Taxi by Vehicle Type
             </h3>
             <p className="text-xs text-gray-500 dark:text-zinc-400">
               Trip volume and gross passenger ride revenue by vehicle class

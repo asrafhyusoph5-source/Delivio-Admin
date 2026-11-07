@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import L from 'leaflet';
 import {
   db,
@@ -47,6 +48,7 @@ import { TableSkeleton } from '../components/common/SkeletonLoader';
 const APP_STATUSES = ['Pending', 'Under Review', 'Needs Info', 'Approved', 'Rejected'];
 
 export const Applications: React.FC = () => {
+  const navigate = useNavigate();
   const { adminProfile } = useAuth();
   const { showSuccess, showError } = useToast();
 
@@ -199,13 +201,18 @@ export const Applications: React.FC = () => {
 
   // Merchant Approve (One Batch)
   const handleApproveMerchant = async (app: MerchantApplication) => {
+    if (app.status === 'Approved') {
+      showError('Already approved');
+      return;
+    }
     try {
       const batch = writeBatch(db);
-      const uid = app.uid || app.id;
+      // The applicant's own UID is the same as the application document ID
+      const applicantUid = app.id;
       const now = Timestamp.now();
 
-      // 1. set users/{uid}
-      const userRef = doc(db, 'users', uid);
+      // 1. set users/{applicantUid}
+      const userRef = doc(db, 'users', applicantUid);
       batch.set(
         userRef,
         {
@@ -214,14 +221,14 @@ export const Applications: React.FC = () => {
           name: app.ownerName,
           phone: app.phone,
           status: 'active',
-          merchantId: uid,
+          merchantId: applicantUid,
           createdAt: now
         },
         { merge: true }
       );
 
-      // 2. set merchants/{uid}
-      const merchRef = doc(db, 'merchants', uid);
+      // 2. set merchants/{applicantUid} with exact fields: type, typeLocked true, status "active", isOpen false, cityId, location
+      const merchRef = doc(db, 'merchants', applicantUid);
       batch.set(merchRef, {
         name: app.businessName,
         ownerName: app.ownerName,
@@ -232,14 +239,20 @@ export const Applications: React.FC = () => {
         cityId: app.cityId,
         status: 'active',
         isOpen: false,
-        ownerUid: uid,
-        cuisineTags: [],
-        address: app.address,
-        lat: app.lat,
-        lng: app.lng,
+        ownerUid: applicantUid,
+        location: {
+          lat: Number(app.lat) || 0,
+          lng: Number(app.lng) || 0,
+          address: app.address || '',
+          updatedAt: now
+        },
+        address: app.address || '',
+        lat: Number(app.lat) || 0,
+        lng: Number(app.lng) || 0,
         logoUrl: app.logoUrl || '',
         bannerUrl: app.storePhotoUrl || '',
         commissionRate: 15,
+        cuisineTags: [],
         createdAt: now
       });
 
@@ -259,25 +272,31 @@ export const Applications: React.FC = () => {
         action: 'APPROVE_MERCHANT_APPLICATION',
         entityType: 'merchantApplication',
         entityId: app.id,
-        details: `Approved merchant application for ${app.businessName} (UID: ${uid})`
+        details: `Approved merchant application for ${app.businessName} (UID: ${applicantUid})`
       });
 
-      showSuccess(`Merchant ${app.businessName} approved! Account and store created.`);
+      showSuccess(`Merchant approved! New profile ID: ${applicantUid}`);
       setSelectedMerchantApp(null);
       fetchApplications();
+      navigate(`/merchants?search=${applicantUid}`);
     } catch (err: any) {
       showError(err);
     }
   };
 
   // Driver Approve (One Batch)
-  // Creates riders/{uid} with allowedServices and activeServices from SERVICES_BY_VEHICLE
+  // Creates riders/{applicantUid} with allowedServices and activeServices from vehicle type
   const handleApproveDriver = async (app: RiderApplication) => {
+    if (app.status === 'Approved') {
+      showError('Already approved');
+      return;
+    }
     try {
       const batch = writeBatch(db);
-      const uid = app.uid || app.id;
+      // The applicant's own UID is the same as the application document ID
+      const applicantUid = app.id;
       const now = Timestamp.now();
-      const riderCode = `DLV-D-${Math.floor(100000 + Math.random() * 900000)}`;
+      const riderCode = app.riderCode || `DLV-D-${Math.floor(100000 + Math.random() * 900000)}`;
 
       // Normalize vehicleType
       const rawVType = (app.vehicleType || 'motorcycle').toLowerCase();
@@ -295,8 +314,8 @@ export const Applications: React.FC = () => {
       const activeServices = [...allowedServices];
       const seats = app.seats || (vtype === 'motorcycle' ? 1 : vtype === 'tricycle' ? 3 : vtype === 'car8' ? 8 : 4);
 
-      // 1. set users/{uid}
-      const userRef = doc(db, 'users', uid);
+      // 1. set users/{applicantUid}
+      const userRef = doc(db, 'users', applicantUid);
       batch.set(
         userRef,
         {
@@ -306,13 +325,14 @@ export const Applications: React.FC = () => {
           phone: app.phone,
           status: 'active',
           walletBalance: 0,
+          coins: 0,
           createdAt: now
         },
         { merge: true }
       );
 
-      // 2. set riders/{uid}
-      const riderRef = doc(db, 'riders', uid);
+      // 2. set riders/{applicantUid} with exact fields: riderCode, allowedServices & activeServices from vehicle type, status "active", isOnline false, cityId, vehicleType, walletBalance 0, coins 0
+      const riderRef = doc(db, 'riders', applicantUid);
       batch.set(riderRef, {
         name: app.name,
         email: app.email,
@@ -329,8 +349,8 @@ export const Applications: React.FC = () => {
         allowedServices,
         activeServices,
         isOnline: false,
-        coins: 0,
         walletBalance: 0,
+        coins: 0,
         cashRemitted: 0,
         rating: 5,
         createdAt: now
@@ -352,12 +372,13 @@ export const Applications: React.FC = () => {
         action: 'APPROVE_DRIVER_APPLICATION',
         entityType: 'riderApplication',
         entityId: app.id,
-        details: `Approved driver application for ${app.name} (${VEHICLE_LABELS[vtype]}, Code: ${riderCode})`
+        details: `Approved driver application for ${app.name} (${VEHICLE_LABELS[vtype]}, Profile UID: ${applicantUid}, Code: ${riderCode})`
       });
 
-      showSuccess(`Driver ${app.name} approved with ID ${riderCode}!`);
+      showSuccess(`Driver approved! New profile ID: ${applicantUid}`);
       setSelectedRiderApp(null);
       fetchApplications();
+      navigate(`/riders?search=${applicantUid}`);
     } catch (err: any) {
       showError(err);
     }
@@ -809,31 +830,51 @@ export const Applications: React.FC = () => {
             </div>
 
             {/* Footer Action Bar */}
-            {selectedMerchantApp.status !== 'Approved' && (
-              <div className="p-5 border-t border-gray-200 dark:border-zinc-800 flex items-center justify-between gap-3 bg-gray-50 dark:bg-zinc-900">
-                <div className="flex items-center gap-2">
+            <div className="p-5 border-t border-gray-200 dark:border-zinc-800 flex items-center justify-between gap-3 bg-gray-50 dark:bg-zinc-900">
+              {selectedMerchantApp.status === 'Approved' ? (
+                <div className="flex items-center justify-between w-full">
+                  <span className="px-3 py-1.5 rounded-xl bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 text-xs font-bold flex items-center gap-1.5 border border-emerald-300">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    Already approved
+                  </span>
                   <button
-                    onClick={() => setActionType('reject')}
-                    className="px-4 py-2 rounded-xl border border-red-300 text-red-600 text-xs font-bold hover:bg-red-50"
+                    type="button"
+                    onClick={() => {
+                      setSelectedMerchantApp(null);
+                      navigate(`/merchants?search=${selectedMerchantApp.id}`);
+                    }}
+                    className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs"
                   >
-                    Reject
-                  </button>
-                  <button
-                    onClick={() => setActionType('needs_info')}
-                    className="px-4 py-2 rounded-xl border border-amber-300 text-amber-700 text-xs font-bold hover:bg-amber-50"
-                  >
-                    Needs Info
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Open Merchant Profile</span>
                   </button>
                 </div>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setActionType('reject')}
+                      className="px-4 py-2 rounded-xl border border-red-300 text-red-600 text-xs font-bold hover:bg-red-50"
+                    >
+                      Reject
+                    </button>
+                    <button
+                      onClick={() => setActionType('needs_info')}
+                      className="px-4 py-2 rounded-xl border border-amber-300 text-amber-700 text-xs font-bold hover:bg-amber-50"
+                    >
+                      Needs Info
+                    </button>
+                  </div>
 
-                <button
-                  onClick={() => handleApproveMerchant(selectedMerchantApp)}
-                  className="delivio-btn-yellow px-6 py-2.5 rounded-xl text-xs font-black shadow-md shadow-amber-400/20"
-                >
-                  Approve Application
-                </button>
-              </div>
-            )}
+                  <button
+                    onClick={() => handleApproveMerchant(selectedMerchantApp)}
+                    className="delivio-btn-yellow px-6 py-2.5 rounded-xl text-xs font-black shadow-md shadow-amber-400/20"
+                  >
+                    Approve Application
+                  </button>
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -1030,31 +1071,51 @@ export const Applications: React.FC = () => {
             </div>
 
             {/* Footer Action Bar */}
-            {selectedRiderApp.status !== 'Approved' && (
-              <div className="p-5 border-t border-gray-200 dark:border-zinc-800 flex items-center justify-between gap-3 bg-gray-50 dark:bg-zinc-900">
-                <div className="flex items-center gap-2">
+            <div className="p-5 border-t border-gray-200 dark:border-zinc-800 flex items-center justify-between gap-3 bg-gray-50 dark:bg-zinc-900">
+              {selectedRiderApp.status === 'Approved' ? (
+                <div className="flex items-center justify-between w-full">
+                  <span className="px-3 py-1.5 rounded-xl bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 text-xs font-bold flex items-center gap-1.5 border border-emerald-300">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    Already approved
+                  </span>
                   <button
-                    onClick={() => setActionType('reject')}
-                    className="px-4 py-2 rounded-xl border border-red-300 text-red-600 text-xs font-bold hover:bg-red-50"
+                    type="button"
+                    onClick={() => {
+                      setSelectedRiderApp(null);
+                      navigate(`/riders?search=${selectedRiderApp.id}`);
+                    }}
+                    className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs"
                   >
-                    Reject
-                  </button>
-                  <button
-                    onClick={() => setActionType('needs_info')}
-                    className="px-4 py-2 rounded-xl border border-amber-300 text-amber-700 text-xs font-bold hover:bg-amber-50"
-                  >
-                    Needs Info
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Open Driver Profile</span>
                   </button>
                 </div>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setActionType('reject')}
+                      className="px-4 py-2 rounded-xl border border-red-300 text-red-600 text-xs font-bold hover:bg-red-50"
+                    >
+                      Reject
+                    </button>
+                    <button
+                      onClick={() => setActionType('needs_info')}
+                      className="px-4 py-2 rounded-xl border border-amber-300 text-amber-700 text-xs font-bold hover:bg-amber-50"
+                    >
+                      Needs Info
+                    </button>
+                  </div>
 
-                <button
-                  onClick={() => handleApproveDriver(selectedRiderApp)}
-                  className="delivio-btn-yellow px-6 py-2.5 rounded-xl text-xs font-black shadow-md shadow-amber-400/20"
-                >
-                  Approve Driver Application
-                </button>
-              </div>
-            )}
+                  <button
+                    onClick={() => handleApproveDriver(selectedRiderApp)}
+                    className="delivio-btn-yellow px-6 py-2.5 rounded-xl text-xs font-black shadow-md shadow-amber-400/20"
+                  >
+                    Approve Driver Application
+                  </button>
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}
