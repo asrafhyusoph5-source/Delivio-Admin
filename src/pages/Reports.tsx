@@ -10,6 +10,7 @@ import {
 import { useCity } from '../context/CityContext';
 import { useToast } from '../context/ToastContext';
 import { exportToCsv } from '../utils/exportCsv';
+import { ExportDateModal } from '../components/common/ExportDateModal';
 import { formatTimestamp } from '../utils/date';
 import type { Order } from '../types';
 import {
@@ -297,8 +298,28 @@ export const Reports: React.FC = () => {
     };
   }, [filteredOrders]);
 
-  const handleExportCsv = () => {
-    const rows = filteredOrders.map((o) => ({
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+
+  const handleExportCsvWithDateFilter = (startDate?: string, endDate?: string) => {
+    let list = [...orders];
+    if (startDate) {
+      const startMs = new Date(`${startDate}T00:00:00`).getTime();
+      list = list.filter((o) => {
+        const t = o.createdAt?.toMillis ? o.createdAt.toMillis() : new Date(o.createdAt || 0).getTime();
+        return t >= startMs;
+      });
+    }
+    if (endDate) {
+      const endMs = new Date(`${endDate}T23:59:59`).getTime();
+      list = list.filter((o) => {
+        const t = o.createdAt?.toMillis ? o.createdAt.toMillis() : new Date(o.createdAt || 0).getTime();
+        return t <= endMs;
+      });
+    } else if (!startDate && !endDate) {
+      list = filteredOrders;
+    }
+
+    const rows = list.map((o) => ({
       OrderNumber: o.orderNumber,
       Fulfillment: o.serviceType === 'taxi' ? 'Delivio Taxi Ride' : o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
       Service: SERVICE_LABELS[o.serviceType] || o.serviceType,
@@ -350,7 +371,7 @@ export const Reports: React.FC = () => {
           </div>
 
           <button
-            onClick={handleExportCsv}
+            onClick={() => setExportModalOpen(true)}
             className="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs font-bold text-gray-700 dark:text-zinc-300 hover:bg-gray-50 shadow-xs"
           >
             <Download className="w-4 h-4" />
@@ -698,6 +719,18 @@ export const Reports: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Export Reports Date Filter Modal */}
+      {exportModalOpen && (
+        <ExportDateModal
+          isOpen={exportModalOpen}
+          onClose={() => setExportModalOpen(false)}
+          title="Export Financial & Performance Report"
+          description="Filter orders included in the analytical report by order date or export current period."
+          totalRecords={orders.length}
+          onExport={handleExportCsvWithDateFilter}
+        />
+      )}
     </div>
   );
 };

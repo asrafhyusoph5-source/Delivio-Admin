@@ -2,6 +2,9 @@ import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
   getAuth,
   signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendEmailVerification,
+  updateProfile,
   signOut,
   sendPasswordResetEmail,
   updatePassword,
@@ -30,6 +33,7 @@ import {
   arrayUnion,
   increment,
   deleteField,
+  orderBy,
   Timestamp,
   serverTimestamp,
   type QuerySnapshot,
@@ -53,6 +57,9 @@ export const db = getFirestore(app);
 
 export {
   signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendEmailVerification,
+  updateProfile,
   signOut,
   sendPasswordResetEmail,
   updatePassword,
@@ -78,6 +85,7 @@ export {
   arrayUnion,
   increment,
   deleteField,
+  orderBy,
   Timestamp,
   serverTimestamp,
   type QuerySnapshot,

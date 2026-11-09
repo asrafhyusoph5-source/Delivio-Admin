@@ -43,7 +43,8 @@ import {
   ShieldAlert,
   Wallet,
   Clock,
-  Eye
+  Eye,
+  Calendar
 } from 'lucide-react';
 
 type SendToTarget =
@@ -105,6 +106,15 @@ export const Inbox: React.FC = () => {
   // Link target states
   const [linkType, setLinkType] = useState<LinkType>('none');
   const [selectedMerchantId, setSelectedMerchantId] = useState('');
+
+  // Scheduled announcement states
+  const [sendLater, setSendLater] = useState(false);
+  const [scheduledDate, setScheduledDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return d.toISOString().split('T')[0];
+  });
+  const [scheduledTime, setScheduledTime] = useState('09:00');
 
   // UI / Modal states
   const [sending, setSending] = useState(false);
@@ -339,6 +349,18 @@ export const Inbox: React.FC = () => {
       return;
     }
 
+    if (sendLater) {
+      if (!scheduledDate || !scheduledTime) {
+        showError('Please select both a date and time to schedule the announcement.');
+        return;
+      }
+      const scheduledDateTime = new Date(`${scheduledDate}T${scheduledTime}`);
+      if (isNaN(scheduledDateTime.getTime()) || scheduledDateTime.getTime() <= Date.now()) {
+        showError('Scheduled date & time must be in the future.');
+        return;
+      }
+    }
+
     setConfirmSendModalOpen(true);
   };
 
@@ -366,8 +388,15 @@ export const Inbox: React.FC = () => {
         };
       }
 
+      // Format scheduled sendAt timestamp
+      let sendAtTimestamp: Timestamp | null = null;
+      if (sendLater) {
+        const scheduledDateTime = new Date(`${scheduledDate}T${scheduledTime}`);
+        sendAtTimestamp = Timestamp.fromDate(scheduledDateTime);
+      }
+
       // Prepare payload matching exact user specification:
-      // inbox/{id} {title, body, category, imageUrl, link {merchantId, category}, audience, customerId, riderId, merchantId, createdAt, createdBy, createdByName}
+      // inbox/{id} {title, body, category, imageUrl, link {merchantId, category}, audience, customerId, riderId, merchantId, createdAt, createdBy, createdByName, sendAt}
       // using null for unused fields
       const now = Timestamp.now();
       const payload: Record<string, any> = {
@@ -390,6 +419,7 @@ export const Inbox: React.FC = () => {
         createdAt: now,
         createdBy: adminProfile?.uid || 'admin',
         createdByName: adminProfile?.name || 'Administrator',
+        sendAt: sendAtTimestamp,
         // Auxiliary metadata for convenient UI rendering
         customerName: sendTo === 'one_customer' ? selectedCustomer?.name || null : null,
         customerEmail: sendTo === 'one_customer' ? selectedCustomer?.email || null : null,
@@ -403,17 +433,24 @@ export const Inbox: React.FC = () => {
       const docRef = await addDoc(collection(db, 'inbox'), payload);
 
       const recipientInfo = getRecipientSummary();
+      const isScheduled = !!sendAtTimestamp;
       await logAuditEvent({
         adminId: adminProfile?.uid || 'admin',
         adminName: adminProfile?.name || 'Administrator',
         adminEmail: adminProfile?.email,
-        action: 'SEND_INBOX_MESSAGE',
+        action: isScheduled ? 'SCHEDULE_INBOX_ANNOUNCEMENT' : 'SEND_INBOX_MESSAGE',
         entityType: 'inbox',
         entityId: docRef.id,
-        details: `Dispatched [${category.toUpperCase()}] message "${title.trim()}" to ${recipientInfo.title}`
+        details: isScheduled
+          ? `Scheduled [${category.toUpperCase()}] message "${title.trim()}" for ${sendAtTimestamp?.toDate().toLocaleString()} to ${recipientInfo.title}`
+          : `Dispatched [${category.toUpperCase()}] message "${title.trim()}" to ${recipientInfo.title}`
       });
 
-      showSuccess(`Message dispatched to ${recipientInfo.title}!`);
+      showSuccess(
+        isScheduled
+          ? `Announcement scheduled for ${sendAtTimestamp?.toDate().toLocaleString()} to ${recipientInfo.title}!`
+          : `Message dispatched to ${recipientInfo.title}!`
+      );
 
       // Reset form
       setTitle('');
@@ -422,6 +459,7 @@ export const Inbox: React.FC = () => {
       setImageLoadError(false);
       setLinkType('none');
       setSelectedMerchantId('');
+      setSendLater(false);
       if (sendTo === 'one_customer') {
         setSelectedCustomer(null);
         setCustomerSearchQuery('');
@@ -1170,13 +1208,70 @@ export const Inbox: React.FC = () => {
               )}
             </div>
 
+            {/* 7. Send Later (Schedule Announcement) */}
+            <div className="p-3.5 rounded-2xl border border-purple-200 dark:border-purple-900/40 bg-purple-50/50 dark:bg-zinc-850 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+                  <div>
+                    <label className="text-xs font-bold text-gray-900 dark:text-white cursor-pointer select-none">
+                      Send later (Schedule Announcement)
+                    </label>
+                    <p className="text-[10px] text-gray-500 dark:text-zinc-400">
+                      Target audience: customers, merchants, drivers
+                    </p>
+                  </div>
+                </div>
+
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={sendLater}
+                    onChange={(e) => setSendLater(e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-5 bg-gray-300 peer-focus:outline-none rounded-full peer dark:bg-zinc-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-600"></div>
+                </label>
+              </div>
+
+              {sendLater && (
+                <div className="pt-2 border-t border-purple-100 dark:border-zinc-800 grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                      Scheduled Date
+                    </label>
+                    <input
+                      type="date"
+                      value={scheduledDate}
+                      min={new Date().toISOString().split('T')[0]}
+                      onChange={(e) => setScheduledDate(e.target.value)}
+                      required={sendLater}
+                      className="w-full px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                      Scheduled Time
+                    </label>
+                    <input
+                      type="time"
+                      value={scheduledTime}
+                      onChange={(e) => setScheduledTime(e.target.value)}
+                      required={sendLater}
+                      className="w-full px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* Submit Button (Opens confirmation dialog) */}
             <button
               type="submit"
               className="w-full delivio-btn-yellow py-3 rounded-2xl text-xs font-extrabold flex items-center justify-center gap-2 shadow-lg shadow-amber-400/20 active:scale-[0.99] transition-transform"
             >
               <Send className="w-4 h-4" />
-              <span>Review & Dispatch Message</span>
+              <span>{sendLater ? 'Review & Schedule Announcement' : 'Review & Dispatch Message'}</span>
             </button>
           </form>
         </div>
@@ -1310,6 +1405,22 @@ export const Inbox: React.FC = () => {
                       >
                         {msg.category}
                       </span>
+
+                      {/* Scheduled sendAt Badge */}
+                      {msg.sendAt && (
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-extrabold border ${
+                            (msg.sendAt.toMillis ? msg.sendAt.toMillis() : new Date(msg.sendAt).getTime()) > Date.now()
+                              ? 'bg-purple-100 text-purple-700 dark:bg-purple-950/70 dark:text-purple-300 border-purple-300 dark:border-purple-800'
+                              : 'bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400 border-gray-200 dark:border-zinc-700'
+                          }`}
+                        >
+                          <Clock className="w-2.5 h-2.5" />
+                          {(msg.sendAt.toMillis ? msg.sendAt.toMillis() : new Date(msg.sendAt).getTime()) > Date.now()
+                            ? `Scheduled: ${msg.sendAt.toDate ? msg.sendAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' }) : 'Future'}`
+                            : 'Released'}
+                        </span>
+                      )}
 
                       {/* Recipient Pill */}
                       {renderRecipientPill(msg)}

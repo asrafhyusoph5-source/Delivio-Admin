@@ -95,6 +95,8 @@ export const SERVICE_LABELS: Record<OrderServiceType, string> = {
   taxi: 'Delivio Taxi'
 };
 
+export const SERVICE_NAMES = SERVICE_LABELS;
+
 export const SERVICE_SUBTITLES: Record<OrderServiceType, string> = {
   food: 'Food Delivery',
   convenience: 'Convenience Store',

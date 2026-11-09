@@ -37,6 +37,7 @@ import {
   Calendar
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
+import { PromoCodesTab } from '../components/promos/PromoCodesTab';
 
 export const BannersPromos: React.FC = () => {
   const { adminProfile } = useAuth();
@@ -47,8 +48,8 @@ export const BannersPromos: React.FC = () => {
   const [merchants, setMerchants] = useState<Merchant[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Active sub-tab: 'banners' | 'requests'
-  const [activeTab, setActiveTab] = useState<'banners' | 'requests'>('banners');
+  // Active sub-tab: 'banners' | 'requests' | 'codes'
+  const [activeTab, setActiveTab] = useState<'banners' | 'requests' | 'codes'>('banners');
 
   // Banner Create / Edit Modal
   const [bannerModalOpen, setBannerModalOpen] = useState(false);
@@ -544,6 +545,17 @@ export const BannersPromos: React.FC = () => {
                 </span>
               )}
             </button>
+            <button
+              onClick={() => setActiveTab('codes')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                activeTab === 'codes'
+                  ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-white shadow-xs'
+                  : 'text-gray-500 hover:text-gray-900'
+              }`}
+            >
+              <Ticket className="w-3.5 h-3.5" />
+              <span>Promo Codes & Vouchers</span>
+            </button>
           </div>
 
           {activeTab === 'banners' && (
@@ -557,7 +569,7 @@ export const BannersPromos: React.FC = () => {
         </div>
       </div>
 
-      {activeTab === 'banners' ? (
+      {activeTab === 'banners' && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Banners List */}
           <div className="lg:col-span-2 space-y-4">
@@ -755,8 +767,10 @@ export const BannersPromos: React.FC = () => {
             </div>
           </div>
         </div>
-      ) : (
-        /* PROMO REQUESTS FROM MERCHANTS */
+      )}
+
+      {/* PROMO REQUESTS FROM MERCHANTS */}
+      {activeTab === 'requests' && (
         <div className="space-y-4">
           {promoRequests.length === 0 ? (
             <div className="p-12 text-center bg-white dark:bg-zinc-900 border border-dashed border-gray-200 dark:border-zinc-800 rounded-2xl">
@@ -840,6 +854,11 @@ export const BannersPromos: React.FC = () => {
             ))
           )}
         </div>
+      )}
+
+      {/* PROMO CODES TAB */}
+      {activeTab === 'codes' && (
+        <PromoCodesTab />
       )}
 
       {/* Banner Create / Edit Modal */}

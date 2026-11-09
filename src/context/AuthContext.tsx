@@ -4,9 +4,14 @@ import {
   db,
   doc,
   getDoc,
+  setDoc,
   updateDoc,
+  deleteDoc,
   signInWithEmailAndPassword,
   signOut,
+  createUserWithEmailAndPassword,
+  updateProfile,
+  sendEmailVerification,
   sendPasswordResetEmail,
   updatePassword,
   reauthenticateWithCredential,
@@ -21,7 +26,11 @@ interface AuthContextType {
   currentUser: FirebaseUser | null;
   adminProfile: UserProfile | null;
   loading: boolean;
+  isFullAdmin: boolean;
+  canAccess: (section: 'support' | 'finance' | 'settings' | 'general' | 'suspend') => boolean;
   login: (email: string, pass: string) => Promise<void>;
+  registerStaff: (email: string, pass: string, name?: string) => Promise<{ needVerification: boolean }>;
+  resendVerification: (userObj?: FirebaseUser) => Promise<void>;
   logout: () => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
   updateProfileDetails: (data: { name: string; phone?: string; photoUrl?: string }) => Promise<void>;
@@ -36,30 +45,105 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
   const { showSuccess, showError } = useToast();
 
+  const isFullAdmin = Boolean(
+    adminProfile &&
+    (adminProfile.role === 'admin' || !adminProfile.adminRole || adminProfile.adminRole === 'admin')
+  );
+
+  const canAccess = (section: 'support' | 'finance' | 'settings' | 'general' | 'suspend'): boolean => {
+    if (!adminProfile) return false;
+    if (isFullAdmin) return true;
+    const role = adminProfile.adminRole;
+    if (section === 'settings' || section === 'suspend') {
+      return false; // Only full admins can change settings or suspend accounts
+    }
+    if (role === 'support') {
+      return section === 'support' || section === 'general';
+    }
+    if (role === 'finance') {
+      return section === 'finance' || section === 'general';
+    }
+    return false;
+  };
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
         try {
+          const emailLower = (user.email || '').toLowerCase().trim();
           const userDocRef = doc(db, 'users', user.uid);
-          const snap = await getDoc(userDocRef);
-          
+          let snap = await getDoc(userDocRef);
+
+          // If user doc doesn't exist yet, check if there's a pending staffInvite
+          if (!snap.exists() && emailLower) {
+            const inviteRef = doc(db, 'staffInvites', emailLower);
+            const inviteSnap = await getDoc(inviteRef);
+            if (inviteSnap.exists()) {
+              if (!user.emailVerified) {
+                await signOut(auth);
+                setCurrentUser(null);
+                setAdminProfile(null);
+                setLoading(false);
+                return;
+              }
+
+              // Email is verified! Convert invite to user doc
+              const inviteData = inviteSnap.data();
+              const assignedAdminRole = inviteData.adminRole || 'support';
+              const assignedRole = assignedAdminRole === 'admin' ? 'admin' : 'subadmin';
+              const newProfile = {
+                uid: user.uid,
+                role: assignedRole,
+                adminRole: assignedAdminRole,
+                email: emailLower,
+                name: user.displayName || emailLower.split('@')[0],
+                status: 'active' as const,
+                createdAt: new Date()
+              };
+
+              await setDoc(userDocRef, newProfile);
+              await deleteDoc(inviteRef);
+              snap = await getDoc(userDocRef);
+            }
+          }
+
           if (!snap.exists()) {
             await signOut(auth);
             setCurrentUser(null);
             setAdminProfile(null);
-            showError('This account is not an admin.');
+            showError('This account is not an administrator or staff member.');
             setLoading(false);
             return;
           }
 
           const userData = snap.data();
           const role = String(userData.role || '').toLowerCase();
-          
-          if (role !== 'admin') {
+
+          if (role !== 'admin' && role !== 'subadmin') {
             await signOut(auth);
             setCurrentUser(null);
             setAdminProfile(null);
-            showError('This account is not an admin.');
+            showError('This account does not have admin or sub-admin access.');
+            setLoading(false);
+            return;
+          }
+
+          // Check if account is suspended
+          if (userData.status === 'suspended') {
+            await signOut(auth);
+            setCurrentUser(null);
+            setAdminProfile(null);
+            showError('Your staff account has been suspended. Please contact the administrator.');
+            setLoading(false);
+            return;
+          }
+
+          // If subadmin and not email verified, block login
+          if (role === 'subadmin' && !user.emailVerified) {
+            await signOut(auth);
+            setCurrentUser(null);
+            setAdminProfile(null);
+            showError('Please verify your email address before logging in.');
             setLoading(false);
             return;
           }
@@ -67,9 +151,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setCurrentUser(user);
           setAdminProfile({
             uid: user.uid,
-            role: 'admin',
+            role: role as any,
+            adminRole: userData.adminRole || (role === 'admin' ? 'admin' : 'support'),
             email: user.email || userData.email || '',
-            name: userData.name || user.displayName || 'Administrator',
+            name: userData.name || user.displayName || (role === 'admin' ? 'Administrator' : 'Staff Member'),
             phone: userData.phone || '',
             photoUrl: userData.photoUrl || user.photoURL || '',
             status: userData.status || 'active',
@@ -95,34 +180,115 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = async (email: string, pass: string) => {
     try {
-      const cred = await signInWithEmailAndPassword(auth, email.trim(), pass);
-      const userDocRef = doc(db, 'users', cred.user.uid);
-      const snap = await getDoc(userDocRef);
+      const emailLower = email.trim().toLowerCase();
+      const cred = await signInWithEmailAndPassword(auth, emailLower, pass);
+      const user = cred.user;
+      const userDocRef = doc(db, 'users', user.uid);
+      let snap = await getDoc(userDocRef);
 
+      // Check if this is an invited staff member signing in for the first time
       if (!snap.exists()) {
-        await signOut(auth);
-        throw new Error('This account is not an admin.');
+        const inviteRef = doc(db, 'staffInvites', emailLower);
+        const inviteSnap = await getDoc(inviteRef);
+        if (inviteSnap.exists()) {
+          if (!user.emailVerified) {
+            await signOut(auth);
+            throw new Error('Please verify your email address before logging in. Check your inbox for the verification link.');
+          }
+
+          const inviteData = inviteSnap.data();
+          const assignedAdminRole = inviteData.adminRole || 'support';
+          const assignedRole = assignedAdminRole === 'admin' ? 'admin' : 'subadmin';
+          const newProfile = {
+            uid: user.uid,
+            role: assignedRole,
+            adminRole: assignedAdminRole,
+            email: emailLower,
+            name: user.displayName || emailLower.split('@')[0],
+            status: 'active' as const,
+            createdAt: new Date()
+          };
+
+          await setDoc(userDocRef, newProfile);
+          await deleteDoc(inviteRef);
+          snap = await getDoc(userDocRef);
+        } else {
+          await signOut(auth);
+          throw new Error('This account is not authorized as an admin or staff member.');
+        }
       }
 
-      const userData = snap.data();
+      const userData = (snap.data() || {}) as Record<string, any>;
       const role = String(userData.role || '').toLowerCase();
-      if (role !== 'admin') {
+      if (role !== 'admin' && role !== 'subadmin') {
         await signOut(auth);
-        throw new Error('This account is not an admin.');
+        throw new Error('This account does not have admin or sub-admin privileges.');
       }
 
-      setCurrentUser(cred.user);
+      if (userData.status === 'suspended') {
+        await signOut(auth);
+        throw new Error('Your staff account has been suspended. Please contact the administrator.');
+      }
+
+      if (role === 'subadmin' && !user.emailVerified) {
+        await signOut(auth);
+        throw new Error('Please verify your email address before logging in. A verification email was sent to your inbox.');
+      }
+
+      setCurrentUser(user);
       setAdminProfile({
-        uid: cred.user.uid,
-        role: 'admin',
-        email: cred.user.email || userData.email || '',
-        name: userData.name || cred.user.displayName || 'Administrator',
+        uid: user.uid,
+        role: role as any,
+        adminRole: userData.adminRole || (role === 'admin' ? 'admin' : 'support'),
+        email: user.email || userData.email || '',
+        name: userData.name || user.displayName || (role === 'admin' ? 'Administrator' : 'Staff Member'),
         phone: userData.phone || '',
-        photoUrl: userData.photoUrl || cred.user.photoURL || '',
+        photoUrl: userData.photoUrl || user.photoURL || '',
         status: userData.status || 'active',
         createdAt: userData.createdAt || null
       });
       showSuccess(`Welcome back, ${userData.name || 'Admin'}!`);
+    } catch (err: any) {
+      showError(err);
+      throw err;
+    }
+  };
+
+  const registerStaff = async (email: string, pass: string, name?: string) => {
+    try {
+      const emailLower = email.trim().toLowerCase();
+      // First verify staff invite exists
+      const inviteRef = doc(db, 'staffInvites', emailLower);
+      const inviteSnap = await getDoc(inviteRef);
+      if (!inviteSnap.exists()) {
+        throw new Error(`No staff invitation found for ${emailLower}. Please request an invite from the administrator.`);
+      }
+
+      const cred = await createUserWithEmailAndPassword(auth, emailLower, pass);
+      if (name && cred.user) {
+        await updateProfile(cred.user, { displayName: name.trim() });
+      }
+
+      // Send Firebase verification email
+      await sendEmailVerification(cred.user);
+      await signOut(auth); // block login until verified
+
+      showSuccess(`Invitation accepted! A verification email has been sent to ${emailLower}. Please verify your email before logging in.`);
+      return { needVerification: true };
+    } catch (err: any) {
+      showError(err);
+      throw err;
+    }
+  };
+
+  const resendVerification = async (userObj?: FirebaseUser) => {
+    try {
+      const targetUser = userObj || currentUser || auth.currentUser;
+      if (!targetUser) {
+        throw new Error('No user to send verification email to.');
+      }
+      await sendEmailVerification(targetUser);
+      showSuccess('Verification email resent. Please check your inbox and spam folder.');
     } catch (err: any) {
       showError(err);
       throw err;
@@ -188,7 +354,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         currentUser,
         adminProfile,
         loading,
+        isFullAdmin,
+        canAccess,
         login,
+        registerStaff,
+        resendVerification,
         logout,
         resetPassword,
         updateProfileDetails,

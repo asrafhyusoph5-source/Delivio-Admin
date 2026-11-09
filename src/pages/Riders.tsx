@@ -72,10 +72,15 @@ import {
   RotateCw,
   Radio,
   Save,
-  Compass
+  Compass,
+  FileText,
+  Calendar,
+  ShieldCheck,
+  Clock
 } from 'lucide-react';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
+import { ExportDateModal } from '../components/common/ExportDateModal';
 
 export const Riders: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -104,8 +109,23 @@ export const Riders: React.FC = () => {
   // Selected Rider & Tabs
   const [selectedRider, setSelectedRider] = useState<Rider | null>(null);
   const [activeTab, setActiveTab] = useState<
-    'details' | 'status' | 'services' | 'performance' | 'orders' | 'cash' | 'wallet' | 'tiers' | 'inbox' | 'history'
+    'details' | 'status' | 'services' | 'documents' | 'performance' | 'orders' | 'cash' | 'wallet' | 'tiers' | 'inbox' | 'history'
   >('details');
+
+  // Driver Documents state
+  const [docModalOpen, setDocModalOpen] = useState(false);
+  const [editingDocType, setEditingDocType] = useState('license');
+  const [editingDocTitle, setEditingDocTitle] = useState("Professional Driver's License");
+  const [editingDocNumber, setEditingDocNumber] = useState('');
+  const [editingDocExpiry, setEditingDocExpiry] = useState('');
+  const [editingDocVerified, setEditingDocVerified] = useState(true);
+  const [editingDocNotes, setEditingDocNotes] = useState('');
+  const [savingDocument, setSavingDocument] = useState(false);
+
+  // Export Date Filter Modal state
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [exportStartDate, setExportStartDate] = useState('');
+  const [exportEndDate, setExportEndDate] = useState('');
 
   // Performance & Offer Log states
   const [offerLogEntries, setOfferLogEntries] = useState<OfferLogEntry[]>([]);
@@ -1451,6 +1471,86 @@ export const Riders: React.FC = () => {
 
   const outstandingCash = Math.max(0, totalCodCollected - (selectedRider?.cashRemitted || 0));
 
+  const handleSaveRiderDocument = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedRider) return;
+    try {
+      setSavingDocument(true);
+      const currentDocs =
+        typeof selectedRider.documents === 'object' && selectedRider.documents !== null && !Array.isArray(selectedRider.documents)
+          ? { ...selectedRider.documents }
+          : {};
+
+      currentDocs[editingDocType] = {
+        title: editingDocTitle,
+        documentNumber: editingDocNumber.trim(),
+        expiryDate: editingDocExpiry,
+        verified: editingDocVerified,
+        notes: editingDocNotes.trim(),
+        updatedAt: Timestamp.now()
+      };
+
+      await updateDoc(doc(db, 'riders', selectedRider.id), {
+        documents: currentDocs,
+        updatedAt: Timestamp.now()
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'UPDATE_DRIVER_DOCUMENT',
+        entityType: 'riders',
+        entityId: selectedRider.id,
+        details: `Updated ${editingDocTitle} (Expiry: ${editingDocExpiry || 'None'}, Number: ${editingDocNumber || 'N/A'}) for driver ${selectedRider.name}`
+      });
+
+      showSuccess(`${editingDocTitle} updated successfully.`);
+      setSelectedRider((prev) => (prev ? { ...prev, documents: currentDocs } : null));
+      setRiders((prev) => prev.map((r) => (r.id === selectedRider.id ? { ...r, documents: currentDocs } : r)));
+      setDocModalOpen(false);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSavingDocument(false);
+    }
+  };
+
+  const handleExportDriversWithDateFilter = (startDate?: string, endDate?: string) => {
+    let list = [...filteredRiders];
+    if (startDate) {
+      const startMs = new Date(`${startDate}T00:00:00`).getTime();
+      list = list.filter((r) => {
+        const t = r.createdAt?.toMillis ? r.createdAt.toMillis() : new Date(r.createdAt || 0).getTime();
+        return t >= startMs;
+      });
+    }
+    if (endDate) {
+      const endMs = new Date(`${endDate}T23:59:59`).getTime();
+      list = list.filter((r) => {
+        const t = r.createdAt?.toMillis ? r.createdAt.toMillis() : new Date(r.createdAt || 0).getTime();
+        return t <= endMs;
+      });
+    }
+    const rows = list.map((r) => ({
+      DriverID: r.id,
+      DriverCode: r.riderCode,
+      Name: r.name,
+      Phone: r.phone,
+      VehicleType: r.vehicleType,
+      Model: r.vehicleModel,
+      Color: r.vehicleColor,
+      Seats: r.seats,
+      Plate: r.plate,
+      Status: r.status,
+      IsOnline: r.isOnline ? 'Online' : 'Offline',
+      WalletBalance: r.walletBalance,
+      Coins: r.coins,
+      CreatedAt: r.createdAt?.toDate ? r.createdAt.toDate().toISOString() : r.createdAt || 'N/A'
+    }));
+    exportToCsv(`delivio_drivers_${new Date().toISOString().slice(0, 10)}`, rows);
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -1465,27 +1565,11 @@ export const Riders: React.FC = () => {
         </div>
 
         <button
-          onClick={() => {
-            const rows = filteredRiders.map((r) => ({
-              DriverCode: r.riderCode,
-              Name: r.name,
-              Phone: r.phone,
-              VehicleType: r.vehicleType,
-              Model: r.vehicleModel,
-              Color: r.vehicleColor,
-              Seats: r.seats,
-              Plate: r.plate,
-              Status: r.status,
-              IsOnline: r.isOnline ? 'Online' : 'Offline',
-              WalletBalance: r.walletBalance,
-              Coins: r.coins
-            }));
-            exportToCsv(`delivio_drivers_${new Date().toISOString().slice(0, 10)}`, rows);
-          }}
+          onClick={() => setExportModalOpen(true)}
           className="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-gray-700 dark:text-zinc-300 hover:bg-gray-50 text-xs font-bold shadow-xs self-start sm:self-auto"
         >
           <Download className="w-4 h-4" />
-          <span>Export Drivers</span>
+          <span>Export Drivers (CSV)</span>
         </button>
       </div>
 
@@ -2020,6 +2104,7 @@ export const Riders: React.FC = () => {
                 { id: 'details', label: 'Details' },
                 { id: 'status', label: 'Status' },
                 { id: 'services', label: 'Services' },
+                { id: 'documents', label: 'Documents' },
                 { id: 'performance', label: 'Performance' },
                 { id: 'orders', label: `Orders (${riderOrders.length})` },
                 { id: 'cash', label: 'Cash Collection' },
@@ -2424,6 +2509,200 @@ export const Riders: React.FC = () => {
                                   {!isPlatformBlocked ? 'Clear' : 'Blocked'}
                                 </span>
                               </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* TAB: DOCUMENTS WITH EXPIRY DATES */}
+              {activeTab === 'documents' && selectedRider && (() => {
+                const rawDocs: any = selectedRider.documents || {};
+                const standardDocs = [
+                  {
+                    type: 'license',
+                    title: "Professional Driver's License",
+                    description: 'Mandatory government-issued driver license with professional restriction.',
+                    required: true
+                  },
+                  {
+                    type: 'or_cr',
+                    title: 'Vehicle OR / CR (Registration)',
+                    description: 'LTO Official Receipt & Certificate of Registration for registered vehicle.',
+                    required: true
+                  },
+                  {
+                    type: 'nbi',
+                    title: 'NBI / Police Clearance',
+                    description: 'Criminal background check clearance issued within the past 12 months.',
+                    required: true
+                  },
+                  {
+                    type: 'insurance',
+                    title: 'Comprehensive / TPL Insurance',
+                    description: 'Active vehicle third-party liability or commercial rider coverage.',
+                    required: true
+                  },
+                  {
+                    type: 'barangay',
+                    title: 'Barangay Clearance',
+                    description: 'Local government residence verification and character endorsement.',
+                    required: false
+                  }
+                ];
+
+                const nowMs = Date.now();
+
+                return (
+                  <div className="space-y-6">
+                    <div className="p-4 rounded-2xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/40 flex items-start gap-3">
+                      <ShieldCheck className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                      <div className="text-xs">
+                        <span className="font-bold text-gray-900 dark:text-white block">
+                          Driver Credential & Document Verification
+                        </span>
+                        <p className="text-gray-600 dark:text-zinc-300 mt-0.5">
+                          Track expiry dates for licenses, vehicle registration, clearances, and insurance policies. Riders with expired credentials cannot be assigned deliveries.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-4">
+                      {standardDocs.map((docDef) => {
+                        const itemData = rawDocs[docDef.type] || {};
+                        const docNum = itemData.documentNumber || itemData.number || (docDef.type === 'license' ? selectedRider.plate : '') || '';
+                        const expiry = itemData.expiryDate || (docDef.type === 'license' ? rawDocs.licenseExpiry : '') || '';
+                        const verified = itemData.verified !== false;
+                        const notes = itemData.notes || '';
+
+                        let expiryStatus: 'none' | 'valid' | 'expiring' | 'expired' = 'none';
+                        let daysRemaining = 0;
+
+                        if (expiry) {
+                          const expTime = new Date(expiry).getTime();
+                          daysRemaining = Math.ceil((expTime - nowMs) / (1000 * 60 * 60 * 24));
+                          if (daysRemaining < 0) {
+                            expiryStatus = 'expired';
+                          } else if (daysRemaining <= 30) {
+                            expiryStatus = 'expiring';
+                          } else {
+                            expiryStatus = 'valid';
+                          }
+                        }
+
+                        return (
+                          <div
+                            key={docDef.type}
+                            className={`p-5 rounded-3xl border transition-all ${
+                              expiryStatus === 'expired'
+                                ? 'bg-rose-50/40 dark:bg-rose-950/20 border-rose-300 dark:border-rose-900/50'
+                                : expiryStatus === 'expiring'
+                                ? 'bg-amber-50/40 dark:bg-amber-950/20 border-amber-300 dark:border-amber-900/50'
+                                : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-800'
+                            }`}
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                              <div className="space-y-1.5">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <FileText className="w-4 h-4 text-gray-500" />
+                                  <h4 className="font-extrabold text-sm text-gray-900 dark:text-white">
+                                    {docDef.title}
+                                  </h4>
+                                  {docDef.required && (
+                                    <span className="text-[10px] font-bold text-gray-400 uppercase">
+                                      Required
+                                    </span>
+                                  )}
+                                  <span
+                                    className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                                      verified
+                                        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                                        : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-950 dark:text-yellow-300'
+                                    }`}
+                                  >
+                                    {verified ? 'Verified' : 'Pending Verification'}
+                                  </span>
+                                </div>
+                                <p className="text-xs text-gray-500 dark:text-zinc-400">
+                                  {docDef.description}
+                                </p>
+                              </div>
+
+                              {/* Expiry Tag */}
+                              <div className="flex items-center gap-2 self-start sm:self-auto">
+                                {expiryStatus === 'expired' ? (
+                                  <span className="inline-flex items-center gap-1 px-3 py-1 rounded-xl text-xs font-black bg-rose-500 text-white shadow-xs">
+                                    <AlertTriangle className="w-3.5 h-3.5" />
+                                    <span>EXPIRED ({Math.abs(daysRemaining)}d ago)</span>
+                                  </span>
+                                ) : expiryStatus === 'expiring' ? (
+                                  <span className="inline-flex items-center gap-1 px-3 py-1 rounded-xl text-xs font-black bg-amber-500 text-black shadow-xs">
+                                    <Clock className="w-3.5 h-3.5" />
+                                    <span>EXPIRING SOON ({daysRemaining}d left)</span>
+                                  </span>
+                                ) : expiryStatus === 'valid' ? (
+                                  <span className="inline-flex items-center gap-1 px-3 py-1 rounded-xl text-xs font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                                    <CheckCircle2 className="w-3.5 h-3.5" />
+                                    <span>Valid ({daysRemaining}d)</span>
+                                  </span>
+                                ) : (
+                                  <span className="px-3 py-1 rounded-xl text-xs font-bold bg-gray-100 dark:bg-zinc-800 text-gray-500">
+                                    No Expiry Set
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Details Row */}
+                            <div className="mt-4 pt-3 border-t border-gray-100 dark:border-zinc-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+                              <div className="flex items-center gap-4 flex-wrap text-gray-600 dark:text-zinc-300 font-medium">
+                                <div>
+                                  <span className="text-[10px] font-bold text-gray-400 uppercase block">
+                                    Document / ID Number
+                                  </span>
+                                  <span className="font-mono font-bold text-gray-900 dark:text-white">
+                                    {docNum || 'Not set'}
+                                  </span>
+                                </div>
+
+                                <div>
+                                  <span className="text-[10px] font-bold text-gray-400 uppercase block">
+                                    Expiry Date
+                                  </span>
+                                  <span className="font-bold text-gray-900 dark:text-white">
+                                    {expiry ? new Date(expiry).toLocaleDateString() : 'No expiry'}
+                                  </span>
+                                </div>
+
+                                {notes && (
+                                  <div>
+                                    <span className="text-[10px] font-bold text-gray-400 uppercase block">
+                                      Admin Notes
+                                    </span>
+                                    <span className="text-gray-600 dark:text-zinc-300">{notes}</span>
+                                  </div>
+                                )}
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingDocType(docDef.type);
+                                  setEditingDocTitle(docDef.title);
+                                  setEditingDocNumber(docNum);
+                                  setEditingDocExpiry(expiry);
+                                  setEditingDocVerified(verified);
+                                  setEditingDocNotes(notes);
+                                  setDocModalOpen(true);
+                                }}
+                                className="px-3.5 py-1.5 rounded-xl border border-gray-200 dark:border-zinc-700 hover:bg-gray-100 dark:hover:bg-zinc-800 font-bold text-xs text-gray-800 dark:text-zinc-200 flex items-center gap-1.5 transition-all"
+                              >
+                                <Edit className="w-3.5 h-3.5 text-amber-500" />
+                                <span>Edit Expiry & Number</span>
+                              </button>
                             </div>
                           </div>
                         );
@@ -3631,6 +3910,105 @@ export const Riders: React.FC = () => {
           confirmLabel={updatingPriority ? 'Updating...' : pendingPriorityValue ? 'Set Priority Rider' : 'Remove Priority'}
           reasonRequired={false}
           isDestructive={!pendingPriorityValue}
+        />
+      )}
+
+      {/* MODAL: DRIVER DOCUMENT EDIT */}
+      {docModalOpen && selectedRider && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="w-full max-w-md bg-white dark:bg-zinc-900 rounded-3xl p-6 border border-gray-200 dark:border-zinc-800 shadow-xl space-y-4">
+            <div className="flex items-center gap-2 pb-2 border-b border-gray-100 dark:border-zinc-800">
+              <FileText className="w-5 h-5 text-amber-500" />
+              <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                Edit {editingDocTitle}
+              </h3>
+            </div>
+
+            <form onSubmit={handleSaveRiderDocument} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-gray-700 dark:text-zinc-300 mb-1">
+                  Document / Plate / License Number
+                </label>
+                <input
+                  type="text"
+                  value={editingDocNumber}
+                  onChange={(e) => setEditingDocNumber(e.target.value)}
+                  placeholder="e.g. N01-12-345678"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-mono font-bold text-gray-900 dark:text-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 dark:text-zinc-300 mb-1">
+                  Expiry Date
+                </label>
+                <input
+                  type="date"
+                  value={editingDocExpiry}
+                  onChange={(e) => setEditingDocExpiry(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                />
+              </div>
+
+              <div className="flex items-center justify-between p-3 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-850">
+                <span className="text-xs font-bold text-gray-900 dark:text-white">
+                  Verification Status
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setEditingDocVerified(!editingDocVerified)}
+                  className={`px-3 py-1 rounded-xl text-xs font-bold transition-all ${
+                    editingDocVerified ? 'bg-emerald-500 text-white' : 'bg-gray-300 text-gray-700'
+                  }`}
+                >
+                  {editingDocVerified ? 'Verified' : 'Pending'}
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 dark:text-zinc-300 mb-1">
+                  Notes / Verification Remarks
+                </label>
+                <textarea
+                  rows={2}
+                  value={editingDocNotes}
+                  onChange={(e) => setEditingDocNotes(e.target.value)}
+                  placeholder="Physical document inspection or remarks..."
+                  className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100 dark:border-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => setDocModalOpen(false)}
+                  className="px-4 py-2 rounded-xl border border-gray-200 dark:border-zinc-700 text-xs font-bold text-gray-700 dark:text-zinc-300 hover:bg-gray-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingDocument}
+                  className="px-5 py-2 rounded-xl bg-amber-400 text-black hover:bg-amber-500 text-xs font-bold shadow-xs flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {savingDocument && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Save Document</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: EXPORT DRIVERS WITH DATE FILTER */}
+      {exportModalOpen && (
+        <ExportDateModal
+          isOpen={exportModalOpen}
+          onClose={() => setExportModalOpen(false)}
+          title="Export Driver Fleet to CSV"
+          description="Filter drivers by account registration date or export the entire active and registered fleet to CSV."
+          totalRecords={filteredRiders.length}
+          onExport={handleExportDriversWithDateFilter}
         />
       )}
     </div>

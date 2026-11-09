@@ -23,6 +23,7 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
+import { ExportDateModal } from '../components/common/ExportDateModal';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
 import type {
   Merchant,
@@ -41,7 +42,9 @@ import type {
   RiderReview,
   MerchantSpecialRadius,
   MerchantBestSellers,
-  BestSellerItem
+  BestSellerItem,
+  MerchantMenu,
+  MerchantMenuSchedule
 } from '../types';
 import { FOOD_CATEGORIES, CONVENIENCE_CATEGORIES } from '../constants';
 import { formatOrderNumber } from '../utils/orderNumber';
@@ -87,10 +90,12 @@ import {
   Radio,
   Compass,
   Save,
-  Sparkles
+  Sparkles,
+  Ticket
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
+import { PromoCodesTab } from '../components/promos/PromoCodesTab';
 
 export const DEFAULT_WEEKLY_HOURS: MerchantWeeklyHours = {
   monday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
@@ -99,7 +104,73 @@ export const DEFAULT_WEEKLY_HOURS: MerchantWeeklyHours = {
   thursday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
   friday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
   saturday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
-  sunday: { open: '08:00', close: '22:00', isOpen: true, closed: false }
+};
+
+export const DAYS_OF_WEEK = [
+  { id: 1, short: 'Mon', full: 'Monday' },
+  { id: 2, short: 'Tue', full: 'Tuesday' },
+  { id: 3, short: 'Wed', full: 'Wednesday' },
+  { id: 4, short: 'Thu', full: 'Thursday' },
+  { id: 5, short: 'Fri', full: 'Friday' },
+  { id: 6, short: 'Sat', full: 'Saturday' },
+  { id: 0, short: 'Sun', full: 'Sunday' }
+];
+
+export const isItemAvailableNow = (
+  item: MenuItem,
+  merchantMenus: MerchantMenu[]
+): { available: boolean; reason?: string } => {
+  if (item.available === false) {
+    return { available: false, reason: 'Marked unavailable' };
+  }
+
+  // If item belongs to specific menus
+  if (item.menuIds && item.menuIds.length > 0) {
+    const assignedMenus = merchantMenus.filter((m) => item.menuIds?.includes(m.id));
+    if (assignedMenus.length === 0) {
+      return { available: false, reason: 'Assigned menu unavailable' };
+    }
+
+    // Check against current Philippine Time (Asia/Manila, UTC+8)
+    const nowPHT = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
+    const currentDay = nowPHT.getDay(); // 0 = Sun, 1 = Mon...
+    const currentHour = nowPHT.getHours();
+    const currentMinute = nowPHT.getMinutes();
+    const currentTotalMinutes = currentHour * 60 + currentMinute;
+
+    const anyMenuMatches = assignedMenus.some((menu) => {
+      if (!menu.active) return false;
+      if (!menu.schedule) return true; // active menu without schedule = available all day
+
+      const { days, start, end } = menu.schedule;
+      if (days && days.length > 0) {
+        const dayNumbers = days.map((d: any) => Number(d));
+        if (!dayNumbers.includes(currentDay)) return false;
+      }
+
+      if (start && end) {
+        const [startH, startM] = start.split(':').map(Number);
+        const [endH, endM] = end.split(':').map(Number);
+        const startTotal = (startH || 0) * 60 + (startM || 0);
+        const endTotal = (endH || 0) * 60 + (endM || 0);
+
+        if (startTotal <= endTotal) {
+          return currentTotalMinutes >= startTotal && currentTotalMinutes <= endTotal;
+        } else {
+          // Overnight window (e.g. 21:00 to 03:00)
+          return currentTotalMinutes >= startTotal || currentTotalMinutes <= endTotal;
+        }
+      }
+
+      return true;
+    });
+
+    if (!anyMenuMatches) {
+      return { available: false, reason: 'Outside scheduled menu hours' };
+    }
+  }
+
+  return { available: true };
 };
 
 export function parseDate(val: any): Date | null {
@@ -422,7 +493,7 @@ export const Merchants: React.FC = () => {
 
   // Selected Merchant for detail
   const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(null);
-  const [activeTab, setActiveTab] = useState<'details' | 'status' | 'location' | 'radius' | 'specialRadius' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet' | 'reviews'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'status' | 'location' | 'radius' | 'specialRadius' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet' | 'reviews' | 'vouchers'>('details');
 
   // Special Radius State (merchants/{id}.specialRadius & settings/dispatch.searchRadiusKm)
   const [globalDispatchRadiusKm, setGlobalDispatchRadiusKm] = useState<number>(5);
@@ -535,7 +606,30 @@ export const Merchants: React.FC = () => {
   const [itemSubcategoryId, setItemSubcategoryId] = useState<string>('');
   const [itemAvailable, setItemAvailable] = useState(true);
   const [itemSets, setItemSets] = useState<MenuSet[]>([]);
+  const [itemMenuIds, setItemMenuIds] = useState<string[]>([]);
   const [savingItem, setSavingItem] = useState(false);
+
+  // Menus & Schedules (merchants/{id}/menus)
+  const [menus, setMenus] = useState<MerchantMenu[]>([]);
+  const [loadingMenus, setLoadingMenus] = useState(false);
+  const [menuModalOpen, setMenuModalOpen] = useState(false);
+  const [editingMenu, setEditingMenu] = useState<MerchantMenu | null>(null);
+  const [menuFormName, setMenuFormName] = useState('');
+  const [menuFormActive, setMenuFormActive] = useState(true);
+  const [menuFormSortOrder, setMenuFormSortOrder] = useState<number>(0);
+  const [menuFormHasSchedule, setMenuFormHasSchedule] = useState(true);
+  const [menuFormDays, setMenuFormDays] = useState<number[]>([0, 1, 2, 3, 4, 5, 6]);
+  const [menuFormStart, setMenuFormStart] = useState('08:00');
+  const [menuFormEnd, setMenuFormEnd] = useState('22:00');
+  const [savingMenu, setSavingMenu] = useState(false);
+
+  // Products in Menu Picker Modal
+  const [productsMenuPickerOpen, setProductsMenuPickerOpen] = useState(false);
+  const [targetMenuForPicker, setTargetMenuForPicker] = useState<MerchantMenu | null>(null);
+  const [pickerSelectedProductIds, setPickerSelectedProductIds] = useState<string[]>([]);
+  const [pickerSearchQuery, setPickerSearchQuery] = useState('');
+  const [pickerCategoryFilter, setPickerCategoryFilter] = useState('all');
+  const [savingMenuProducts, setSavingMenuProducts] = useState(false);
 
   // Subcategories (Category Classes)
   const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
@@ -1557,6 +1651,31 @@ export const Merchants: React.FC = () => {
       subList.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
       setSubcategories(subList);
 
+      // Menus & Schedules: merchants/{id}/menus
+      const menusRef = collection(db, 'merchants', merchantId, 'menus');
+      const menusSnap = await getDocs(menusRef);
+      const menusList: MerchantMenu[] = [];
+      menusSnap.forEach((d) => {
+        const dt = d.data();
+        menusList.push({
+          id: d.id,
+          name: dt.name || 'Menu',
+          active: dt.active !== false,
+          sortOrder: typeof dt.sortOrder === 'number' ? dt.sortOrder : 0,
+          schedule: dt.schedule
+            ? {
+                days: Array.isArray(dt.schedule.days) ? dt.schedule.days : [0, 1, 2, 3, 4, 5, 6],
+                start: dt.schedule.start || '08:00',
+                end: dt.schedule.end || '22:00'
+              }
+            : null,
+          createdAt: dt.createdAt,
+          updatedAt: dt.updatedAt
+        });
+      });
+      menusList.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+      setMenus(menusList);
+
       // Items
       const itemsRef = collection(db, 'merchants', merchantId, 'items');
       const itemsSnap = await getDocs(itemsRef);
@@ -1569,6 +1688,8 @@ export const Merchants: React.FC = () => {
           categoryId: dt.categoryId,
           subcategoryId: dt.subcategoryId || null,
           subcategoryName: dt.subcategoryName || null,
+          customName: dt.customName || null,
+          menuIds: Array.isArray(dt.menuIds) ? dt.menuIds : [],
           name: dt.name || 'Item',
           price: Number(dt.price) || 0,
           description: dt.description || '',
@@ -2346,6 +2467,226 @@ export const Merchants: React.FC = () => {
     }
   };
 
+  // Menu CRUD Operations (merchants/{id}/menus)
+  const handleOpenCreateMenu = () => {
+    setEditingMenu(null);
+    setMenuFormName('');
+    setMenuFormActive(true);
+    setMenuFormSortOrder(menus.length);
+    setMenuFormHasSchedule(true);
+    setMenuFormDays([0, 1, 2, 3, 4, 5, 6]);
+    setMenuFormStart('08:00');
+    setMenuFormEnd('22:00');
+    setMenuModalOpen(true);
+  };
+
+  const handleOpenEditMenu = (menu: MerchantMenu) => {
+    setEditingMenu(menu);
+    setMenuFormName(menu.name);
+    setMenuFormActive(menu.active !== false);
+    setMenuFormSortOrder(typeof menu.sortOrder === 'number' ? menu.sortOrder : 0);
+    if (menu.schedule) {
+      setMenuFormHasSchedule(true);
+      setMenuFormDays(Array.isArray(menu.schedule.days) ? menu.schedule.days : [0, 1, 2, 3, 4, 5, 6]);
+      setMenuFormStart(menu.schedule.start || '08:00');
+      setMenuFormEnd(menu.schedule.end || '22:00');
+    } else {
+      setMenuFormHasSchedule(false);
+      setMenuFormDays([0, 1, 2, 3, 4, 5, 6]);
+      setMenuFormStart('08:00');
+      setMenuFormEnd('22:00');
+    }
+    setMenuModalOpen(true);
+  };
+
+  const handleSaveMenu = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedMerchant) return;
+    const trimmed = menuFormName.trim();
+    if (!trimmed) {
+      showError('Menu name is required.');
+      return;
+    }
+    try {
+      setSavingMenu(true);
+      const scheduleObj: MerchantMenuSchedule | null = menuFormHasSchedule
+        ? {
+            days: menuFormDays.length > 0 ? menuFormDays : [0, 1, 2, 3, 4, 5, 6],
+            start: menuFormStart || '00:00',
+            end: menuFormEnd || '23:59'
+          }
+        : null;
+
+      if (editingMenu) {
+        const menuDocRef = doc(db, 'merchants', selectedMerchant.id, 'menus', editingMenu.id);
+        const updateData: Record<string, any> = {
+          name: trimmed,
+          active: menuFormActive,
+          sortOrder: Number(menuFormSortOrder) || 0,
+          schedule: scheduleObj,
+          updatedAt: Timestamp.now()
+        };
+        await updateDoc(menuDocRef, updateData);
+        setMenus((prev) =>
+          prev
+            .map((m) => (m.id === editingMenu.id ? { ...m, ...updateData } : m))
+            .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+        );
+        showSuccess(`Menu "${trimmed}" updated.`);
+      } else {
+        const menusCol = collection(db, 'merchants', selectedMerchant.id, 'menus');
+        const newDocRef = await addDoc(menusCol, {
+          name: trimmed,
+          active: menuFormActive,
+          sortOrder: Number(menuFormSortOrder) || 0,
+          schedule: scheduleObj,
+          createdAt: Timestamp.now()
+        });
+        const newMenu: MerchantMenu = {
+          id: newDocRef.id,
+          name: trimmed,
+          active: menuFormActive,
+          sortOrder: Number(menuFormSortOrder) || 0,
+          schedule: scheduleObj,
+          createdAt: Timestamp.now()
+        };
+        setMenus((prev) =>
+          [...prev, newMenu].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+        );
+        showSuccess(`Menu "${trimmed}" created.`);
+      }
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email || 'admin@delivio.com',
+        action: editingMenu ? 'MERCHANT_MENU_UPDATED' : 'MERCHANT_MENU_CREATED',
+        entityType: 'merchant',
+        entityId: selectedMerchant.id,
+        details: `Saved menu "${trimmed}" for ${selectedMerchant.name}`
+      });
+
+      setMenuModalOpen(false);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSavingMenu(false);
+    }
+  };
+
+  const handleToggleMenuActive = async (menu: MerchantMenu) => {
+    if (!selectedMerchant) return;
+    try {
+      const newActive = !menu.active;
+      const menuDocRef = doc(db, 'merchants', selectedMerchant.id, 'menus', menu.id);
+      await updateDoc(menuDocRef, {
+        active: newActive,
+        updatedAt: Timestamp.now()
+      });
+      setMenus((prev) =>
+        prev.map((m) => (m.id === menu.id ? { ...m, active: newActive } : m))
+      );
+      showSuccess(`Menu "${menu.name}" is now ${newActive ? 'Active' : 'Inactive'}.`);
+    } catch (err: any) {
+      showError(err);
+    }
+  };
+
+  const handleDeleteMenu = async (menu: MerchantMenu) => {
+    if (!selectedMerchant) return;
+    const affectedItems = menuItems.filter((i) => i.menuIds?.includes(menu.id));
+    const confirmMsg =
+      affectedItems.length > 0
+        ? `Delete Menu "${menu.name}"? ${affectedItems.length} product(s) will be unlinked from this menu schedule.`
+        : `Delete Menu "${menu.name}"?`;
+    if (!confirm(confirmMsg)) return;
+
+    try {
+      const menuDocRef = doc(db, 'merchants', selectedMerchant.id, 'menus', menu.id);
+      await deleteDoc(menuDocRef);
+
+      if (affectedItems.length > 0) {
+        const batch = writeBatch(db);
+        affectedItems.forEach((i) => {
+          const itemRef = doc(db, 'merchants', selectedMerchant.id, 'items', i.id);
+          const nextMenuIds = (i.menuIds || []).filter((id) => id !== menu.id);
+          batch.update(itemRef, {
+            menuIds: nextMenuIds,
+            updatedAt: Timestamp.now()
+          });
+        });
+        await batch.commit();
+
+        setMenuItems((prev) =>
+          prev.map((i) =>
+            i.menuIds?.includes(menu.id)
+              ? { ...i, menuIds: (i.menuIds || []).filter((id) => id !== menu.id) }
+              : i
+          )
+        );
+      }
+
+      setMenus((prev) => prev.filter((m) => m.id !== menu.id));
+      showSuccess(`Menu "${menu.name}" deleted.`);
+    } catch (err: any) {
+      showError(err);
+    }
+  };
+
+  // Products in Menu Picker
+  const handleOpenProductsMenuPicker = (menu: MerchantMenu) => {
+    setTargetMenuForPicker(menu);
+    const assignedIds = menuItems.filter((i) => i.menuIds?.includes(menu.id)).map((i) => i.id);
+    setPickerSelectedProductIds(assignedIds);
+    setPickerSearchQuery('');
+    setPickerCategoryFilter('all');
+    setProductsMenuPickerOpen(true);
+  };
+
+  const handleSaveProductsInMenu = async () => {
+    if (!selectedMerchant || !targetMenuForPicker) return;
+    try {
+      setSavingMenuProducts(true);
+      const batch = writeBatch(db);
+      const mId = targetMenuForPicker.id;
+
+      let changedCount = 0;
+      const updatedItems = menuItems.map((item) => {
+        const wasSelected = Boolean(item.menuIds?.includes(mId));
+        const nowSelected = pickerSelectedProductIds.includes(item.id);
+
+        if (wasSelected !== nowSelected) {
+          changedCount++;
+          const nextMenuIds = nowSelected
+            ? Array.from(new Set([...(item.menuIds || []), mId]))
+            : (item.menuIds || []).filter((id) => id !== mId);
+
+          const itemRef = doc(db, 'merchants', selectedMerchant.id, 'items', item.id);
+          batch.update(itemRef, {
+            menuIds: nextMenuIds,
+            updatedAt: Timestamp.now()
+          });
+
+          return { ...item, menuIds: nextMenuIds };
+        }
+        return item;
+      });
+
+      if (changedCount > 0) {
+        await batch.commit();
+        setMenuItems(updatedItems);
+      }
+
+      showSuccess(`Updated products for menu "${targetMenuForPicker.name}".`);
+      setProductsMenuPickerOpen(false);
+      setTargetMenuForPicker(null);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSavingMenuProducts(false);
+    }
+  };
+
   // Menu: Add / Edit Item
   const handleSaveItem = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2432,7 +2773,7 @@ export const Merchants: React.FC = () => {
       const hasSets = sanitizedSets.length > 0;
 
       if (editingItem) {
-        // Edit - never overwrite sets/hasSets/subcategories unless modified via form
+        // Edit - never drop menuIds, sets, subcategoryId, or customName
         const itemDoc = doc(db, 'merchants', selectedMerchant.id, 'items', editingItem.id);
         const updatePayload: Record<string, any> = {
           name: itemName.trim(),
@@ -2442,6 +2783,8 @@ export const Merchants: React.FC = () => {
           categoryId: itemCategory,
           subcategoryId: subcategoryIdVal,
           subcategoryName: subcategoryNameVal,
+          customName: editingItem.customName ?? null,
+          menuIds: itemMenuIds,
           available: itemAvailable,
           hasSets,
           sets: sanitizedSets,
@@ -2459,6 +2802,8 @@ export const Merchants: React.FC = () => {
                 categoryId: itemCategory,
                 subcategoryId: subcategoryIdVal,
                 subcategoryName: subcategoryNameVal,
+                customName: editingItem.customName ?? null,
+                menuIds: itemMenuIds,
                 available: itemAvailable,
                 hasSets,
                 sets: sanitizedSets
@@ -2476,6 +2821,8 @@ export const Merchants: React.FC = () => {
           categoryId: itemCategory,
           subcategoryId: subcategoryIdVal,
           subcategoryName: subcategoryNameVal,
+          customName: null,
+          menuIds: itemMenuIds,
           available: itemAvailable,
           hasSets,
           sets: sanitizedSets,
@@ -2490,6 +2837,8 @@ export const Merchants: React.FC = () => {
           categoryId: itemCategory,
           subcategoryId: subcategoryIdVal,
           subcategoryName: subcategoryNameVal,
+          customName: null,
+          menuIds: itemMenuIds,
           available: itemAvailable,
           hasSets,
           sets: sanitizedSets,
@@ -2801,6 +3150,42 @@ export const Merchants: React.FC = () => {
     });
   }, [merchants, selectedCityId, typeFilter, categoryFilter, statusFilter, openFilter, searchQuery, platformTimezone, platformServices, cities]);
 
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+
+  const handleExportMerchantsWithDateFilter = (startDate?: string, endDate?: string) => {
+    let list = [...filteredMerchants];
+    if (startDate) {
+      const startMs = new Date(`${startDate}T00:00:00`).getTime();
+      list = list.filter((m) => {
+        const t = m.createdAt?.toMillis ? m.createdAt.toMillis() : new Date(m.createdAt || 0).getTime();
+        return t >= startMs;
+      });
+    }
+    if (endDate) {
+      const endMs = new Date(`${endDate}T23:59:59`).getTime();
+      list = list.filter((m) => {
+        const t = m.createdAt?.toMillis ? m.createdAt.toMillis() : new Date(m.createdAt || 0).getTime();
+        return t <= endMs;
+      });
+    }
+    const rows = list.map((m) => {
+      const eff = effectiveOpen(m, platformTimezone);
+      return {
+        ID: m.id,
+        Name: m.name,
+        Owner: m.ownerName,
+        Phone: m.phone,
+        Type: m.type,
+        Status: m.status,
+        EffectiveStatus: eff.isOpen ? 'Open' : 'Closed',
+        EffectiveReason: eff.reason,
+        CommissionRate: m.commissionRate,
+        CreatedAt: m.createdAt?.toDate ? m.createdAt.toDate().toISOString() : m.createdAt || 'N/A'
+      };
+    });
+    exportToCsv(`delivio_merchants_${new Date().toISOString().slice(0, 10)}`, rows);
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -2815,27 +3200,11 @@ export const Merchants: React.FC = () => {
         </div>
 
         <button
-          onClick={() => {
-            const rows = filteredMerchants.map((m) => {
-              const eff = effectiveOpen(m, platformTimezone);
-              return {
-                ID: m.id,
-                Name: m.name,
-                Owner: m.ownerName,
-                Phone: m.phone,
-                Type: m.type,
-                Status: m.status,
-                EffectiveStatus: eff.isOpen ? 'Open' : 'Closed',
-                EffectiveReason: eff.reason,
-                CommissionRate: m.commissionRate
-              };
-            });
-            exportToCsv(`delivio_merchants_${new Date().toISOString().slice(0, 10)}`, rows);
-          }}
+          onClick={() => setExportModalOpen(true)}
           className="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-gray-700 dark:text-zinc-300 hover:bg-gray-50 text-xs font-bold shadow-xs self-start sm:self-auto"
         >
           <Download className="w-4 h-4" />
-          <span>Export Merchants</span>
+          <span>Export Merchants (CSV)</span>
         </button>
       </div>
 
@@ -3249,6 +3618,7 @@ export const Merchants: React.FC = () => {
                 { id: 'location', label: 'Location Map' },
                 { id: 'specialRadius', label: 'Special Radius' },
                 { id: 'menu', label: `Menu (${menuItems.length})` },
+                { id: 'vouchers', label: 'Vouchers' },
                 { id: 'reviews', label: `Reviews (${merchantReviews.length})` },
                 { id: 'orders', label: 'Orders & Payouts' },
                 { id: 'changes', label: `Change Requests (${changeRequests.length})` },
@@ -3312,7 +3682,7 @@ export const Merchants: React.FC = () => {
 
                     {bestSellers && bestSellers.items && bestSellers.items.length > 0 ? (
                       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 pt-1">
-                        {bestSellers.items.slice(0, 6).map((item, idx) => (
+                        {bestSellers.items.slice(0, 6).map((item: BestSellerItem, idx: number) => (
                           <div
                             key={item.id || idx}
                             className="p-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-amber-200/70 dark:border-zinc-800 text-xs flex items-center justify-between shadow-2xs"
@@ -4379,6 +4749,210 @@ export const Merchants: React.FC = () => {
 
                 return (
                   <div className="space-y-4">
+                    {/* Menus & Schedules Section (merchants/{id}/menus) */}
+                    <div className="p-4 sm:p-5 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 shadow-xs space-y-3.5">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-3 border-b border-gray-100 dark:border-zinc-800">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h4 className="font-extrabold text-sm text-gray-900 dark:text-white flex items-center gap-1.5">
+                              <Calendar className="w-4 h-4 text-amber-500" />
+                              <span>Menus & Schedules</span>
+                            </h4>
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 font-bold">
+                              merchants/{selectedMerchant.id}/menus
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-500 dark:text-zinc-400 mt-0.5">
+                            Targeted menu hours (e.g. Breakfast, Lunch, Late Night). Items without assigned menus are available all day.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleOpenCreateMenu}
+                          className="delivio-btn-yellow px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 self-start sm:self-auto shadow-xs"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Create Menu</span>
+                        </button>
+                      </div>
+
+                      {/* Overlap Note */}
+                      <div className="p-3 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200/80 dark:border-blue-900/40 text-xs text-blue-900 dark:text-blue-300 flex items-start gap-2">
+                        <AlertTriangle className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+                        <div className="text-[11px] leading-relaxed">
+                          <strong>Overlap note:</strong> When schedules overlap or multiple menus are active at the same time, customers see all items from any currently scheduled active menu. If an item belongs to no specific menu or an all-day menu, it is available during regular shop opening hours.
+                        </div>
+                      </div>
+
+                      {/* Menus Cards Grid */}
+                      {menus.length === 0 ? (
+                        <div className="p-6 text-center rounded-xl bg-gray-50 dark:bg-zinc-850/50 border border-dashed border-gray-200 dark:border-zinc-800 text-xs text-gray-400 space-y-1">
+                          <Calendar className="w-6 h-6 mx-auto text-gray-300 dark:text-zinc-700" />
+                          <p className="font-bold text-gray-600 dark:text-zinc-400">No scheduled menus defined</p>
+                          <p className="text-[11px]">All items are currently accessible all day during standard merchant opening hours.</p>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                          {menus.map((menu) => {
+                            const productCount = menuItems.filter((i) => i.menuIds?.includes(menu.id)).length;
+                            const nowPHT = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
+                            const curDay = nowPHT.getDay();
+                            const curHour = nowPHT.getHours();
+                            const curMin = nowPHT.getMinutes();
+                            const curMins = curHour * 60 + curMin;
+
+                            let isActiveNow = menu.active;
+                            if (isActiveNow && menu.schedule) {
+                              const { days, start, end } = menu.schedule;
+                              if (days && days.length > 0 && !days.map(Number).includes(curDay)) {
+                                isActiveNow = false;
+                              }
+                              if (start && end) {
+                                const [sH, sM] = start.split(':').map(Number);
+                                const [eH, eM] = end.split(':').map(Number);
+                                const sTotal = (sH || 0) * 60 + (sM || 0);
+                                const eTotal = (eH || 0) * 60 + (eM || 0);
+                                if (sTotal <= eTotal) {
+                                  if (curMins < sTotal || curMins > eTotal) isActiveNow = false;
+                                } else {
+                                  if (curMins < sTotal && curMins > eTotal) isActiveNow = false;
+                                }
+                              }
+                            }
+
+                            const dayLabels =
+                              menu.schedule?.days && menu.schedule.days.length > 0
+                                ? menu.schedule.days.length === 7
+                                  ? 'Every day'
+                                  : menu.schedule.days
+                                      .map((d: any) => DAYS_OF_WEEK.find((x) => x.id === Number(d))?.short || d)
+                                      .join(', ')
+                                : 'All days';
+
+                            const timeLabel =
+                              menu.schedule?.start && menu.schedule?.end
+                                ? `${menu.schedule.start} - ${menu.schedule.end}`
+                                : 'All day';
+
+                            return (
+                              <div
+                                key={menu.id}
+                                className={`p-3.5 rounded-xl border transition-all text-xs flex flex-col justify-between ${
+                                  menu.active
+                                    ? 'bg-gray-50/70 dark:bg-zinc-850/70 border-gray-200 dark:border-zinc-800'
+                                    : 'bg-gray-100/50 dark:bg-zinc-900 border-gray-200 dark:border-zinc-800 opacity-60'
+                                }`}
+                              >
+                                <div>
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div>
+                                      <h5 className="font-extrabold text-sm text-gray-900 dark:text-white leading-tight">
+                                        {menu.name}
+                                      </h5>
+                                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                                        <span
+                                          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-bold ${
+                                            !menu.active
+                                              ? 'bg-gray-200 text-gray-700 dark:bg-zinc-700 dark:text-zinc-300'
+                                              : isActiveNow
+                                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800'
+                                              : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-800'
+                                          }`}
+                                        >
+                                          <span
+                                            className={`w-1.5 h-1.5 rounded-full ${
+                                              !menu.active
+                                                ? 'bg-gray-400'
+                                                : isActiveNow
+                                                ? 'bg-emerald-500'
+                                                : 'bg-amber-500'
+                                            }`}
+                                          />
+                                          <span>{!menu.active ? 'Disabled' : isActiveNow ? 'Active now' : 'Off-schedule'}</span>
+                                        </span>
+                                        <span className="text-[10px] font-medium text-gray-400">
+                                          Order #{menu.sortOrder ?? 0}
+                                        </span>
+                                      </div>
+                                    </div>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToggleMenuActive(menu)}
+                                      className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full transition-colors ${
+                                        menu.active
+                                          ? 'bg-emerald-600 text-white'
+                                          : 'bg-gray-300 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300'
+                                      }`}
+                                      title="Toggle menu active status"
+                                    >
+                                      {menu.active ? 'Active' : 'Paused'}
+                                    </button>
+                                  </div>
+
+                                  {/* Schedule detail */}
+                                  <div className="mt-2.5 p-2 rounded-lg bg-white dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800 text-[11px] space-y-1">
+                                    <div className="flex items-center justify-between text-gray-600 dark:text-zinc-400">
+                                      <span className="flex items-center gap-1">
+                                        <Calendar className="w-3 h-3 text-amber-500" />
+                                        <span>Days:</span>
+                                      </span>
+                                      <span className="font-bold text-gray-900 dark:text-white truncate max-w-[140px] text-right">
+                                        {dayLabels}
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center justify-between text-gray-600 dark:text-zinc-400">
+                                      <span className="flex items-center gap-1">
+                                        <Clock className="w-3 h-3 text-amber-500" />
+                                        <span>Hours:</span>
+                                      </span>
+                                      <span className="font-mono font-bold text-gray-900 dark:text-white">
+                                        {timeLabel}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="mt-3 pt-2.5 border-t border-gray-200/70 dark:border-zinc-800 flex items-center justify-between">
+                                  <span className="text-[11px] font-bold text-gray-500 dark:text-zinc-400">
+                                    {productCount} product{productCount === 1 ? '' : 's'} assigned
+                                  </span>
+
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenProductsMenuPicker(menu)}
+                                      className="px-2 py-1 rounded-lg bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 hover:bg-amber-200 text-[10px] font-bold flex items-center gap-1 transition-colors"
+                                      title="Pick products assigned to this menu"
+                                    >
+                                      <ShoppingBag className="w-3 h-3" />
+                                      <span>Products</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenEditMenu(menu)}
+                                      className="p-1 text-gray-400 hover:text-amber-600 rounded-md hover:bg-gray-100 dark:hover:bg-zinc-800"
+                                      title="Edit Menu"
+                                    >
+                                      <Edit className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteMenu(menu)}
+                                      className="p-1 text-gray-400 hover:text-red-600 rounded-md hover:bg-gray-100 dark:hover:bg-zinc-800"
+                                      title="Delete Menu"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
                     {/* Category Counts & Filter Bar */}
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -4410,6 +4984,7 @@ export const Merchants: React.FC = () => {
                               setItemSubcategoryId(subcategories.length > 0 ? subcategories[0].id : '');
                               setItemAvailable(true);
                               setItemSets([]);
+                              setItemMenuIds([]);
                               setItemModalOpen(true);
                             }}
                             className="delivio-btn-yellow px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 shadow-xs"
@@ -4701,6 +5276,37 @@ export const Merchants: React.FC = () => {
                                           Set {item.sets?.length ? `(${item.sets.length})` : ''}
                                         </span>
                                       )}
+                                      {/* Assigned Menus */}
+                                      {item.menuIds && item.menuIds.length > 0 && item.menuIds.map((mId) => {
+                                        const m = menus.find((x) => x.id === mId);
+                                        if (!m) return null;
+                                        return (
+                                          <span
+                                            key={mId}
+                                            className="inline-flex items-center gap-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-teal-50 text-teal-800 dark:bg-teal-950/60 dark:text-teal-300 border border-teal-200 dark:border-teal-800"
+                                            title={`Scheduled menu: ${m.name}`}
+                                          >
+                                            <Calendar className="w-2.5 h-2.5 shrink-0" />
+                                            <span>{m.name}</span>
+                                          </span>
+                                        );
+                                      })}
+                                      {/* Not available now chip */}
+                                      {(() => {
+                                        const availStatus = isItemAvailableNow(item, menus);
+                                        if (!availStatus.available) {
+                                          return (
+                                            <span
+                                              className="inline-flex items-center gap-1 text-[10px] font-extrabold px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-900 dark:bg-amber-950/80 dark:text-amber-300 border border-amber-300 dark:border-amber-800"
+                                              title={availStatus.reason || 'Not available now'}
+                                            >
+                                              <Clock className="w-3 h-3 text-amber-600 shrink-0" />
+                                              <span>Not available now</span>
+                                            </span>
+                                          );
+                                        }
+                                        return null;
+                                      })()}
                                     </div>
                                   </div>
                                   <span className="font-extrabold text-amber-600 shrink-0">
@@ -4740,6 +5346,7 @@ export const Merchants: React.FC = () => {
                                           (item.subcategoryName === 'Other' ? 'other' : '')
                                       );
                                       setItemAvailable(item.available);
+                                      setItemMenuIds(Array.isArray(item.menuIds) ? item.menuIds : []);
                                       setItemSets(
                                         item.sets && Array.isArray(item.sets)
                                           ? JSON.parse(JSON.stringify(item.sets)).map(
@@ -4791,6 +5398,16 @@ export const Merchants: React.FC = () => {
           </div>
         );
       })()}
+
+              {/* TAB: VOUCHERS */}
+              {activeTab === 'vouchers' && (
+                <div className="space-y-4">
+                  <PromoCodesTab
+                    embeddedMerchantId={selectedMerchant.id}
+                    embeddedMerchantName={selectedMerchant.name}
+                  />
+                </div>
+              )}
 
               {/* TAB 5: ORDERS & EARNINGS */}
               {activeTab === 'orders' && (
@@ -5490,6 +6107,96 @@ export const Merchants: React.FC = () => {
                   placeholder="https://..."
                   className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
                 />
+              </div>
+
+              {/* Menus Multi-Select (menuIds) */}
+              <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold uppercase text-gray-700 dark:text-zinc-300">
+                    Menus ({itemMenuIds.length} selected)
+                  </label>
+                  {menus.length > 0 && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setItemMenuIds(menus.map((m) => m.id))}
+                        className="text-[10px] font-bold text-amber-600 hover:text-amber-700 dark:text-amber-400"
+                      >
+                        Select All
+                      </button>
+                      <span className="text-gray-300 dark:text-zinc-700">|</span>
+                      <button
+                        type="button"
+                        onClick={() => setItemMenuIds([])}
+                        className="text-[10px] font-bold text-gray-500 hover:text-gray-700 dark:text-zinc-400"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {menus.length === 0 ? (
+                  <div className="text-[11px] text-gray-400">
+                    No custom menus created yet. This item will be available all day during normal shop opening hours.
+                  </div>
+                ) : (
+                  <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                    {menus.map((menu) => {
+                      const isChecked = itemMenuIds.includes(menu.id);
+                      const timeStr =
+                        menu.schedule?.start && menu.schedule?.end
+                          ? `${menu.schedule.start} - ${menu.schedule.end}`
+                          : 'All day';
+
+                      return (
+                        <label
+                          key={menu.id}
+                          className={`flex items-center justify-between p-2 rounded-lg border text-xs cursor-pointer transition-colors ${
+                            isChecked
+                              ? 'bg-amber-50/80 dark:bg-amber-950/30 border-amber-300 dark:border-amber-800'
+                              : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-800 hover:bg-gray-50'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setItemMenuIds([...itemMenuIds, menu.id]);
+                                } else {
+                                  setItemMenuIds(itemMenuIds.filter((id) => id !== menu.id));
+                                }
+                              }}
+                              className="w-4 h-4 rounded-sm text-amber-500 focus:ring-amber-400"
+                            />
+                            <div>
+                              <span className="font-bold text-gray-900 dark:text-white block">
+                                {menu.name}
+                              </span>
+                              <span className="text-[10px] text-gray-400">
+                                {timeStr} {!menu.active && '(Paused)'}
+                              </span>
+                            </div>
+                          </div>
+                          <span
+                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded-sm ${
+                              menu.active
+                                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                : 'bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400'
+                            }`}
+                          >
+                            {menu.active ? 'Active' : 'Inactive'}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+                <p className="text-[11px] text-gray-400">
+                  Select which menu schedule(s) this item belongs to. If no menus are selected, the item is part of the general all-day catalog.
+                </p>
               </div>
 
               <div className="flex items-center gap-2 pt-1">
@@ -6589,6 +7296,467 @@ export const Merchants: React.FC = () => {
         />
       )}
 
+      {/* Menu Create / Edit Modal (merchants/{id}/menus) */}
+      {menuModalOpen && selectedMerchant && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="w-full max-w-lg bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="p-5 border-b border-gray-100 dark:border-zinc-800 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-400 text-black">
+                  <Calendar className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                    {editingMenu ? `Edit Menu: ${editingMenu.name}` : 'Create New Menu'}
+                  </h3>
+                  <p className="text-[11px] text-gray-500 dark:text-zinc-400">
+                    Targeted schedule in <code className="font-mono text-amber-600">merchants/{selectedMerchant.id}/menus</code>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMenuModalOpen(false)}
+                className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveMenu} className="p-5 space-y-4 overflow-y-auto flex-1 text-xs">
+              {/* Menu Name */}
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-700 dark:text-zinc-300 mb-1">
+                  Menu Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={menuFormName}
+                  onChange={(e) => setMenuFormName(e.target.value)}
+                  placeholder="e.g. Breakfast Specials, Lunch Menu, Late Night"
+                  className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium focus:ring-2 focus:ring-amber-400"
+                />
+              </div>
+
+              {/* Status & Sort Order */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="p-3 rounded-xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 flex items-center justify-between">
+                  <div>
+                    <span className="font-bold text-gray-900 dark:text-white block">Menu Status</span>
+                    <span className="text-[10px] text-gray-400">Toggle active menu</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setMenuFormActive(!menuFormActive)}
+                    className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${
+                      menuFormActive
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-gray-300 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300'
+                    }`}
+                  >
+                    {menuFormActive ? 'Active' : 'Inactive'}
+                  </button>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold uppercase text-gray-700 dark:text-zinc-300 mb-1">
+                    Display Sort Order
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={menuFormSortOrder}
+                    onChange={(e) => setMenuFormSortOrder(Number(e.target.value))}
+                    className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
+                  />
+                </div>
+              </div>
+
+              {/* Schedule Configuration */}
+              <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="font-bold text-gray-900 dark:text-white block">
+                      Operating Schedule
+                    </label>
+                    <span className="text-[10px] text-gray-400">
+                      Restrict to specific days & time windows
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setMenuFormHasSchedule(!menuFormHasSchedule)}
+                    className={`px-3 py-1 rounded-full text-xs font-bold transition-colors ${
+                      menuFormHasSchedule
+                        ? 'bg-amber-400 text-black'
+                        : 'bg-gray-300 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300'
+                    }`}
+                  >
+                    {menuFormHasSchedule ? 'Scheduled Hours' : 'All-Day Menu'}
+                  </button>
+                </div>
+
+                {menuFormHasSchedule ? (
+                  <div className="space-y-3 pt-2 border-t border-gray-200 dark:border-zinc-800">
+                    {/* Days Picker */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-[11px] font-bold uppercase text-gray-600 dark:text-zinc-400">
+                          Active Days
+                        </span>
+                        <div className="flex items-center gap-1.5 text-[10px]">
+                          <button
+                            type="button"
+                            onClick={() => setMenuFormDays([0, 1, 2, 3, 4, 5, 6])}
+                            className="font-bold text-amber-600 hover:underline"
+                          >
+                            All
+                          </button>
+                          <span className="text-gray-300">|</span>
+                          <button
+                            type="button"
+                            onClick={() => setMenuFormDays([1, 2, 3, 4, 5])}
+                            className="font-bold text-amber-600 hover:underline"
+                          >
+                            Weekdays
+                          </button>
+                          <span className="text-gray-300">|</span>
+                          <button
+                            type="button"
+                            onClick={() => setMenuFormDays([0, 6])}
+                            className="font-bold text-amber-600 hover:underline"
+                          >
+                            Weekends
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-7 gap-1">
+                        {DAYS_OF_WEEK.map((day) => {
+                          const isSelected = menuFormDays.includes(day.id);
+                          return (
+                            <button
+                              type="button"
+                              key={day.id}
+                              onClick={() => {
+                                if (isSelected) {
+                                  if (menuFormDays.length > 1) {
+                                    setMenuFormDays(menuFormDays.filter((d) => d !== day.id));
+                                  } else {
+                                    showError('Menu must be active for at least one day.');
+                                  }
+                                } else {
+                                  setMenuFormDays([...menuFormDays, day.id]);
+                                }
+                              }}
+                              className={`py-2 rounded-xl text-center text-xs font-bold transition-all border ${
+                                isSelected
+                                  ? 'bg-amber-400 text-black border-amber-500 shadow-2xs font-black'
+                                  : 'bg-white dark:bg-zinc-800 text-gray-500 dark:text-zinc-400 border-gray-200 dark:border-zinc-700 hover:bg-gray-50'
+                              }`}
+                            >
+                              {day.short}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Time Window */}
+                    <div className="grid grid-cols-2 gap-3 pt-1">
+                      <div>
+                        <label className="block text-[11px] font-bold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                          Start Time (24h)
+                        </label>
+                        <input
+                          type="time"
+                          required
+                          value={menuFormStart}
+                          onChange={(e) => setMenuFormStart(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-mono font-bold"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                          End Time (24h)
+                        </label>
+                        <input
+                          type="time"
+                          required
+                          value={menuFormEnd}
+                          onChange={(e) => setMenuFormEnd(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-mono font-bold"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-gray-400 italic pt-1 border-t border-gray-100 dark:border-zinc-800">
+                    This menu has no time limit and runs all day whenever the merchant store is open.
+                  </p>
+                )}
+              </div>
+
+              {/* Overlap Note inside Modal */}
+              <div className="p-3 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200/80 dark:border-blue-900/40 text-[11px] text-blue-900 dark:text-blue-300 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+                <div>
+                  <strong>Overlap note:</strong> When schedules overlap or multiple menus are active at the same time, customers see all items from any currently scheduled active menu. If an item belongs to no specific menu or an all-day menu, it is available during regular shop hours.
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2.5 pt-3 border-t border-gray-100 dark:border-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => setMenuModalOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingMenu}
+                  className="delivio-btn-yellow px-5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                >
+                  {savingMenu && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>{editingMenu ? 'Save Menu Changes' : 'Create Menu'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Products in Menu Picker Modal */}
+      {productsMenuPickerOpen && targetMenuForPicker && selectedMerchant && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="w-full max-w-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            {/* Header */}
+            <div className="p-5 border-b border-gray-100 dark:border-zinc-800 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-400 text-black">
+                  <ShoppingBag className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                    Assign Products to "{targetMenuForPicker.name}"
+                  </h3>
+                  <p className="text-[11px] text-gray-500 dark:text-zinc-400">
+                    Select products that belong to this scheduled menu ({pickerSelectedProductIds.length} of {menuItems.length} selected).
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setProductsMenuPickerOpen(false);
+                  setTargetMenuForPicker(null);
+                }}
+                className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Filter & Search Bar */}
+            <div className="p-4 bg-gray-50 dark:bg-zinc-850/60 border-b border-gray-100 dark:border-zinc-800 space-y-2.5">
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    value={pickerSearchQuery}
+                    onChange={(e) => setPickerSearchQuery(e.target.value)}
+                    placeholder="Search products by name..."
+                    className="w-full pl-9 pr-3 py-1.5 text-xs rounded-xl border border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                  />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const filtered = menuItems
+                        .filter((i) => {
+                          const matchCat = pickerCategoryFilter === 'all' || i.categoryId === pickerCategoryFilter;
+                          const matchQ =
+                            !pickerSearchQuery.trim() ||
+                            i.name.toLowerCase().includes(pickerSearchQuery.toLowerCase());
+                          return matchCat && matchQ;
+                        })
+                        .map((i) => i.id);
+                      setPickerSelectedProductIds(Array.from(new Set([...pickerSelectedProductIds, ...filtered])));
+                    }}
+                    className="px-2.5 py-1.5 text-[11px] font-bold bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 rounded-xl hover:bg-amber-200"
+                  >
+                    Select Filtered
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const filteredIds = new Set(
+                        menuItems
+                          .filter((i) => {
+                            const matchCat = pickerCategoryFilter === 'all' || i.categoryId === pickerCategoryFilter;
+                            const matchQ =
+                              !pickerSearchQuery.trim() ||
+                              i.name.toLowerCase().includes(pickerSearchQuery.toLowerCase());
+                            return matchCat && matchQ;
+                          })
+                          .map((i) => i.id)
+                      );
+                      setPickerSelectedProductIds(pickerSelectedProductIds.filter((id) => !filteredIds.has(id)));
+                    }}
+                    className="px-2.5 py-1.5 text-[11px] font-bold bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300 rounded-xl hover:bg-gray-300"
+                  >
+                    Deselect Filtered
+                  </button>
+                </div>
+              </div>
+
+              {/* Category Filter Chips */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setPickerCategoryFilter('all')}
+                  className={`px-2.5 py-0.5 rounded-lg font-bold text-[11px] transition-colors ${
+                    pickerCategoryFilter === 'all'
+                      ? 'bg-amber-400 text-black'
+                      : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 hover:text-gray-900'
+                  }`}
+                >
+                  All ({menuItems.length})
+                </button>
+                {(selectedMerchant.type === 'food' ? FOOD_CATEGORIES : CONVENIENCE_CATEGORIES).map((cat) => {
+                  const count = menuItems.filter((i) => i.categoryId === cat).length;
+                  if (count === 0) return null;
+                  return (
+                    <button
+                      type="button"
+                      key={cat}
+                      onClick={() => setPickerCategoryFilter(cat)}
+                      className={`px-2 py-0.5 rounded-lg font-bold text-[11px] transition-colors whitespace-nowrap ${
+                        pickerCategoryFilter === cat
+                          ? 'bg-amber-400 text-black'
+                          : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 hover:text-gray-900'
+                      }`}
+                    >
+                      {cat} ({count})
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Items List */}
+            <div className="p-4 space-y-2 overflow-y-auto flex-1 max-h-[50vh]">
+              {(() => {
+                const filtered = menuItems.filter((i) => {
+                  const matchCat = pickerCategoryFilter === 'all' || i.categoryId === pickerCategoryFilter;
+                  const matchQ =
+                    !pickerSearchQuery.trim() ||
+                    i.name.toLowerCase().includes(pickerSearchQuery.toLowerCase());
+                  return matchCat && matchQ;
+                });
+
+                if (filtered.length === 0) {
+                  return (
+                    <div className="p-8 text-center text-xs text-gray-400">
+                      No matching products found.
+                    </div>
+                  );
+                }
+
+                return filtered.map((item) => {
+                  const isChecked = pickerSelectedProductIds.includes(item.id);
+                  const otherMenuCount = (item.menuIds || []).filter((id) => id !== targetMenuForPicker.id).length;
+
+                  return (
+                    <label
+                      key={item.id}
+                      className={`flex items-center justify-between p-3 rounded-2xl border text-xs cursor-pointer transition-colors ${
+                        isChecked
+                          ? 'bg-amber-50/70 dark:bg-amber-950/30 border-amber-300 dark:border-amber-800'
+                          : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-800 hover:bg-gray-50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setPickerSelectedProductIds([...pickerSelectedProductIds, item.id]);
+                            } else {
+                              setPickerSelectedProductIds(pickerSelectedProductIds.filter((id) => id !== item.id));
+                            }
+                          }}
+                          className="w-4 h-4 rounded text-amber-500 focus:ring-amber-400"
+                        />
+                        <div>
+                          <div className="font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                            <span>{item.name}</span>
+                            {item.categoryId && (
+                              <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400">
+                                {item.categoryId}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-gray-400 flex items-center gap-1.5 mt-0.5">
+                            <span>₱{Number(item.price).toFixed(2)}</span>
+                            {otherMenuCount > 0 && (
+                              <span>• Also in {otherMenuCount} other menu(s)</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <span
+                        className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
+                          isChecked
+                            ? 'bg-amber-400 text-black'
+                            : 'bg-gray-100 text-gray-400 dark:bg-zinc-800 dark:text-zinc-500'
+                        }`}
+                      >
+                        {isChecked ? 'In Menu' : 'Excluded'}
+                      </span>
+                    </label>
+                  );
+                });
+              })()}
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 border-t border-gray-100 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-850 flex items-center justify-between">
+              <span className="text-xs font-bold text-gray-600 dark:text-zinc-400">
+                {pickerSelectedProductIds.length} product(s) assigned
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProductsMenuPickerOpen(false);
+                    setTargetMenuForPicker(null);
+                  }}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveProductsInMenu}
+                  disabled={savingMenuProducts}
+                  className="delivio-btn-yellow px-5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                >
+                  {savingMenuProducts && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>Save Products in Menu</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Confirmation Modal to Save Special Radius */}
       {confirmSaveSpecialRadiusModalOpen && selectedMerchant && (
         <ConfirmationModal
@@ -6615,6 +7783,18 @@ export const Merchants: React.FC = () => {
           confirmLabel={savingGlobalRadius ? 'Saving...' : 'Confirm & Save Radius'}
           reasonRequired={false}
           isDestructive={false}
+        />
+      )}
+
+      {/* Export Merchants Date Filter Modal */}
+      {exportModalOpen && (
+        <ExportDateModal
+          isOpen={exportModalOpen}
+          onClose={() => setExportModalOpen(false)}
+          title="Export Merchant Stores to CSV"
+          description="Filter merchants by registration date or export all registered stores."
+          totalRecords={filteredMerchants.length}
+          onExport={handleExportMerchantsWithDateFilter}
         />
       )}
     </div>

@@ -392,9 +392,19 @@ export const TopBar: React.FC<TopBarProps> = ({
               <span>{adminProfile?.name?.charAt(0)?.toUpperCase() || 'A'}</span>
             )}
           </div>
-          <span className="hidden lg:block text-xs font-bold text-gray-800 dark:text-zinc-200 max-w-[100px] truncate">
-            {adminProfile?.name || 'Admin'}
-          </span>
+
+          <div className="hidden lg:flex flex-col text-left">
+            <span className="text-xs font-bold text-gray-800 dark:text-zinc-200 max-w-[120px] truncate leading-tight">
+              {adminProfile?.name || 'Staff'}
+            </span>
+            <span className="text-[9px] font-extrabold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+              {adminProfile?.adminRole === 'support'
+                ? 'Support Sub-Admin'
+                : adminProfile?.adminRole === 'finance'
+                ? 'Finance Sub-Admin'
+                : 'Full Admin'}
+            </span>
+          </div>
         </button>
       </div>
     </header>

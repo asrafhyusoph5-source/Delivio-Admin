@@ -28,6 +28,7 @@ import { Reports } from './pages/Reports';
 import { AuditLog } from './pages/AuditLog';
 import { Settings } from './pages/Settings';
 import { ServicesByCity } from './pages/ServicesByCity';
+import { FraudFlags } from './pages/FraudFlags';
 
 export default function App() {
   return (
@@ -62,6 +63,7 @@ export default function App() {
                     <Route path="reports" element={<Reports />} />
                     <Route path="audit" element={<AuditLog />} />
                     <Route path="settings" element={<Settings />} />
+                    <Route path="flags" element={<FraudFlags />} />
                   </Route>
 
                   {/* Fallback */}

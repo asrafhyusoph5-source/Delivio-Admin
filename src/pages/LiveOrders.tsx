@@ -20,6 +20,7 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
+import { ExportDateModal } from '../components/common/ExportDateModal';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
 import { formatOrderNumber, matchesOrderSearch } from '../utils/orderNumber';
 import type { Order, OrderStatus, OrderServiceType } from '../types';
@@ -65,6 +66,26 @@ import {
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
 export const FulfillmentChip: React.FC<{ order: Order }> = ({ order }) => {
+  const isScheduled = Boolean(
+    order.scheduledFor ||
+    (order as any).isScheduled ||
+    order.fulfillmentType === 'scheduled' ||
+    (order as any).scheduled === true
+  );
+
+  if (isScheduled) {
+    const formatted = order.scheduledFor ? formatTimestamp(order.scheduledFor) : 'Scheduled';
+    return (
+      <span
+        title={`Scheduled for ${formatted}. Admin can view and manage before release.`}
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-900 dark:bg-purple-950/70 dark:text-purple-300 border border-purple-300 dark:border-purple-800 whitespace-nowrap shadow-2xs"
+      >
+        <Clock className="w-3 h-3 text-purple-600 dark:text-purple-400 shrink-0" />
+        <span>Scheduled: {formatted}</span>
+      </span>
+    );
+  }
+
   if (order.serviceType === 'taxi') {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700 whitespace-nowrap">
@@ -74,17 +95,7 @@ export const FulfillmentChip: React.FC<{ order: Order }> = ({ order }) => {
     );
   }
 
-  const isScheduled = Boolean(order.scheduledFor || (order as any).isScheduled || order.fulfillmentType === 'scheduled');
   const isPickup = Boolean(order.isPickup || order.fulfillmentType === 'pickup' || (order.serviceType as any) === 'pickup');
-
-  if (isScheduled) {
-    return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-900 dark:bg-purple-950/70 dark:text-purple-300 border border-purple-300 dark:border-purple-800 whitespace-nowrap">
-        <Clock className="w-3 h-3 text-purple-600 shrink-0" />
-        <span>Scheduled{order.scheduledFor ? ` (${formatTimestamp(order.scheduledFor)})` : ''}</span>
-      </span>
-    );
-  }
 
   if (isPickup) {
     return (
@@ -905,6 +916,30 @@ export const LiveOrders: React.FC = () => {
       });
   }, [orders]);
 
+  const scheduledCount = useMemo(() => {
+    return orders.filter(
+      (o) => Boolean(o.scheduledFor || (o as any).isScheduled || o.fulfillmentType === 'scheduled')
+    ).length;
+  }, [orders]);
+
+  const activeCount = useMemo(() => {
+    return orders.filter(
+      (o) =>
+        o.status !== 'Delivered' &&
+        o.status !== 'Completed' &&
+        o.status !== 'Cancelled' &&
+        o.status !== 'Rejected'
+    ).length;
+  }, [orders]);
+
+  const completedCount = useMemo(() => {
+    return orders.filter((o) => o.status === 'Delivered' || o.status === 'Completed').length;
+  }, [orders]);
+
+  const cancelledCount = useMemo(() => {
+    return orders.filter((o) => o.status === 'Cancelled').length;
+  }, [orders]);
+
   // Filtered Orders
   const filteredOrders = useMemo(() => {
     return orders.filter((order) => {
@@ -918,7 +953,17 @@ export const LiveOrders: React.FC = () => {
       }
       // 3. Status Filter
       if (statusFilter !== 'all') {
-        if (statusFilter === 'Completed' || statusFilter === 'Delivered') {
+        if (statusFilter === 'Scheduled') {
+          const isSched = Boolean(order.scheduledFor || (order as any).isScheduled || order.fulfillmentType === 'scheduled');
+          if (!isSched) return false;
+        } else if (statusFilter === 'Active') {
+          const isDone =
+            order.status === 'Delivered' ||
+            order.status === 'Completed' ||
+            order.status === 'Cancelled' ||
+            order.status === 'Rejected';
+          if (isDone) return false;
+        } else if (statusFilter === 'Completed' || statusFilter === 'Delivered') {
           if (order.status !== 'Completed' && order.status !== 'Delivered') {
             return false;
           }
@@ -1394,9 +1439,28 @@ export const LiveOrders: React.FC = () => {
     }
   };
 
-  // CSV Export
-  const handleExportCsv = () => {
-    const rows = filteredOrders.map((o) => ({
+  // CSV Export Modal state
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+
+  // CSV Export with optional date range
+  const handleExportCsvWithDateFilter = (startDate?: string, endDate?: string) => {
+    let list = [...filteredOrders];
+    if (startDate) {
+      const startMs = new Date(`${startDate}T00:00:00`).getTime();
+      list = list.filter((o) => {
+        const t = o.createdAt?.toMillis ? o.createdAt.toMillis() : new Date(o.createdAt || 0).getTime();
+        return t >= startMs;
+      });
+    }
+    if (endDate) {
+      const endMs = new Date(`${endDate}T23:59:59`).getTime();
+      list = list.filter((o) => {
+        const t = o.createdAt?.toMillis ? o.createdAt.toMillis() : new Date(o.createdAt || 0).getTime();
+        return t <= endMs;
+      });
+    }
+
+    const rows = list.map((o) => ({
       OrderNumber: o.orderNumber,
       Fulfillment: o.serviceType === 'taxi' ? 'Delivio Taxi Ride' : o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
       ScheduledFor: o.scheduledFor ? formatTimestamp(o.scheduledFor) : '',
@@ -1510,11 +1574,11 @@ export const LiveOrders: React.FC = () => {
 
           {/* CSV Export */}
           <button
-            onClick={handleExportCsv}
+            onClick={() => setExportModalOpen(true)}
             className="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-gray-700 dark:text-zinc-300 hover:bg-gray-50 text-xs font-bold shadow-xs transition-colors"
           >
             <Download className="w-4 h-4" />
-            <span>Export CSV</span>
+            <span>Export Orders (CSV)</span>
           </button>
         </div>
       </div>
@@ -1531,9 +1595,16 @@ export const LiveOrders: React.FC = () => {
                 Upcoming Scheduled Orders ({upcomingScheduledOrders.length})
               </h3>
             </div>
-            <span className="text-[11px] font-semibold text-purple-700 dark:text-purple-400">
-              Future fulfillment queue
-            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setFulfillmentFilter('scheduled');
+                setStatusFilter('all');
+              }}
+              className="text-xs font-bold text-purple-700 dark:text-purple-300 hover:underline flex items-center gap-1"
+            >
+              <span>View all scheduled in table &rarr;</span>
+            </button>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -1561,9 +1632,28 @@ export const LiveOrders: React.FC = () => {
                   <span className="font-bold text-purple-700 dark:text-purple-400">
                     ₱{Number(schedOrder.fees?.total || 0).toFixed(2)}
                   </span>
-                  <span className="text-[10px] text-gray-400">
-                    {schedOrder.scheduledFor ? formatTimestamp(schedOrder.scheduledFor) : 'Scheduled'}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {schedOrder.status !== 'Cancelled' && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedOrder(schedOrder);
+                          const isWalletPaid =
+                            (schedOrder.paymentMethod || schedOrder.payment?.method || '').toLowerCase() === 'wallet';
+                          setRefundToWallet(isWalletPaid);
+                          setCancelModalOpen(true);
+                        }}
+                        className="text-[11px] font-bold text-red-600 dark:text-red-400 hover:underline"
+                        title="Cancel this scheduled order"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                    <span className="text-[10px] text-gray-400">
+                      {schedOrder.scheduledFor ? formatTimestamp(schedOrder.scheduledFor) : 'Scheduled'}
+                    </span>
+                  </div>
                 </div>
               </div>
             ))}
@@ -1573,6 +1663,85 @@ export const LiveOrders: React.FC = () => {
 
       {/* Filter Toolbar */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-4 shadow-xs space-y-3">
+        {/* Quick Filter Pills */}
+        <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
+          <button
+            type="button"
+            onClick={() => {
+              setFulfillmentFilter('all');
+              setStatusFilter('all');
+            }}
+            className={`px-3 py-1.5 rounded-xl font-bold transition-all shrink-0 ${
+              fulfillmentFilter === 'all' && statusFilter === 'all'
+                ? 'bg-amber-400 text-black shadow-xs'
+                : 'bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-zinc-300 hover:bg-gray-200 dark:hover:bg-zinc-700'
+            }`}
+          >
+            All Orders ({orders.length})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setFulfillmentFilter('scheduled');
+              setStatusFilter('all');
+            }}
+            className={`px-3 py-1.5 rounded-xl font-bold flex items-center gap-1.5 transition-all shrink-0 ${
+              fulfillmentFilter === 'scheduled' || statusFilter === 'Scheduled'
+                ? 'bg-purple-600 text-white shadow-xs'
+                : 'bg-purple-50 dark:bg-purple-950/40 text-purple-800 dark:text-purple-300 border border-purple-200 dark:border-purple-800/60 hover:bg-purple-100'
+            }`}
+          >
+            <Clock className="w-3.5 h-3.5" />
+            <span>Scheduled ({scheduledCount})</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setFulfillmentFilter('all');
+              setStatusFilter('Active');
+            }}
+            className={`px-3 py-1.5 rounded-xl font-bold transition-all shrink-0 ${
+              statusFilter === 'Active'
+                ? 'bg-blue-600 text-white shadow-xs'
+                : 'bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-zinc-300 hover:bg-gray-200 dark:hover:bg-zinc-700'
+            }`}
+          >
+            Active / In Progress ({activeCount})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setFulfillmentFilter('all');
+              setStatusFilter('Completed');
+            }}
+            className={`px-3 py-1.5 rounded-xl font-bold transition-all shrink-0 ${
+              statusFilter === 'Completed' || statusFilter === 'Delivered'
+                ? 'bg-emerald-600 text-white shadow-xs'
+                : 'bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-zinc-300 hover:bg-gray-200 dark:hover:bg-zinc-700'
+            }`}
+          >
+            Delivered / Completed ({completedCount})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setFulfillmentFilter('all');
+              setStatusFilter('Cancelled');
+            }}
+            className={`px-3 py-1.5 rounded-xl font-bold transition-all shrink-0 ${
+              statusFilter === 'Cancelled'
+                ? 'bg-red-600 text-white shadow-xs'
+                : 'bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-zinc-300 hover:bg-gray-200 dark:hover:bg-zinc-700'
+            }`}
+          >
+            Cancelled ({cancelledCount})
+          </button>
+        </div>
+
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3">
           {/* Search bar */}
           <div className="lg:col-span-2 relative">
@@ -1591,12 +1760,12 @@ export const LiveOrders: React.FC = () => {
             <select
               value={fulfillmentFilter}
               onChange={(e) => setFulfillmentFilter(e.target.value as any)}
-              className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+              className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400 font-semibold"
             >
               <option value="all">All Fulfillments</option>
+              <option value="scheduled">Scheduled (Pre-release & Upcoming)</option>
               <option value="delivery">Delivery</option>
               <option value="pickup">Pick Up</option>
-              <option value="scheduled">Scheduled</option>
             </select>
           </div>
 
@@ -1622,9 +1791,11 @@ export const LiveOrders: React.FC = () => {
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
-              className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+              className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400 font-semibold"
             >
               <option value="all">All Statuses</option>
+              <option value="Scheduled">Scheduled (Upcoming Orders)</option>
+              <option value="Active">Active / In Progress</option>
               {EXACT_STATUSES.map((st) => (
                 <option key={st} value={st}>
                   {st}
@@ -1810,15 +1981,35 @@ export const LiveOrders: React.FC = () => {
                         {formatRelativeTime(order.createdAt)}
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedOrder(order);
-                          }}
-                          className="px-2.5 py-1 rounded-lg text-xs font-bold text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40 transition-colors"
-                        >
-                          Details &rarr;
-                        </button>
+                        <div className="flex items-center justify-end gap-1.5">
+                          {order.status !== 'Cancelled' && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedOrder(order);
+                                const isWalletPaid =
+                                  (order.paymentMethod || order.payment?.method || '').toLowerCase() ===
+                                  'wallet';
+                                setRefundToWallet(isWalletPaid);
+                                setCancelModalOpen(true);
+                              }}
+                              className="px-2 py-1 rounded-lg text-xs font-bold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
+                              title="Cancel this order at any time"
+                            >
+                              Cancel
+                            </button>
+                          )}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedOrder(order);
+                            }}
+                            className="px-2.5 py-1 rounded-lg text-xs font-bold text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40 transition-colors"
+                          >
+                            Details &rarr;
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1932,6 +2123,28 @@ export const LiveOrders: React.FC = () => {
                                 ? 'No driver (Pick Up)'
                                 : ord.riderName || 'Unassigned'}
                             </span>
+                          </div>
+                          <div className="pt-1.5 flex items-center justify-between text-[10px] border-t border-gray-100 dark:border-zinc-800">
+                            {ord.status !== 'Cancelled' ? (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedOrder(ord);
+                                  const isWalletPaid =
+                                    (ord.paymentMethod || ord.payment?.method || '').toLowerCase() ===
+                                    'wallet';
+                                  setRefundToWallet(isWalletPaid);
+                                  setCancelModalOpen(true);
+                                }}
+                                className="text-red-600 dark:text-red-400 font-bold hover:underline"
+                              >
+                                Cancel Order
+                              </button>
+                            ) : (
+                              <span className="text-gray-400 font-semibold">Cancelled</span>
+                            )}
+                            <span className="text-gray-400">{formatRelativeTime(ord.createdAt)}</span>
                           </div>
                         </div>
                       </div>
@@ -2215,48 +2428,73 @@ export const LiveOrders: React.FC = () => {
                 </div>
 
                 {/* Dispatch Actions buttons */}
-                {selectedOrder.status !== 'Delivered' &&
-                  selectedOrder.status !== 'Completed' &&
-                  selectedOrder.status !== 'Cancelled' &&
-                  selectedOrder.status !== 'Rejected' && (
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {selectedOrder.status !== 'On another delivery' && selectedOrder.riderId && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  {selectedOrder.status !== 'Delivered' &&
+                    selectedOrder.status !== 'Completed' &&
+                    selectedOrder.status !== 'Cancelled' &&
+                    selectedOrder.status !== 'Rejected' && (
+                      <>
+                        {selectedOrder.status !== 'On another delivery' && selectedOrder.riderId && (
+                          <button
+                            onClick={handleSetOnAnotherDelivery}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 shadow-xs transition-colors"
+                          >
+                            <Car className="w-3.5 h-3.5" /> On another delivery
+                          </button>
+                        )}
                         <button
-                          onClick={handleSetOnAnotherDelivery}
-                          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 shadow-xs transition-colors"
+                          onClick={handleMarkCompleted}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 shadow-xs transition-colors"
                         >
-                          <Car className="w-3.5 h-3.5" /> On another delivery
+                          <CheckCircle2 className="w-3.5 h-3.5" /> Mark Completed
                         </button>
-                      )}
-                      <button
-                        onClick={handleMarkCompleted}
-                        className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 shadow-xs transition-colors"
-                      >
-                        <CheckCircle2 className="w-3.5 h-3.5" /> Mark Completed
-                      </button>
-                      {!selectedOrder.isPickup && selectedOrder.fulfillmentType !== 'pickup' && (
-                        <button
-                          onClick={() => setReassignModalOpen(true)}
-                          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white/90 text-gray-800 text-xs font-bold hover:bg-white shadow-xs transition-colors border border-gray-300 dark:border-zinc-700"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" /> Reassign Driver
-                        </button>
-                      )}
-                      <button
-                        onClick={() => {
-                          const isWalletPaid =
-                            (selectedOrder.paymentMethod || selectedOrder.payment?.method || '').toLowerCase() ===
-                            'wallet';
-                          setRefundToWallet(isWalletPaid);
-                          setCancelModalOpen(true);
-                        }}
-                        className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-bold hover:bg-red-700 shadow-xs transition-colors"
-                      >
-                        <Ban className="w-3.5 h-3.5" /> Cancel Order
-                      </button>
-                    </div>
+                        {!selectedOrder.isPickup && selectedOrder.fulfillmentType !== 'pickup' && (
+                          <button
+                            onClick={() => setReassignModalOpen(true)}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white/90 text-gray-800 text-xs font-bold hover:bg-white shadow-xs transition-colors border border-gray-300 dark:border-zinc-700"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" /> Reassign Driver
+                          </button>
+                        )}
+                      </>
+                    )}
+
+                  {/* The admin can cancel any order at any time */}
+                  {selectedOrder.status !== 'Cancelled' && (
+                    <button
+                      onClick={() => {
+                        const isWalletPaid =
+                          (selectedOrder.paymentMethod || selectedOrder.payment?.method || '').toLowerCase() ===
+                          'wallet';
+                        setRefundToWallet(isWalletPaid);
+                        setCancelModalOpen(true);
+                      }}
+                      className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-bold hover:bg-red-700 shadow-xs transition-colors"
+                    >
+                      <Ban className="w-3.5 h-3.5" /> Cancel Order
+                    </button>
                   )}
+                </div>
               </div>
+
+              {/* Scheduled Order Pre-Release Notice */}
+              {Boolean(selectedOrder.scheduledFor || selectedOrder.fulfillmentType === 'scheduled' || (selectedOrder as any).isScheduled) && (
+                <div className="p-3.5 rounded-2xl bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/60 flex items-center justify-between gap-3 text-xs shadow-2xs">
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-2 rounded-xl bg-purple-600 text-white shrink-0">
+                      <Clock className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <span className="font-extrabold text-purple-950 dark:text-purple-200 block">
+                        Scheduled Fulfillment: {selectedOrder.scheduledFor ? formatTimestamp(selectedOrder.scheduledFor) : 'Scheduled'}
+                      </span>
+                      <span className="text-[11px] text-purple-700 dark:text-purple-400">
+                        Admin view before release. Release to merchant is governed by platform dispatch lead time. The admin can cancel this order at any time.
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Delivery Option & Dispatch Hold Rules Banner */}
               {selectedOrder.deliveryOption && (
@@ -2783,6 +3021,18 @@ export const LiveOrders: React.FC = () => {
           reasonRequired={true}
           reasonPlaceholder="Specify reason for driver reassignment (e.g., driver idle, vehicle breakdown, wrong route)..."
           isDestructive={false}
+        />
+      )}
+
+      {/* Export Orders Date Filter Modal */}
+      {exportModalOpen && (
+        <ExportDateModal
+          isOpen={exportModalOpen}
+          onClose={() => setExportModalOpen(false)}
+          title="Export Orders to CSV"
+          description="Filter orders by placement date or leave blank to export all matching records."
+          totalRecords={filteredOrders.length}
+          onExport={handleExportCsvWithDateFilter}
         />
       )}
     </div>

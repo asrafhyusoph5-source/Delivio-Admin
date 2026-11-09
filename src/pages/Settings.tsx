@@ -34,6 +34,7 @@ import {
 } from '../constants';
 import { ReceiptDesignerTab } from '../components/settings/ReceiptDesignerTab';
 import { CheckoutMustTryTab } from '../components/settings/CheckoutMustTryTab';
+import { StaffTab } from '../components/settings/StaffTab';
 import {
   Settings as SettingsIcon,
   Shield,
@@ -68,7 +69,8 @@ import {
   Compass,
   Zap,
   Printer,
-  Star
+  Star,
+  Users
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
@@ -130,9 +132,10 @@ export const Settings: React.FC = () => {
   const [loadingDispatch, setLoadingDispatch] = useState<boolean>(true);
   const [savingDispatch, setSavingDispatch] = useState<boolean>(false);
   const [confirmSaveDispatchModalOpen, setConfirmSaveDispatchModalOpen] = useState<boolean>(false);
+  const [scheduledReleaseLeadMinutes, setScheduledReleaseLeadMinutes] = useState<number>(0);
 
   // Sub-Tab Navigation
-  type SettingsTab = 'general' | 'receipt' | 'checkout' | 'dispatch' | 'taxes' | 'services' | 'tools';
+  type SettingsTab = 'general' | 'receipt' | 'checkout' | 'dispatch' | 'taxes' | 'services' | 'staff' | 'tools';
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
 
   // Receipt Designer (settings/receipt)
@@ -344,6 +347,11 @@ export const Settings: React.FC = () => {
           if (dt.timezone) {
             setTimezone(dt.timezone);
           }
+
+          // Scheduled orders release lead minutes
+          if (dt.scheduledReleaseLeadMinutes !== undefined) {
+            setScheduledReleaseLeadMinutes(Math.min(120, Math.max(0, Number(dt.scheduledReleaseLeadMinutes) || 0)));
+          }
         }
 
         // Fetch settings/dispatch
@@ -543,6 +551,19 @@ export const Settings: React.FC = () => {
 
       await setDoc(dRef, payload);
       setDispatchSettings(payload);
+
+      // Save scheduledReleaseLeadMinutes to settings/platform (range 0 to 120, default 0)
+      const leadMinutes = Math.min(120, Math.max(0, Number(scheduledReleaseLeadMinutes) || 0));
+      const platformRef = doc(db, 'settings', 'platform');
+      await setDoc(
+        platformRef,
+        {
+          scheduledReleaseLeadMinutes: leadMinutes,
+          updatedAt: Timestamp.now()
+        },
+        { merge: true }
+      );
+
       setDispatchExists(true);
       setConfirmSaveDispatchModalOpen(false);
 
@@ -553,10 +574,10 @@ export const Settings: React.FC = () => {
         action: 'UPDATE_DISPATCH_SETTINGS',
         entityType: 'settings',
         entityId: 'dispatch',
-        details: `Updated dispatch settings. Default: ${payload.defaultOption}, Radius: ${payload.searchRadiusKm}km, Wave: ${payload.waveSeconds}s, Priority: ${payload.options.priority.feeAdjustValue >= 0 ? '+' : ''}${payload.options.priority.feeAdjustValue}, Saver: ${payload.options.saver.feeAdjustValue}`
+        details: `Updated dispatch settings. Default: ${payload.defaultOption}, Radius: ${payload.searchRadiusKm}km, Wave: ${payload.waveSeconds}s, Scheduled Release Lead: ${leadMinutes}m, Priority Head Start: ${payload.priorityHeadStartSeconds}s, Priority Max Batch: ${payload.priorityMaxBatch}`
       });
 
-      showSuccess('Dispatch settings saved successfully.');
+      showSuccess('Dispatch settings and scheduled orders release rules saved successfully.');
     } catch (err: any) {
       showError(err);
     } finally {
@@ -577,6 +598,7 @@ export const Settings: React.FC = () => {
         defaultCommissionRate: Number(defaultCommissionRate),
         services: platformServices,
         taxiVehicles: platformTaxiVehicles,
+        scheduledReleaseLeadMinutes: Math.min(120, Math.max(0, Number(scheduledReleaseLeadMinutes) || 0)),
         updatedAt: Timestamp.now()
       };
 
@@ -1010,6 +1032,7 @@ export const Settings: React.FC = () => {
           { id: 'dispatch' as const, label: 'Dispatch', icon: Compass },
           { id: 'taxes' as const, label: 'Taxes & Fees', icon: Percent },
           { id: 'services' as const, label: 'Service Switches', icon: Layers },
+          { id: 'staff' as const, label: 'Staff & Roles', icon: Users },
           { id: 'tools' as const, label: 'Database & Tools', icon: Database },
         ].map((tab) => {
           const Icon = tab.icon;
@@ -1031,6 +1054,11 @@ export const Settings: React.FC = () => {
           );
         })}
       </div>
+
+      {/* STAFF & ROLES TAB */}
+      {settingsTab === 'staff' && (
+        <StaffTab />
+      )}
 
       {/* RECEIPT DESIGNER TAB */}
       {settingsTab === 'receipt' && (
@@ -1763,6 +1791,46 @@ export const Settings: React.FC = () => {
           <p className="text-[11px] text-amber-900 dark:text-amber-200/90 leading-relaxed bg-amber-100/60 dark:bg-amber-900/30 p-2.5 rounded-xl border border-amber-200 dark:border-amber-800/40">
             <strong>Helper text:</strong> a priority rider is offered every Delivio Food or Delivio Mart order anywhere in their registered city (ignoring the radius), nearest priority rider first, and can carry up to priorityMaxBatch orders in a double booking (minimum 1); every other service stays single.
           </p>
+        </div>
+
+        {/* Scheduled Orders Release Configuration */}
+        <div className="p-4 rounded-3xl bg-purple-50/50 dark:bg-purple-950/20 border border-purple-300 dark:border-purple-800/60 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Clock className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+              <h4 className="text-xs font-black uppercase tracking-wider text-purple-950 dark:text-purple-200">
+                Scheduled Orders Release
+              </h4>
+            </div>
+            <span className="text-[10px] font-mono text-purple-700 dark:text-purple-400 bg-purple-100 dark:bg-purple-900/60 px-2 py-0.5 rounded-full">
+              settings/platform.scheduledReleaseLeadMinutes
+            </span>
+          </div>
+
+          <div className="p-3.5 rounded-2xl bg-white dark:bg-zinc-850 border border-purple-200 dark:border-purple-800/40">
+            <label className="block text-[11px] font-extrabold uppercase text-gray-700 dark:text-zinc-200 mb-1">
+              Release scheduled orders to the merchant (minutes before the scheduled time)
+            </label>
+            <div className="flex items-center gap-2 max-w-xs">
+              <input
+                type="number"
+                min="0"
+                max="120"
+                step="1"
+                value={scheduledReleaseLeadMinutes}
+                onChange={(e) => {
+                  const raw = parseInt(e.target.value, 10);
+                  const clamped = isNaN(raw) ? 0 : Math.min(120, Math.max(0, raw));
+                  setScheduledReleaseLeadMinutes(clamped);
+                }}
+                className="w-32 px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-purple-600 dark:text-purple-400 focus:ring-2 focus:ring-purple-400"
+              />
+              <span className="text-xs font-extrabold text-gray-500 dark:text-zinc-400">minutes</span>
+            </div>
+            <p className="text-[11px] text-gray-600 dark:text-zinc-400 mt-1.5">
+              0 = the merchant receives the order at the exact scheduled time
+            </p>
+          </div>
         </div>
 
         {/* Options Table / Cards: Priority, Standard, Saver */}

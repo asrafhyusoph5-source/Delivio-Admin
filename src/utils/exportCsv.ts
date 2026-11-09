@@ -1,7 +1,7 @@
 export function exportToCsv(filename: string, rows: Record<string, any>[], customHeaders?: { key: string; label: string }[]) {
   if (!rows || !rows.length) {
-    alert('No data to export');
-    return;
+    console.warn('No data to export');
+    return false;
   }
 
   let headers: { key: string; label: string }[] = [];

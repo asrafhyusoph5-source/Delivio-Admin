@@ -1,5 +1,14 @@
-export type UserRole = 'customer' | 'merchant' | 'rider' | 'admin';
+export type UserRole = 'customer' | 'merchant' | 'rider' | 'admin' | 'subadmin';
+export type AdminRole = 'support' | 'finance' | 'admin';
 export type UserStatus = 'active' | 'blocked' | 'suspended';
+
+export interface StaffInvite {
+  id?: string;
+  email: string;
+  adminRole: AdminRole;
+  invitedBy: string;
+  createdAt: any;
+}
 
 export interface UserLocation {
   lat: number;
@@ -10,6 +19,7 @@ export interface UserLocation {
 export interface UserProfile {
   uid: string;
   role: UserRole | string;
+  adminRole?: AdminRole;
   email: string;
   name: string;
   phone?: string;
@@ -282,6 +292,7 @@ export type MerchantWeeklyHours = Record<string, MerchantOperatingDay>;
 export interface Merchant {
   id: string;
   name: string;
+  businessName?: string;
   ownerName: string;
   email: string;
   phone: string;
@@ -352,11 +363,29 @@ export interface Subcategory {
   updatedAt?: any;
 }
 
+export interface MerchantMenuSchedule {
+  days: number[]; // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+  start: string;  // e.g. "08:00"
+  end: string;    // e.g. "22:00"
+}
+
+export interface MerchantMenu {
+  id: string;
+  name: string;
+  active: boolean;
+  sortOrder: number;
+  schedule?: MerchantMenuSchedule | null;
+  createdAt?: any;
+  updatedAt?: any;
+  [key: string]: any;
+}
+
 export interface MenuItem {
   id: string;
   categoryId?: string;
   subcategoryId?: string | null;
   subcategoryName?: string | null;
+  customName?: string | null;
   name: string;
   price: number;
   description?: string;
@@ -364,6 +393,7 @@ export interface MenuItem {
   available: boolean;
   hasSets?: boolean;
   sets?: MenuSet[];
+  menuIds?: string[];
   createdAt?: any;
   updatedAt?: any;
   [key: string]: any;
@@ -725,6 +755,7 @@ export interface PlatformSettings {
   taxiVehicles?: Record<string, boolean>;
   vat?: PlatformVatConfig;
   timezone?: string;
+  scheduledReleaseLeadMinutes?: number;
   updatedAt?: any;
 }
 
@@ -756,6 +787,7 @@ export interface InboxMessage {
   createdByName?: string | null;
   sentBy?: string | null;
   sentById?: string | null;
+  sendAt?: any;
 }
 
 export type SupportTicketStatus = 'open' | 'accepted' | 'in_progress' | 'resolved';
@@ -964,6 +996,65 @@ export interface MerchantBestSellers {
   last30DaysOrderCount: number;
   recomputedAt: any;
   recomputedBy?: string;
+}
+
+export interface FraudFlag {
+  id: string;
+  subjectType: 'customer' | 'driver';
+  subjectId: string;
+  reason: string;
+  status: 'open' | 'dismissed';
+  note?: string;
+  createdAt: any;
+  createdBy: string;
+  subjectName?: string;
+  subjectEmail?: string;
+  subjectPhone?: string;
+}
+
+export interface PromoCode {
+  id?: string;
+  code: string;
+  active: boolean;
+  type: 'percent' | 'fixed';
+  value: number;
+  minSubtotal: number;
+  expiresAt?: any;
+  usageLimit?: number | null;
+  perUserLimit?: number;
+  usedCount: number;
+  services: (OrderServiceType | string)[];
+  lastRedemptionId?: string;
+  createdAt?: any;
+  createdBy?: string;
+  source?: 'platform' | 'merchant';
+  merchantId?: string | null;
+  merchantName?: string | null;
+  title?: string;
+  visibility?: 'public' | 'hidden' | string;
+  uses?: number;
+  totalDiscount?: number;
+}
+
+export interface PromoRedemption {
+  id: string;
+  code: string;
+  customerId: string;
+  orderId: string;
+  discount: number;
+  createdAt: any;
+}
+
+export interface DriverDocumentItem {
+  id: string;
+  type: 'license' | 'or_cr' | 'nbi' | 'insurance' | 'barangay' | 'drug_test' | 'other';
+  title: string;
+  documentNumber?: string;
+  expiryDate?: string; // YYYY-MM-DD
+  fileUrl?: string;
+  verified?: boolean;
+  notes?: string;
+  updatedAt?: any;
 }
 
 

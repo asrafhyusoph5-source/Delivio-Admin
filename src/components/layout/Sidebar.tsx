@@ -25,6 +25,7 @@ import {
   Trophy
 } from 'lucide-react';
 import { useBadgeCounts } from '../../context/BadgeCountsContext';
+import { useAuth } from '../../context/AuthContext';
 
 interface SidebarProps {
   collapsed: boolean;
@@ -39,6 +40,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   mobileOpen,
   setMobileOpen
 }) => {
+  const { adminProfile } = useAuth();
   const {
     totalPendingAppsCount,
     pendingPromoRequestsCount,
@@ -46,6 +48,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
     pendingChangeRequestsCount,
     openTicketsCount
   } = useBadgeCounts();
+
+  const role = adminProfile?.adminRole || (adminProfile?.role === 'admin' ? 'admin' : 'support');
 
   const navItems = [
     { name: 'Dashboard', path: '/', icon: LayoutDashboard },
@@ -61,6 +65,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-amber-500'
     },
     { name: 'Drivers', path: '/riders', icon: Car },
+    { name: 'Fraud Flags', path: '/flags', icon: ShieldAlert },
     { name: 'Quests', path: '/quests', icon: Trophy },
     {
       name: 'Applications',
@@ -97,6 +102,38 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { name: 'Audit Log', path: '/audit', icon: ShieldAlert },
     { name: 'Settings', path: '/settings', icon: Settings },
   ];
+
+  const allowedPathsByRole: Record<string, string[]> = {
+    admin: [
+      '/',
+      '/map',
+      '/orders',
+      '/customers',
+      '/wallet-transfers',
+      '/merchants',
+      '/riders',
+      '/flags',
+      '/quests',
+      '/applications',
+      '/rates',
+      '/services-by-city',
+      '/banners',
+      '/inbox',
+      '/support',
+      '/tiers',
+      '/reports',
+      '/audit',
+      '/settings'
+    ],
+    support: ['/', '/map', '/orders', '/inbox', '/support', '/flags'],
+    finance: ['/', '/wallet-transfers', '/merchants', '/riders', '/reports']
+  };
+
+  const visibleNavItems = navItems.filter((item) => {
+    if (role === 'admin') return true;
+    const allowed = allowedPathsByRole[role] || allowedPathsByRole.admin;
+    return allowed.includes(item.path);
+  });
 
   return (
     <>
@@ -142,7 +179,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         {/* Navigation list */}
         <div className="flex-1 overflow-y-auto py-3 px-3 space-y-1">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
             return (
               <NavLink

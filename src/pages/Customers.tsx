@@ -23,6 +23,7 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
+import { ExportDateModal } from '../components/common/ExportDateModal';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
 import { formatOrderNumber } from '../utils/orderNumber';
 import type { UserProfile, UserAddress, Order, EditHistoryEntry, WalletTransaction, Rider, WalletTransfer } from '../types';
@@ -1044,9 +1045,28 @@ export const Customers: React.FC = () => {
     }
   };
 
-  // CSV export for customer list
-  const handleExportCustomersCsv = () => {
-    const rows = filteredCustomers.map((c) => ({
+  // CSV Export Modal state
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+
+  // CSV export for customer list with date filtering
+  const handleExportCustomersWithDateFilter = (startDate?: string, endDate?: string) => {
+    let list = [...filteredCustomers];
+    if (startDate) {
+      const startMs = new Date(`${startDate}T00:00:00`).getTime();
+      list = list.filter((c) => {
+        const t = c.createdAt?.toMillis ? c.createdAt.toMillis() : new Date(c.createdAt || 0).getTime();
+        return t >= startMs;
+      });
+    }
+    if (endDate) {
+      const endMs = new Date(`${endDate}T23:59:59`).getTime();
+      list = list.filter((c) => {
+        const t = c.createdAt?.toMillis ? c.createdAt.toMillis() : new Date(c.createdAt || 0).getTime();
+        return t <= endMs;
+      });
+    }
+
+    const rows = list.map((c) => ({
       ID: c.uid,
       Name: c.name,
       Email: c.email,
@@ -1096,11 +1116,11 @@ export const Customers: React.FC = () => {
 
         <div className="flex items-center gap-3">
           <button
-            onClick={handleExportCustomersCsv}
+            onClick={() => setExportModalOpen(true)}
             className="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-gray-700 dark:text-zinc-300 hover:bg-gray-50 text-xs font-bold shadow-xs transition-colors"
           >
             <Download className="w-4 h-4" />
-            <span>Export Customers</span>
+            <span>Export Customers (CSV)</span>
           </button>
         </div>
       </div>
@@ -2203,6 +2223,18 @@ export const Customers: React.FC = () => {
           reasonRequired={true}
           reasonPlaceholder="State mandatory reason for unlinking (e.g. driver switched phone, account split, admin audit)..."
           isDestructive={true}
+        />
+      )}
+
+      {/* Export Customers Date Filter Modal */}
+      {exportModalOpen && (
+        <ExportDateModal
+          isOpen={exportModalOpen}
+          onClose={() => setExportModalOpen(false)}
+          title="Export Customer Directory to CSV"
+          description="Filter customer records by registration date or export all registered accounts."
+          totalRecords={filteredCustomers.length}
+          onExport={handleExportCustomersWithDateFilter}
         />
       )}
     </div>
