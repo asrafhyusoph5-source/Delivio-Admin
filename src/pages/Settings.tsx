@@ -32,6 +32,7 @@ import {
   DEFAULT_CHECKOUT_SETTINGS,
   type VehicleType
 } from '../constants';
+import { cleanupExpiredChats } from '../utils/chatCleanup';
 import { ReceiptDesignerTab } from '../components/settings/ReceiptDesignerTab';
 import { CheckoutMustTryTab } from '../components/settings/CheckoutMustTryTab';
 import { StaffTab } from '../components/settings/StaffTab';
@@ -70,7 +71,8 @@ import {
   Zap,
   Printer,
   Star,
-  Users
+  Users,
+  MessageSquare
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
@@ -85,7 +87,7 @@ interface MigrationPreviewData {
 }
 
 export const Settings: React.FC = () => {
-  const { adminProfile } = useAuth();
+  const { adminProfile, isFullAdmin } = useAuth();
   const { showSuccess, showError } = useToast();
   const { refreshCities } = useCity();
 
@@ -96,6 +98,10 @@ export const Settings: React.FC = () => {
   const [defaultCommissionRate, setDefaultCommissionRate] = useState<number>(15);
   const [savingSettings, setSavingSettings] = useState(false);
   const [loading, setLoading] = useState(true);
+
+  // Expired chats cleanup state
+  const [cleanupChatsModalOpen, setCleanupChatsModalOpen] = useState(false);
+  const [cleaningUpChats, setCleaningUpChats] = useState(false);
 
   // Platform Service Switches
   const [platformServices, setPlatformServices] = useState<Record<OrderServiceType, boolean>>({
@@ -295,6 +301,23 @@ export const Settings: React.FC = () => {
       showError(err);
     } finally {
       setDeletingDirectoryEntry(false);
+    }
+  };
+
+  const handleCleanupExpiredChats = async () => {
+    try {
+      setCleaningUpChats(true);
+      const res = await cleanupExpiredChats(300, adminProfile);
+      if (res.totalDeleted > 0) {
+        showSuccess(`Cleaned up ${res.deletedThreads} expired thread(s) and ${res.deletedMessages} message(s) (${res.totalDeleted} total doc(s)).`);
+      } else {
+        showSuccess('No expired chats or messages found.');
+      }
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setCleaningUpChats(false);
+      setCleanupChatsModalOpen(false);
     }
   };
 
@@ -1221,6 +1244,37 @@ export const Settings: React.FC = () => {
               ))}
             </div>
           )}
+
+          {/* Chat Retention Policy Note */}
+          <div className="p-4 rounded-2xl bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200/80 dark:border-amber-900/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+            <div className="flex items-start gap-3">
+              <MessageSquare className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <span className="font-extrabold text-amber-950 dark:text-amber-200 block text-xs">
+                  Order Chat Retention
+                </span>
+                <p className="text-amber-800 dark:text-amber-300 text-[11px] leading-relaxed">
+                  Chats are deleted automatically 10 days after the last message.
+                </p>
+              </div>
+            </div>
+
+            {isFullAdmin && (
+              <button
+                type="button"
+                onClick={() => setCleanupChatsModalOpen(true)}
+                disabled={cleaningUpChats}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white dark:bg-zinc-900 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 hover:bg-amber-100/50 dark:hover:bg-amber-900/40 text-xs font-bold transition-all shadow-2xs shrink-0 self-start sm:self-auto disabled:opacity-50"
+              >
+                {cleaningUpChats ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-600" />
+                ) : (
+                  <Trash2 className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                )}
+                <span>Delete all expired chats now</span>
+              </button>
+            )}
+          </div>
         </div>
       </div>
       )}
@@ -2846,6 +2900,20 @@ export const Settings: React.FC = () => {
           confirmLabel="Save Dispatch Settings"
           reasonRequired={false}
           isDestructive={false}
+        />
+      )}
+
+      {/* Confirmation Modal for Delete all expired chats */}
+      {cleanupChatsModalOpen && (
+        <ConfirmationModal
+          isOpen={cleanupChatsModalOpen}
+          onClose={() => setCleanupChatsModalOpen(false)}
+          onConfirm={handleCleanupExpiredChats}
+          title="Delete all expired chats now?"
+          message="This will search platform-wide for up to 300 expired order chat threads and messages (older than 10 days) and permanently delete them from Firestore. This action cannot be undone."
+          confirmLabel={cleaningUpChats ? "Cleaning up..." : "Delete All Expired Chats Now"}
+          reasonRequired={false}
+          isDestructive={true}
         />
       )}
     </div>

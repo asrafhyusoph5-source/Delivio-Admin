@@ -22,7 +22,8 @@ import {
   ArrowLeftRight,
   Layers,
   Headphones,
-  Trophy
+  Trophy,
+  MessageSquare
 } from 'lucide-react';
 import { useBadgeCounts } from '../../context/BadgeCountsContext';
 import { useAuth } from '../../context/AuthContext';
@@ -84,6 +85,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-purple-500'
     },
     { name: 'Inbox', path: '/inbox', icon: Mail },
+    { name: 'Chats', path: '/chats', icon: MessageSquare },
     {
       name: 'Support',
       path: '/support',
@@ -119,13 +121,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       '/services-by-city',
       '/banners',
       '/inbox',
+      '/chats',
       '/support',
       '/tiers',
       '/reports',
       '/audit',
       '/settings'
     ],
-    support: ['/', '/map', '/orders', '/inbox', '/support', '/flags'],
+    support: ['/', '/map', '/orders', '/inbox', '/chats', '/support', '/flags'],
     finance: ['/', '/wallet-transfers', '/merchants', '/riders', '/reports']
   };
 

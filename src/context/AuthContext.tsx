@@ -21,13 +21,14 @@ import {
 } from '../firebase';
 import type { UserProfile } from '../types';
 import { useToast } from './ToastContext';
+import { cleanupExpiredChats } from '../utils/chatCleanup';
 
 interface AuthContextType {
   currentUser: FirebaseUser | null;
   adminProfile: UserProfile | null;
   loading: boolean;
   isFullAdmin: boolean;
-  canAccess: (section: 'support' | 'finance' | 'settings' | 'general' | 'suspend') => boolean;
+  canAccess: (section: 'support' | 'finance' | 'settings' | 'general' | 'suspend' | 'chats') => boolean;
   login: (email: string, pass: string) => Promise<void>;
   registerStaff: (email: string, pass: string, name?: string) => Promise<{ needVerification: boolean }>;
   resendVerification: (userObj?: FirebaseUser) => Promise<void>;
@@ -50,12 +51,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     (adminProfile.role === 'admin' || !adminProfile.adminRole || adminProfile.adminRole === 'admin')
   );
 
-  const canAccess = (section: 'support' | 'finance' | 'settings' | 'general' | 'suspend'): boolean => {
+  const canAccess = (section: 'support' | 'finance' | 'settings' | 'general' | 'suspend' | 'chats'): boolean => {
     if (!adminProfile) return false;
     if (isFullAdmin) return true;
     const role = adminProfile.adminRole;
     if (section === 'settings' || section === 'suspend') {
       return false; // Only full admins can change settings or suspend accounts
+    }
+    if (section === 'chats') {
+      return role !== 'finance'; // Support and Admin have access; Finance cannot open Chats
     }
     if (role === 'support') {
       return section === 'support' || section === 'general';
@@ -65,6 +69,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     return false;
   };
+
+  // On every full-admin login, run a quiet cleanup that deletes up to 300 documents per session with expireAt in the past
+  useEffect(() => {
+    if (isFullAdmin && currentUser) {
+      const sessionKey = `delivio_chat_cleanup_${currentUser.uid}`;
+      if (!sessionStorage.getItem(sessionKey)) {
+        sessionStorage.setItem(sessionKey, '1');
+        cleanupExpiredChats(300).catch((err) => {
+          console.debug('Quiet background chat cleanup fallback:', err);
+        });
+      }
+    }
+  }, [isFullAdmin, currentUser]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {

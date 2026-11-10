@@ -1057,4 +1057,43 @@ export interface DriverDocumentItem {
   updatedAt?: any;
 }
 
+export type ChatChannel = 'merchant' | 'rider';
+export type ChatSenderRole = 'customer' | 'merchant' | 'rider';
+export type ChatMessageType = 'text' | 'image';
+
+export interface ChatThread {
+  id: string; // chatId: "{orderId}_merchant" or "{orderId}_rider_{riderUid}"
+  orderId: string;
+  orderNumber: string | number;
+  channel: ChatChannel;
+  customerId: string;
+  customerName: string; // first name only
+  merchantId?: string | null;
+  merchantName?: string | null;
+  riderId?: string | null;
+  riderName?: string | null;
+  createdAt: any;
+  lastMessageAt: any;
+  lastMessageText: string;
+  lastSenderRole: ChatSenderRole;
+  customerReadAt?: any;
+  partnerReadAt?: any;
+  expireAt: any;
+  [key: string]: any;
+}
+
+export interface ChatMessage {
+  id: string;
+  senderId: string;
+  senderRole: ChatSenderRole;
+  type: ChatMessageType;
+  text?: string;
+  image?: string; // JPEG data URI string, max 400000 characters
+  source?: 'camera' | 'gallery';
+  createdAt: any;
+  expireAt: any;
+  [key: string]: any;
+}
+
+
 

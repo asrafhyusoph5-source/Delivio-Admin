@@ -61,9 +61,12 @@ import {
   Zap,
   Layers,
   Split,
-  Route
+  Route,
+  MessageSquare,
+  ShoppingBag
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
+import { OrderChatsViewer } from '../components/chat/OrderChatsViewer';
 
 export const FulfillmentChip: React.FC<{ order: Order }> = ({ order }) => {
   const isScheduled = Boolean(
@@ -737,7 +740,7 @@ export const LiveOrders: React.FC = () => {
   const initialSearch = searchParams.get('search') || '';
 
   const { selectedCityId, cities } = useCity();
-  const { adminProfile } = useAuth();
+  const { adminProfile, isFullAdmin } = useAuth();
   const { showSuccess, showError } = useToast();
 
   const navigate = useNavigate();
@@ -754,6 +757,7 @@ export const LiveOrders: React.FC = () => {
 
   // Selected Order for Detail Drawer/Modal
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [orderModalTab, setOrderModalTab] = useState<'details' | 'chats'>('details');
 
   // Cancellation Modal State
   const [cancelModalOpen, setCancelModalOpen] = useState(false);
@@ -2409,9 +2413,46 @@ export const LiveOrders: React.FC = () => {
               </button>
             </div>
 
+            {/* Modal Navigation Tabs: Order Details | Chats */}
+            <div className="flex border-b border-gray-200 dark:border-zinc-800 px-5 pt-2 bg-gray-50/50 dark:bg-zinc-900/50">
+              <button
+                type="button"
+                onClick={() => setOrderModalTab('details')}
+                className={`pb-2.5 text-xs font-bold border-b-2 mr-6 transition-colors flex items-center gap-1.5 ${
+                  orderModalTab === 'details'
+                    ? 'border-amber-500 text-amber-600 dark:text-amber-400'
+                    : 'border-transparent text-gray-500 hover:text-gray-900 dark:hover:text-white'
+                }`}
+              >
+                <ShoppingBag className="w-4 h-4" />
+                <span>Order Details</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setOrderModalTab('chats')}
+                className={`pb-2.5 text-xs font-bold border-b-2 mr-6 transition-colors flex items-center gap-1.5 ${
+                  orderModalTab === 'chats'
+                    ? 'border-amber-500 text-amber-600 dark:text-amber-400'
+                    : 'border-transparent text-gray-500 hover:text-gray-900 dark:hover:text-white'
+                }`}
+              >
+                <MessageSquare className="w-4 h-4" />
+                <span>Chats</span>
+              </button>
+            </div>
+
             {/* Modal Scrollable Body */}
             <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-6">
-              {/* Order Status & Actions Bar */}
+              {orderModalTab === 'chats' ? (
+                <OrderChatsViewer
+                  order={selectedOrder}
+                  isFullAdmin={isFullAdmin}
+                  adminProfile={adminProfile}
+                />
+              ) : (
+                <>
+                  {/* Order Status & Actions Bar */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/80 dark:border-amber-900/50">
                 <div>
                   <span className="text-[10px] uppercase font-bold text-amber-700 dark:text-amber-400">
@@ -2891,10 +2932,12 @@ export const LiveOrders: React.FC = () => {
                   ))}
                 </div>
               </div>
-            </div>
-          </div>
+            </>
+          )}
         </div>
-      )}
+      </div>
+    </div>
+  )}
 
       {/* Cancel Order Confirmation Modal */}
       {cancelModalOpen && selectedOrder && (

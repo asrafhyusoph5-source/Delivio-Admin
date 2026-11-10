@@ -29,6 +29,7 @@ import { AuditLog } from './pages/AuditLog';
 import { Settings } from './pages/Settings';
 import { ServicesByCity } from './pages/ServicesByCity';
 import { FraudFlags } from './pages/FraudFlags';
+import { Chats } from './pages/Chats';
 
 export default function App() {
   return (
@@ -57,6 +58,7 @@ export default function App() {
                     <Route path="services-by-city" element={<ServicesByCity />} />
                     <Route path="banners" element={<BannersPromos />} />
                     <Route path="inbox" element={<Inbox />} />
+                    <Route path="chats" element={<Chats />} />
                     <Route path="support" element={<Support />} />
                     <Route path="tiers" element={<TiersCoins />} />
                     <Route path="notifications" element={<Notifications />} />
