@@ -1696,16 +1696,28 @@ export const Merchants: React.FC = () => {
           imageUrl: dt.imageUrl || '',
           available: dt.available !== false,
           hasSets: hasSetsVal,
-          sets: (dt.sets || []).map((s: any, idx: number) => ({
-            id: s.id || `set_${idx}`,
-            name: s.name || '',
-            customName: Boolean(s.customName || s.name === 'Others'),
-            required: Boolean(s.required),
-            minSelect: typeof s.minSelect === 'number' ? s.minSelect : (s.required ? 1 : 0),
-            maxSelect: Math.max(1, Number(s.maxSelect) || 1),
-            sortOrder: typeof s.sortOrder === 'number' ? s.sortOrder : idx,
-            choices: s.choices || []
-          })),
+          sets: (dt.sets || []).map((s: any, idx: number) => {
+            const resolvedName =
+              (typeof s.name === 'string' && s.name.trim())
+                ? s.name.trim()
+                : (typeof s.customName === 'string' && s.customName.trim())
+                ? s.customName.trim()
+                : (typeof s.subcategoryName === 'string' && s.subcategoryName.trim())
+                ? s.subcategoryName.trim()
+                : (s.name || '');
+            return {
+              id: s.id || `set_${idx}`,
+              name: resolvedName,
+              customName: typeof s.customName === 'string' ? s.customName : (resolvedName || null),
+              subcategoryId: s.subcategoryId || null,
+              subcategoryName: s.subcategoryName || null,
+              required: Boolean(s.required),
+              minSelect: typeof s.minSelect === 'number' ? s.minSelect : (s.required ? 1 : 0),
+              maxSelect: Math.max(1, Number(s.maxSelect) || 1),
+              sortOrder: typeof s.sortOrder === 'number' ? s.sortOrder : idx,
+              choices: s.choices || []
+            };
+          }),
           createdAt: dt.createdAt,
           updatedAt: dt.updatedAt
         });
@@ -2709,9 +2721,10 @@ export const Merchants: React.FC = () => {
       const sanitizedSets: MenuSet[] = [];
       for (let sIdx = 0; sIdx < itemSets.length; sIdx++) {
         const s = itemSets[sIdx];
-        const sName = (s.name || '').trim();
+        const rawName = s.name || (typeof s.customName === 'string' ? s.customName : '') || s.subcategoryName || '';
+        const sName = (rawName || '').trim();
         if (!sName) {
-          showError(`Option Set #${sIdx + 1} requires a Set Name from Category Class.`);
+          showError(`Option Set #${sIdx + 1} requires a Set Name.`);
           setSavingItem(false);
           return;
         }
@@ -2758,11 +2771,13 @@ export const Merchants: React.FC = () => {
             available: c.available !== false
           });
         }
-        const isOthersOrCustom = Boolean(s.customName || sName.toLowerCase() === 'others');
+
         sanitizedSets.push({
           id: s.id || `set_${sIdx}_${Date.now().toString(36)}`,
           name: sName,
-          customName: isOthersOrCustom,
+          customName: sName,
+          subcategoryId: null,
+          subcategoryName: null,
           required: isRequired,
           minSelect: minVal,
           maxSelect: maxVal,
@@ -5350,23 +5365,36 @@ export const Merchants: React.FC = () => {
                                       setItemSets(
                                         item.sets && Array.isArray(item.sets)
                                           ? JSON.parse(JSON.stringify(item.sets)).map(
-                                              (s: any, idx: number) => ({
-                                                id: s.id || `set_${idx}`,
-                                                name: s.name || '',
-                                                required: Boolean(s.required),
-                                                minSelect:
-                                                  typeof s.minSelect === 'number'
-                                                    ? s.minSelect
-                                                    : s.required
-                                                    ? 1
-                                                    : 0,
-                                                maxSelect: Math.max(1, Number(s.maxSelect) || 1),
-                                                sortOrder:
-                                                  typeof s.sortOrder === 'number'
-                                                    ? s.sortOrder
-                                                    : idx,
-                                                choices: s.choices || []
-                                              })
+                                              (s: any, idx: number) => {
+                                                const resolvedName =
+                                                  (typeof s.name === 'string' && s.name.trim())
+                                                    ? s.name.trim()
+                                                    : (typeof s.customName === 'string' && s.customName.trim())
+                                                    ? s.customName.trim()
+                                                    : (typeof s.subcategoryName === 'string' && s.subcategoryName.trim())
+                                                    ? s.subcategoryName.trim()
+                                                    : (s.name || '');
+                                                return {
+                                                  id: s.id || `set_${idx}`,
+                                                  name: resolvedName,
+                                                  customName: typeof s.customName === 'string' ? s.customName : (resolvedName || null),
+                                                  subcategoryId: s.subcategoryId || null,
+                                                  subcategoryName: s.subcategoryName || null,
+                                                  required: Boolean(s.required),
+                                                  minSelect:
+                                                    typeof s.minSelect === 'number'
+                                                      ? s.minSelect
+                                                      : s.required
+                                                      ? 1
+                                                      : 0,
+                                                  maxSelect: Math.max(1, Number(s.maxSelect) || 1),
+                                                  sortOrder:
+                                                    typeof s.sortOrder === 'number'
+                                                      ? s.sortOrder
+                                                      : idx,
+                                                  choices: s.choices || []
+                                                };
+                                              }
                                             )
                                           : []
                                       );
@@ -6228,7 +6256,10 @@ export const Merchants: React.FC = () => {
                     onClick={() => {
                       const newSet: MenuSet = {
                         id: `set_${Date.now().toString(36)}`,
-                        name: subcategories.length > 0 ? subcategories[0].name : '',
+                        name: '',
+                        customName: '',
+                        subcategoryId: null,
+                        subcategoryName: null,
                         required: false,
                         minSelect: 0,
                         maxSelect: 1,
@@ -6263,31 +6294,29 @@ export const Merchants: React.FC = () => {
                               <span className="text-[10px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300">
                                 Set #{sIdx + 1}
                               </span>
-                              <select
-                                value={s.name}
+                              <input
+                                type="text"
+                                value={s.name || (typeof s.customName === 'string' ? s.customName : '') || s.subcategoryName || ''}
                                 onChange={(e) => {
                                   const val = e.target.value;
-                                  const isCustom = val.toLowerCase() === 'others' || (!subcategories.some((sub) => sub.name === val) && val !== '');
                                   setItemSets((prev) =>
                                     prev.map((item, idx) =>
-                                      idx === sIdx ? { ...item, name: val, customName: isCustom } : item
+                                      idx === sIdx
+                                        ? {
+                                            ...item,
+                                            name: val,
+                                            customName: val,
+                                            subcategoryId: null,
+                                            subcategoryName: null
+                                          }
+                                        : item
                                     )
                                   );
                                 }}
-                                className="flex-1 px-2.5 py-1 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                                placeholder="Set name (e.g. Size, Flavor, Add-ons)..."
+                                className="flex-1 px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white placeholder:text-gray-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
                                 required
-                              >
-                                <option value="">-- Select Set Name (Category Class) --</option>
-                                {subcategories.map((sub) => (
-                                  <option key={sub.id} value={sub.name}>
-                                    {sub.name}
-                                  </option>
-                                ))}
-                                <option value="Others">Others (Custom Name)</option>
-                                {s.name && s.name !== 'Others' && !subcategories.some((sub) => sub.name === s.name) && (
-                                  <option value={s.name}>{s.name} (Custom)</option>
-                                )}
-                              </select>
+                              />
                             </div>
 
                             <div className="flex flex-wrap items-center gap-4 text-[11px] text-gray-600 dark:text-zinc-400">
@@ -6594,7 +6623,7 @@ export const Merchants: React.FC = () => {
               <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
                 {subcategories.length === 0 ? (
                   <div className="p-4 text-center text-xs text-gray-400 border border-dashed border-gray-200 dark:border-zinc-800 rounded-2xl">
-                    No Category Classes yet. Add one above to organize items and sets.
+                    No Category Classes yet. Add one above to organize items.
                   </div>
                 ) : (
                   subcategories.map((sub, sIdx) => {

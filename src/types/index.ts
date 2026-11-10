@@ -352,7 +352,9 @@ export interface MenuSet {
   maxSelect: number;
   sortOrder: number;
   choices: MenuChoice[];
-  customName?: boolean;
+  customName?: string | boolean | null;
+  subcategoryId?: string | null;
+  subcategoryName?: string | null;
 }
 
 export interface Subcategory {
