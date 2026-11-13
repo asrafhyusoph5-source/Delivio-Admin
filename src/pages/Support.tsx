@@ -36,7 +36,8 @@ import {
   Truck,
   Users,
   ShieldAlert,
-  ArrowRight
+  ArrowRight,
+  Building2
 } from 'lucide-react';
 import {
   db,
@@ -68,7 +69,8 @@ import {
 import { compressImageToDataUri } from '../utils/imageCompressor';
 import { formatRelativeTime, formatTimestamp, parseDate } from '../utils/date';
 import { formatOrderNumber, matchesOrderSearch } from '../utils/orderNumber';
-import type { SupportTicket, SupportTicketMessage, Order, SupportTicketStatus } from '../types';
+import { getChainOptions, resolveOrderChainId, resolveOrderMerchantDisplay } from '../utils/outletUtils';
+import type { SupportTicket, SupportTicketMessage, Order, SupportTicketStatus, Merchant } from '../types';
 
 export const Support: React.FC = () => {
   const { adminProfile } = useAuth();
@@ -88,7 +90,10 @@ export const Support: React.FC = () => {
   const [activeReasonTab, setActiveReasonTab] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'open' | 'in_progress' | 'resolved'>('all');
   const [serviceFilter, setServiceFilter] = useState<string>('all');
+  const [chainFilter, setChainFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [merchantsById, setMerchantsById] = useState<Record<string, Merchant>>({});
+  const [ordersLookupByKey, setOrdersLookupByKey] = useState<Record<string, Order>>({});
 
   // Selected Ticket Details & Order
   const [selectedTicket, setSelectedTicket] = useState<SupportTicket | null>(null);
@@ -208,6 +213,70 @@ export const Support: React.FC = () => {
 
     return () => unsubscribe();
   }, [selectedTicketId]);
+
+  // Load merchants & recent orders lookup for chain filtering and outlet display
+  useEffect(() => {
+    const loadMerchantsAndOrders = async () => {
+      try {
+        const [mSnap, oSnap] = await Promise.all([
+          getDocs(query(collection(db, 'merchants'), limit(300))),
+          getDocs(query(collection(db, 'orders'), limit(250)))
+        ]);
+        const mMap: Record<string, Merchant> = {};
+        mSnap.forEach((d) => {
+          const dt = d.data();
+          mMap[d.id] = {
+            id: d.id,
+            name: dt.name || 'Store',
+            ownerName: dt.ownerName || '',
+            email: dt.email || '',
+            phone: dt.phone || '',
+            type: dt.type || 'food',
+            status: dt.status || 'active',
+            isOpen: Boolean(dt.isOpen),
+            address: dt.address || '',
+            lat: Number(dt.lat) || 0,
+            lng: Number(dt.lng) || 0,
+            commissionRate: dt.commissionRate ?? 15,
+            chainId: dt.chainId,
+            chainName: dt.chainName,
+            isBranch: dt.isBranch,
+            branchName: dt.branchName,
+            branchCode: dt.branchCode
+          };
+        });
+        setMerchantsById(mMap);
+
+        const oMap: Record<string, Order> = {};
+        oSnap.forEach((d) => {
+          const ord = { id: d.id, ...d.data() } as Order;
+          oMap[d.id] = ord;
+          if (ord.orderNumber) oMap[ord.orderNumber] = ord;
+        });
+        setOrdersLookupByKey(oMap);
+      } catch (err) {
+        console.warn('Could not load merchants/orders lookup for support:', err);
+      }
+    };
+    loadMerchantsAndOrders();
+  }, []);
+
+  const chainOptions = useMemo(() => getChainOptions(Object.values(merchantsById)), [merchantsById]);
+
+  const resolveTicketOrder = (t: SupportTicket): Partial<Order> | null => {
+    if (t.orderId && ordersLookupByKey[t.orderId]) return ordersLookupByKey[t.orderId];
+    if (t.orderNumber && ordersLookupByKey[t.orderNumber]) return ordersLookupByKey[t.orderNumber];
+    if (t.merchantId || t.merchantName || t.branchName || t.branchCode || t.chainId) {
+      return {
+        merchantId: t.merchantId || undefined,
+        merchantName: t.merchantName || undefined,
+        branchName: t.branchName,
+        branchCode: t.branchCode,
+        chainId: t.chainId
+      };
+    }
+    return null;
+  };
 
   // Audience splits
   const customerTickets = useMemo(() => tickets.filter((t) => t.reporterType !== 'rider'), [tickets]);
@@ -431,6 +500,13 @@ export const Support: React.FC = () => {
         if (srv !== serviceFilter.toLowerCase()) return false;
       }
 
+      // Chain filter
+      if (chainFilter !== 'all') {
+        const ord = resolveTicketOrder(t);
+        const ticketChainId = ord ? resolveOrderChainId(ord, merchantsById) : null;
+        if (ticketChainId !== chainFilter) return false;
+      }
+
       // Search query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
@@ -443,6 +519,9 @@ export const Support: React.FC = () => {
         const matchesOrder = matchesOrderSearch({ orderNumber: t.orderNumber, id: t.orderId }, searchQuery);
         const matchesBatch = (t.batchId || '').toLowerCase().includes(q);
         const matchesId = t.id.toLowerCase().includes(q);
+        const ord = resolveTicketOrder(t);
+        const mDisplay = ord ? resolveOrderMerchantDisplay(ord, merchantsById, true).toLowerCase() : '';
+        const matchesMerchant = mDisplay.includes(q);
 
         if (
           !matchesTitle &&
@@ -453,7 +532,8 @@ export const Support: React.FC = () => {
           !matchesEmail &&
           !matchesOrder &&
           !matchesBatch &&
-          !matchesId
+          !matchesId &&
+          !matchesMerchant
         ) {
           return false;
         }
@@ -465,10 +545,57 @@ export const Support: React.FC = () => {
     activeReasonTab,
     statusFilter,
     serviceFilter,
+    chainFilter,
     searchQuery,
     supportAudience,
-    relatedOrder
+    relatedOrder,
+    merchantsById,
+    ordersLookupByKey
   ]);
+
+  // Combined Chain Totals & Per-Outlet Breakdown for Support
+  const selectedChainTicketStats = useMemo(() => {
+    if (chainFilter === 'all') return null;
+    const chain = chainOptions.find((c) => c.chainId === chainFilter);
+    const byOutlet = new Map<string, { label: string; total: number; open: number }>();
+
+    if (chain) {
+      chain.outlets.forEach((o) => {
+        byOutlet.set(o.id, {
+          label: o.branchName ? `${o.branchName}${o.branchCode ? ` (${o.branchCode})` : ''}` : o.name,
+          total: 0,
+          open: 0
+        });
+      });
+    }
+
+    let totalTickets = 0;
+    let openTickets = 0;
+
+    filteredTickets.forEach((t) => {
+      totalTickets += 1;
+      if (t.status === 'open') openTickets += 1;
+      const ord = resolveTicketOrder(t);
+      const mId = ord?.merchantId || 'unknown';
+      if (!byOutlet.has(mId)) {
+        byOutlet.set(mId, {
+          label: ord ? resolveOrderMerchantDisplay(ord, merchantsById, true) : mId,
+          total: 0,
+          open: 0
+        });
+      }
+      const entry = byOutlet.get(mId)!;
+      entry.total += 1;
+      if (t.status === 'open') entry.open += 1;
+    });
+
+    return {
+      chainName: chain?.chainName || 'Chain',
+      totalTickets,
+      openTickets,
+      outlets: Array.from(byOutlet.values())
+    };
+  }, [chainFilter, chainOptions, filteredTickets, merchantsById, ordersLookupByKey]);
 
   // Helper to get friendly reason label
   const getTicketReasonDisplay = (ticket: SupportTicket) => {
@@ -605,6 +732,9 @@ export const Support: React.FC = () => {
         const childOrderData = {
           orderNumber: childOrderNum,
           merchantName: relatedOrder.merchantName || '',
+          branchName: relatedOrder.branchName || null,
+          branchCode: relatedOrder.branchCode || null,
+          chainId: relatedOrder.chainId || null,
           customerName: relatedOrder.customerName || selectedTicket.customerName || 'Customer',
           customerPhone: relatedOrder.customerPhone || selectedTicket.customerPhone || '',
           cityId: relatedOrder.cityId || selectedCityId || '',
@@ -1489,7 +1619,7 @@ export const Support: React.FC = () => {
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
               <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value as any)}
@@ -1514,7 +1644,44 @@ export const Support: React.FC = () => {
                 <option value="request_rider">Delivio Instant</option>
                 <option value="taxi">Delivio Taxi</option>
               </select>
+
+              <select
+                value={chainFilter}
+                onChange={(e) => setChainFilter(e.target.value)}
+                className="px-3 py-1.5 rounded-xl border border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-semibold"
+              >
+                <option value="all">All Chains</option>
+                {chainOptions.map((c) => (
+                  <option key={c.chainId} value={c.chainId}>
+                    {c.chainName} ({c.outlets.length})
+                  </option>
+                ))}
+              </select>
             </div>
+
+            {selectedChainTicketStats && (
+              <div className="p-2.5 rounded-xl bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50 space-y-1.5 text-[11px]">
+                <div className="flex items-center justify-between font-bold text-amber-900 dark:text-amber-200">
+                  <span className="flex items-center gap-1">
+                    <Building2 className="w-3.5 h-3.5 text-amber-600" />
+                    <span>{selectedChainTicketStats.chainName}</span>
+                  </span>
+                  <span>
+                    {selectedChainTicketStats.totalTickets} tickets ({selectedChainTicketStats.openTickets} open)
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedChainTicketStats.outlets.map((ob, i) => (
+                    <span
+                      key={i}
+                      className="px-2 py-0.5 rounded-lg bg-white dark:bg-zinc-900 border border-amber-200/70 dark:border-zinc-700 text-[10px] font-semibold text-gray-700 dark:text-zinc-300"
+                    >
+                      {ob.label}: <strong>{ob.total}</strong> ({ob.open} open)
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Ticket Items List */}
@@ -1618,7 +1785,7 @@ export const Support: React.FC = () => {
                         )}
                       </div>
 
-                      <div className="text-[11px] text-gray-500 dark:text-zinc-400 flex items-center justify-between pt-0.5">
+                      <div className="text-[11px] text-gray-500 dark:text-zinc-400 flex items-center justify-between pt-0.5 gap-2">
                         <span className="truncate">
                           {isDriverReport ? (
                             <>Driver: <strong>{ticket.riderName || 'Assigned Driver'}</strong></>
@@ -1626,6 +1793,15 @@ export const Support: React.FC = () => {
                             <>Customer: <strong>{ticket.customerName || 'Customer'}</strong></>
                           )}
                         </span>
+                        {(() => {
+                          const ord = resolveTicketOrder(ticket);
+                          const mDisp = ord ? resolveOrderMerchantDisplay(ord, merchantsById, true) : '';
+                          return mDisp ? (
+                            <span className="text-[10px] font-bold text-amber-700 dark:text-amber-400 truncate max-w-[160px]" title={mDisp}>
+                              {mDisp}
+                            </span>
+                          ) : null;
+                        })()}
                       </div>
 
                       {ticket.lastMessagePreview && (
@@ -2204,7 +2380,7 @@ export const Support: React.FC = () => {
                           </div>
                           <div className="flex-1 min-w-0">
                             <p className="font-bold text-gray-900 dark:text-white truncate">
-                              {relatedOrder.merchantName || 'Pickup Location'}
+                              {resolveOrderMerchantDisplay(relatedOrder, merchantsById, true) || relatedOrder.merchantName || 'Pickup Location'}
                             </p>
                             <p className="text-[10px] text-gray-400 truncate">
                               {relatedOrder.pickup?.address || relatedOrder.merchantAddress || 'Merchant premises'}

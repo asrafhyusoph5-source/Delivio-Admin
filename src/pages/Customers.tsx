@@ -26,6 +26,7 @@ import { exportToCsv } from '../utils/exportCsv';
 import { ExportDateModal } from '../components/common/ExportDateModal';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
 import { formatOrderNumber } from '../utils/orderNumber';
+import { formatShopDisplayName } from '../utils/outletUtils';
 import type { UserProfile, UserAddress, Order, EditHistoryEntry, WalletTransaction, Rider, WalletTransfer } from '../types';
 import {
   Search,
@@ -227,7 +228,11 @@ export const Customers: React.FC = () => {
             serviceType: dt.serviceType || 'food',
             customerId: dt.customerId,
             customerName: dt.customerName,
+            merchantId: dt.merchantId,
             merchantName: dt.merchantName,
+            branchName: dt.branchName || null,
+            branchCode: dt.branchCode || null,
+            chainId: dt.chainId || null,
             status: dt.status,
             statusHistory: dt.statusHistory || [],
             fees: dt.fees || { subtotal: 0, deliveryFee: 0, serviceFee: 0, discount: 0, total: 0 },
@@ -465,7 +470,11 @@ export const Customers: React.FC = () => {
           type: 'order_payment',
           amount: -Math.abs(Number(ord.fees?.total || 0)),
           title: `Paid Order #${ord.orderNumber}`,
-          note: `${ord.merchantName || ord.serviceType} • Status: ${ord.status}`,
+          note: `${
+            ord.merchantName
+              ? formatShopDisplayName({ name: ord.merchantName, branchName: ord.branchName, branchCode: ord.branchCode }, true)
+              : ord.serviceType
+          } • Status: ${ord.status}`,
           createdAt: ord.createdAt,
           orderNumber: ord.orderNumber
         });
@@ -1085,7 +1094,11 @@ export const Customers: React.FC = () => {
       OrderNumber: o.orderNumber,
       Service: o.serviceType,
       Status: o.status,
-      Merchant: o.merchantName || '',
+      Merchant: o.merchantName
+        ? formatShopDisplayName({ name: o.merchantName, branchName: o.branchName, branchCode: o.branchCode }, true)
+        : '',
+      BranchName: o.branchName || '',
+      BranchCode: o.branchCode || '',
       TotalAmount: o.fees?.total || 0,
       PaymentMethod: o.paymentMethod,
       Date: formatTimestamp(o.createdAt)
@@ -1803,7 +1816,14 @@ export const Customers: React.FC = () => {
                             </div>
 
                             <div className="flex justify-between text-gray-600 dark:text-zinc-400">
-                              <span>{ord.merchantName || ord.serviceType}</span>
+                              <span>
+                                {ord.merchantName
+                                  ? formatShopDisplayName(
+                                      { name: ord.merchantName, branchName: ord.branchName, branchCode: ord.branchCode },
+                                      true
+                                    )
+                                  : ord.serviceType}
+                              </span>
                               <span className="font-bold text-gray-900 dark:text-white">
                                 ₱{Number(ord.fees?.total || 0).toFixed(2)}
                               </span>

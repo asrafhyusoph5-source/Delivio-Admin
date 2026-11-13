@@ -33,6 +33,7 @@ import {
   Info
 } from 'lucide-react';
 import { formatRelativeTime } from '../utils/date';
+import { formatShopDisplayName, resolveOrderMerchantDisplay } from '../utils/outletUtils';
 
 // Visual configuration for each vehicle type marker
 const VEHICLE_MARKER_STYLES: Record<
@@ -206,6 +207,12 @@ export const LiveMap: React.FC = () => {
           list.push({
             id: d.id,
             name: dt.name || 'Store',
+            ownerUid: dt.ownerUid || d.id,
+            chainId: dt.chainId || null,
+            chainName: dt.chainName || null,
+            isBranch: Boolean(dt.isBranch),
+            branchName: dt.branchName || null,
+            branchCode: dt.branchCode || null,
             ownerName: dt.ownerName || '',
             email: dt.email || '',
             phone: dt.phone || '',
@@ -274,6 +281,9 @@ export const LiveMap: React.FC = () => {
               customerPhone: dt.customerPhone,
               merchantId: dt.merchantId,
               merchantName: dt.merchantName,
+              branchName: dt.branchName || null,
+              branchCode: dt.branchCode || null,
+              chainId: dt.chainId || null,
               riderId: dt.riderId,
               riderName: dt.riderName,
               riderPhone: dt.riderPhone,
@@ -355,6 +365,14 @@ export const LiveMap: React.FC = () => {
     if (selectedCityId === 'all') return activeOrders;
     return activeOrders.filter((o) => o.cityId === selectedCityId);
   }, [activeOrders, selectedCityId]);
+
+  const merchantsById = useMemo(() => {
+    const map: Record<string, Merchant> = {};
+    merchants.forEach((m) => {
+      map[m.id] = m;
+    });
+    return map;
+  }, [merchants]);
 
   // Available batches in current view
   const availableBatches = useMemo(() => {
@@ -564,14 +582,20 @@ export const LiveMap: React.FC = () => {
             iconAnchor: [16, 16]
           });
           const marker = L.marker([ord.pickup.lat, ord.pickup.lng], { icon: greenIcon });
+          const mDisplay = resolveOrderMerchantDisplay(ord, merchantsById, true) || ord.pickup?.address || 'Merchant';
           marker.bindTooltip(
-            `Pickup M${idx + 1}: ${ord.merchantName || ord.pickup?.address || 'Merchant'} (Order #${ord.orderNumber})`,
+            `Pickup M${idx + 1}: ${mDisplay} (Order #${ord.orderNumber})`,
             { permanent: true, direction: 'top', className: 'font-bold text-xs' }
           );
           marker.on('click', () => {
             setSelectedEntity({
               type: 'merchant',
-              data: { name: ord.merchantName || 'Merchant', address: ord.pickup?.address || '' }
+              data: {
+                name: ord.merchantName || 'Merchant',
+                branchName: ord.branchName,
+                branchCode: ord.branchCode,
+                address: ord.pickup?.address || ''
+              }
             });
           });
           marker.addTo(layerGroupsRef.current.batchGroup);
@@ -900,7 +924,7 @@ export const LiveMap: React.FC = () => {
                     Pickup M{idx + 1} (#{ord.orderNumber})
                   </span>
                   <p className="text-[11px] font-medium text-gray-900 dark:text-white truncate">
-                    {ord.merchantName || ord.pickup?.address || 'Pickup Point'}
+                    {resolveOrderMerchantDisplay(ord, merchantsById, true) || ord.pickup?.address || 'Pickup Point'}
                   </p>
                 </div>
               </div>
@@ -1102,7 +1126,7 @@ export const LiveMap: React.FC = () => {
                         <p className="text-xs text-gray-600 dark:text-zinc-300">
                           {activeOrder.serviceType === 'taxi'
                             ? `Taxi: ${activeOrder.pickup?.address || 'Pickup'} → ${activeOrder.dropoff?.address || 'Drop-off'}`
-                            : `${activeOrder.merchantName} → ${activeOrder.customerName}`}
+                            : `${resolveOrderMerchantDisplay(activeOrder, merchantsById, true) || 'Merchant'} → ${activeOrder.customerName}`}
                         </p>
                         <button
                           onClick={() => navigate(`/orders?search=${activeOrder.orderNumber}`)}
@@ -1185,7 +1209,7 @@ export const LiveMap: React.FC = () => {
                     </div>
                     <div>
                       <h4 className="font-extrabold text-base text-gray-900 dark:text-white">
-                        {m.name}
+                        {formatShopDisplayName(m, true)}
                       </h4>
                       <p className="text-xs text-gray-500 dark:text-zinc-400">
                         Owner: {m.ownerName || 'N/A'}

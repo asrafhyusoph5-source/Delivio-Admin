@@ -13,7 +13,8 @@ import {
 } from '../firebase';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
-import type { ChatThread, ChatMessage, Order } from '../types';
+import type { ChatThread, ChatMessage, Order, Merchant } from '../types';
+import { formatShopDisplayName } from '../utils/outletUtils';
 import {
   isOrderChatOpen,
   isOrderChatDeletedAfter24h,
@@ -69,6 +70,7 @@ export const Chats: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [selectedThreadOrder, setSelectedThreadOrder] = useState<Order | null>(null);
+  const [merchantsById, setMerchantsById] = useState<Record<string, Merchant>>({});
 
   // Lightbox
   const [zoomImage, setZoomImage] = useState<string | null>(null);
@@ -201,6 +203,26 @@ export const Chats: React.FC = () => {
 
   useEffect(() => {
     fetchThreads();
+    if (!isFinance) {
+      getDocs(collection(db, 'merchants'))
+        .then((snap) => {
+          const map: Record<string, Merchant> = {};
+          snap.forEach((d) => {
+            const dt = d.data();
+            map[d.id] = {
+              id: d.id,
+              name: dt.name || 'Store',
+              branchName: dt.branchName || null,
+              branchCode: dt.branchCode || null,
+              chainId: dt.chainId || null,
+              chainName: dt.chainName || null,
+              isBranch: Boolean(dt.isBranch)
+            } as Merchant;
+          });
+          setMerchantsById(map);
+        })
+        .catch(() => {});
+    }
   }, [isFinance]);
 
   // When selectedThreadId changes, fetch messages and associated order for status check
@@ -294,18 +316,28 @@ export const Chats: React.FC = () => {
     fetchThreadDetails();
   }, [selectedThreadId, threads]);
 
+  const getThreadMerchantDisplay = (t: ChatThread) => {
+    if (t.merchantId && merchantsById[t.merchantId]) {
+      return formatShopDisplayName(merchantsById[t.merchantId], true);
+    }
+    return t.merchantName || 'Store';
+  };
+
   // Distinct merchant and driver options for filters
   const uniqueMerchants = useMemo(() => {
     const map = new Map<string, string>();
     threads.forEach((t) => {
-      if (t.merchantId && t.merchantName) {
-        map.set(t.merchantId, t.merchantName);
+      if (t.merchantId) {
+        const display = merchantsById[t.merchantId]
+          ? formatShopDisplayName(merchantsById[t.merchantId], true)
+          : (t.merchantName || t.merchantId);
+        map.set(t.merchantId, display);
       } else if (t.merchantName) {
         map.set(t.merchantName, t.merchantName);
       }
     });
     return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
-  }, [threads]);
+  }, [threads, merchantsById]);
 
   const uniqueDrivers = useMemo(() => {
     const map = new Map<string, string>();
@@ -635,7 +667,7 @@ export const Chats: React.FC = () => {
                     <div className="text-xs font-bold text-gray-800 dark:text-zinc-200 truncate">
                       <span>{t.customerName || 'Customer'}</span>
                       <span className="text-gray-400 mx-1">↔</span>
-                      <span>{isMerchantChannel ? t.merchantName || 'Store' : t.riderName || 'Driver'}</span>
+                      <span>{isMerchantChannel ? getThreadMerchantDisplay(t) : t.riderName || 'Driver'}</span>
                     </div>
 
                     {/* Last message preview */}
@@ -707,7 +739,7 @@ export const Chats: React.FC = () => {
                       {selectedThread.customerName || 'Customer'}
                       <span className="text-gray-400 mx-1">↔</span>
                       {selectedThread.channel === 'merchant'
-                        ? selectedThread.merchantName || 'Store'
+                        ? getThreadMerchantDisplay(selectedThread)
                         : selectedThread.riderName || 'Driver'}
                     </p>
 
@@ -785,7 +817,7 @@ export const Chats: React.FC = () => {
                             {isCustomer
                               ? `Customer (${selectedThread.customerName || 'Customer'})`
                               : isMerchant
-                              ? `Merchant (${selectedThread.merchantName || 'Store'})`
+                              ? `Merchant (${getThreadMerchantDisplay(selectedThread)})`
                               : `Driver (${selectedThread.riderName || 'Driver'})`}
                           </span>
                           <span>•</span>

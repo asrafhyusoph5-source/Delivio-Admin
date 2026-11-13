@@ -14,6 +14,7 @@ import { useBadgeCounts } from '../context/BadgeCountsContext';
 import type { Order, Merchant, UserProfile } from '../types';
 import { VEHICLE_TYPES, VEHICLE_LABELS, type VehicleType } from '../constants';
 import { formatOrderNumber } from '../utils/orderNumber';
+import { resolveOrderMerchantDisplay } from '../utils/outletUtils';
 import {
   ShoppingBag,
   DollarSign,
@@ -82,6 +83,9 @@ export const Dashboard: React.FC = () => {
           customerName: d.customerName || 'Customer',
           merchantId: d.merchantId,
           merchantName: d.merchantName,
+          branchName: d.branchName || null,
+          branchCode: d.branchCode || null,
+          chainId: d.chainId || null,
           riderId: d.riderId,
           riderName: d.riderName,
           riderVehicle: d.riderVehicle,
@@ -125,6 +129,12 @@ export const Dashboard: React.FC = () => {
         merchList.push({
           id: docSnap.id,
           name: d.name || 'Merchant',
+          ownerUid: d.ownerUid || docSnap.id,
+          chainId: d.chainId || null,
+          chainName: d.chainName || null,
+          isBranch: Boolean(d.isBranch),
+          branchName: d.branchName || null,
+          branchCode: d.branchCode || null,
           ownerName: d.ownerName || '',
           email: d.email || '',
           phone: d.phone || '',
@@ -192,7 +202,11 @@ export const Dashboard: React.FC = () => {
             isPickup: Boolean(data.isPickup || data.fulfillmentType === 'pickup' || data.serviceType === 'pickup'),
             fulfillmentType: data.fulfillmentType,
             customerName: data.customerName || 'Customer',
-            merchantName: data.merchantName
+            merchantId: data.merchantId,
+            merchantName: data.merchantName,
+            branchName: data.branchName || null,
+            branchCode: data.branchCode || null,
+            chainId: data.chainId || null
           } as Order);
         }
       });
@@ -217,6 +231,14 @@ export const Dashboard: React.FC = () => {
       unsubNotifs();
     };
   }, [selectedCityId]);
+
+  const merchantsById = useMemo(() => {
+    const map: Record<string, Merchant> = {};
+    merchants.forEach((m) => {
+      map[m.id] = m;
+    });
+    return map;
+  }, [merchants]);
 
   // City filtered data
   const filteredOrders = useMemo(() => {
@@ -658,7 +680,7 @@ export const Dashboard: React.FC = () => {
                       {formatOrderNumber(ord)}
                     </span>
                     <p className="text-[11px] text-gray-600 dark:text-zinc-400">
-                      {ord.customerName} • {ord.merchantName || ord.serviceType}
+                      {ord.customerName} • {resolveOrderMerchantDisplay(ord, merchantsById, true) || ord.serviceType}
                     </p>
                   </div>
                   <span className="text-[11px] text-red-600 font-bold">

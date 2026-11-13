@@ -16,6 +16,7 @@ import { useToast } from '../../context/ToastContext';
 import { logAuditEvent } from '../../utils/audit';
 import type { PromoCode, PromoRedemption, OrderServiceType } from '../../types';
 import { SERVICE_NAMES } from '../../constants';
+import { formatShopDisplayName } from '../../utils/outletUtils';
 import {
   Ticket,
   Plus,
@@ -127,7 +128,11 @@ export const PromoCodesTab: React.FC<PromoCodesTabProps> = ({
       const mArr: { id: string; name: string }[] = [];
       mSnap.forEach((d) => {
         const dt = d.data();
-        const name = dt.businessName || dt.name || d.id;
+        const rawName = dt.businessName || dt.name || d.id;
+        const name = formatShopDisplayName(
+          { name: rawName, branchName: dt.branchName, branchCode: dt.branchCode },
+          true
+        );
         mMap[d.id] = { id: d.id, name };
         mArr.push({ id: d.id, name });
       });
@@ -142,7 +147,7 @@ export const PromoCodesTab: React.FC<PromoCodesTabProps> = ({
         const dt = d.data();
         const mId = dt.merchantId || null;
         const isMerchant = dt.source === 'merchant' || Boolean(mId);
-        const mName = dt.merchantName || (mId && mMap[mId] ? mMap[mId].name : null);
+        const mName = (mId && mMap[mId] ? mMap[mId].name : null) || dt.merchantName || null;
 
         items.push({
           id: d.id,

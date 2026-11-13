@@ -12,7 +12,8 @@ import { useToast } from '../context/ToastContext';
 import { exportToCsv } from '../utils/exportCsv';
 import { ExportDateModal } from '../components/common/ExportDateModal';
 import { formatTimestamp } from '../utils/date';
-import type { Order } from '../types';
+import { getChainOptions, resolveOrderChainId, resolveOrderMerchantDisplay } from '../utils/outletUtils';
+import type { Order, Merchant } from '../types';
 import {
   VEHICLE_TYPES,
   VEHICLE_LABELS,
@@ -33,7 +34,8 @@ import {
   Wallet,
   CreditCard,
   Banknote,
-  Layers
+  Layers,
+  Building2
 } from 'lucide-react';
 import {
   BarChart,
@@ -53,16 +55,46 @@ export const Reports: React.FC = () => {
   const { showError } = useToast();
 
   const [dateRange, setDateRange] = useState<'today' | '7days' | '30days' | 'all'>('30days');
+  const [chainFilter, setChainFilter] = useState<string>('all');
   const [orders, setOrders] = useState<Order[]>([]);
+  const [merchantsById, setMerchantsById] = useState<Record<string, Merchant>>({});
   const [loading, setLoading] = useState(true);
 
-  // Fetch orders
+  // Fetch orders & merchants
   useEffect(() => {
     const fetchOrders = async () => {
       try {
         setLoading(true);
-        const q = query(collection(db, 'orders'), limit(400));
-        const snap = await getDocs(q);
+        const [snap, mSnap] = await Promise.all([
+          getDocs(query(collection(db, 'orders'), limit(400))),
+          getDocs(query(collection(db, 'merchants'), limit(300)))
+        ]);
+
+        const mMap: Record<string, Merchant> = {};
+        mSnap.forEach((d) => {
+          const dt = d.data();
+          mMap[d.id] = {
+            id: d.id,
+            name: dt.name || 'Store',
+            ownerName: dt.ownerName || '',
+            email: dt.email || '',
+            phone: dt.phone || '',
+            type: dt.type || 'food',
+            status: dt.status || 'active',
+            isOpen: Boolean(dt.isOpen),
+            address: dt.address || '',
+            lat: Number(dt.lat) || 0,
+            lng: Number(dt.lng) || 0,
+            commissionRate: dt.commissionRate ?? 15,
+            chainId: dt.chainId,
+            chainName: dt.chainName,
+            isBranch: dt.isBranch,
+            branchName: dt.branchName,
+            branchCode: dt.branchCode
+          };
+        });
+        setMerchantsById(mMap);
+
         const list: Order[] = [];
         snap.forEach((d) => {
           const dt = d.data();
@@ -75,6 +107,9 @@ export const Reports: React.FC = () => {
             customerName: dt.customerName,
             merchantId: dt.merchantId,
             merchantName: dt.merchantName,
+            branchName: dt.branchName,
+            branchCode: dt.branchCode,
+            chainId: dt.chainId,
             riderId: dt.riderId,
             riderName: dt.riderName,
             riderVehicle: dt.riderVehicle,
@@ -110,12 +145,18 @@ export const Reports: React.FC = () => {
     fetchOrders();
   }, []);
 
-  // Filter orders by date range and city
+  const chainOptions = useMemo(() => getChainOptions(Object.values(merchantsById)), [merchantsById]);
+
+  // Filter orders by date range, city, and chain
   const filteredOrders = useMemo(() => {
     const now = Date.now();
     return orders.filter((o) => {
       if (selectedCityId !== 'all' && o.cityId && o.cityId !== selectedCityId) {
         return false;
+      }
+      if (chainFilter !== 'all') {
+        const orderChainId = resolveOrderChainId(o, merchantsById);
+        if (orderChainId !== chainFilter) return false;
       }
       if (dateRange !== 'all') {
         const orderTime = o.createdAt?.seconds ? o.createdAt.seconds * 1000 : 0;
@@ -130,7 +171,7 @@ export const Reports: React.FC = () => {
       }
       return true;
     });
-  }, [orders, selectedCityId, dateRange]);
+  }, [orders, selectedCityId, dateRange, chainFilter, merchantsById]);
 
   // Aggregate Metrics
   const metrics = useMemo(() => {
@@ -210,7 +251,11 @@ export const Reports: React.FC = () => {
         if (o.merchantId || o.merchantName) {
           const mKey = o.merchantId || o.merchantName || 'Unknown';
           if (!merchantMap[mKey]) {
-            merchantMap[mKey] = { name: o.merchantName || mKey, orders: 0, revenue: 0 };
+            merchantMap[mKey] = {
+              name: resolveOrderMerchantDisplay(o, merchantsById, true) || o.merchantName || mKey,
+              orders: 0,
+              revenue: 0
+            };
           }
           merchantMap[mKey].orders++;
           merchantMap[mKey].revenue += tot;
@@ -296,7 +341,104 @@ export const Reports: React.FC = () => {
       serviceChartData,
       taxiVehicleChartData
     };
-  }, [filteredOrders]);
+  }, [filteredOrders, merchantsById]);
+
+  // Combined Chain Totals & Per-Outlet Breakdown
+  const chainBreakdown = useMemo(() => {
+    if (chainOptions.length === 0) return null;
+    const targetChain = chainFilter !== 'all' ? chainOptions.find((c) => c.chainId === chainFilter) : null;
+
+    if (targetChain) {
+      const byOutlet = new Map<string, { label: string; orders: number; delivered: number; revenue: number; commission: number }>();
+      targetChain.outlets.forEach((o) => {
+        byOutlet.set(o.id, {
+          label: `${o.name}${o.branchName ? ` - ${o.branchName}` : ''}${o.branchCode ? ` (${o.branchCode})` : ''}`,
+          orders: 0,
+          delivered: 0,
+          revenue: 0,
+          commission: 0
+        });
+      });
+
+      let totalOrders = 0;
+      let totalDelivered = 0;
+      let totalRevenue = 0;
+      let totalComm = 0;
+
+      filteredOrders.forEach((o) => {
+        totalOrders += 1;
+        const isDeliv = o.status === 'Delivered' || o.status === 'Completed';
+        const tip = Number(o.fees?.tip || 0);
+        const tot = Math.max(0, Number(o.fees?.total || 0) - tip);
+        const comm = Number(o.fees?.serviceFee || 0) + Number(o.fees?.subtotal || 0) * ((merchantsById[o.merchantId || '']?.commissionRate ?? 15) / 100);
+
+        if (isDeliv) {
+          totalDelivered += 1;
+          totalRevenue += tot;
+          totalComm += comm;
+        }
+
+        const key = o.merchantId || 'unknown';
+        if (!byOutlet.has(key)) {
+          byOutlet.set(key, {
+            label: resolveOrderMerchantDisplay(o, merchantsById, true) || key,
+            orders: 0,
+            delivered: 0,
+            revenue: 0,
+            commission: 0
+          });
+        }
+        const entry = byOutlet.get(key)!;
+        entry.orders += 1;
+        if (isDeliv) {
+          entry.delivered += 1;
+          entry.revenue += tot;
+          entry.commission += comm;
+        }
+      });
+
+      return {
+        mode: 'single_chain' as const,
+        chainName: targetChain.chainName,
+        totalOrders,
+        totalDelivered,
+        totalRevenue,
+        totalComm,
+        rows: Array.from(byOutlet.values())
+      };
+    }
+
+    // Overview across all chains when filter is 'all'
+    const chainsSummary = chainOptions.map((c) => {
+      const outletIds = new Set(c.outlets.map((o) => o.id));
+      let ordersCount = 0;
+      let delivered = 0;
+      let revenue = 0;
+      filteredOrders.forEach((o) => {
+        const cId = resolveOrderChainId(o, merchantsById);
+        if (cId === c.chainId || (o.merchantId && outletIds.has(o.merchantId))) {
+          ordersCount += 1;
+          if (o.status === 'Delivered' || o.status === 'Completed') {
+            delivered += 1;
+            revenue += Math.max(0, Number(o.fees?.total || 0) - Number(o.fees?.tip || 0));
+          }
+        }
+      });
+      return {
+        chainId: c.chainId,
+        chainName: c.chainName,
+        outletCount: c.outlets.length,
+        ordersCount,
+        delivered,
+        revenue
+      };
+    });
+
+    return {
+      mode: 'all_chains' as const,
+      chainsSummary
+    };
+  }, [chainOptions, chainFilter, filteredOrders, merchantsById]);
 
   const [exportModalOpen, setExportModalOpen] = useState(false);
 
@@ -326,7 +468,10 @@ export const Reports: React.FC = () => {
       VehicleType: o.vehicleType || o.riderVehicle?.vehicleType || '',
       Status: o.status,
       Customer: o.customerName,
-      Merchant: o.merchantName || '',
+      Merchant: resolveOrderMerchantDisplay(o, merchantsById, true) || o.merchantName || '',
+      BranchName: o.branchName || merchantsById[o.merchantId || '']?.branchName || '',
+      BranchCode: o.branchCode || merchantsById[o.merchantId || '']?.branchCode || '',
+      ChainId: resolveOrderChainId(o, merchantsById) || '',
       Driver: o.isPickup ? 'No driver (Pick Up)' : o.riderName || '',
       Tip: o.fees?.tip || 0,
       TotalDue: o.fees?.total || 0,
@@ -352,7 +497,23 @@ export const Reports: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-3 self-start sm:self-auto">
+        <div className="flex flex-wrap items-center gap-3 self-start sm:self-auto">
+          {/* Chain Filter */}
+          {chainOptions.length > 0 && (
+            <select
+              value={chainFilter}
+              onChange={(e) => setChainFilter(e.target.value)}
+              className="px-3 py-2 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs font-bold text-gray-800 dark:text-zinc-200 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+            >
+              <option value="all">All Merchants &amp; Chains</option>
+              {chainOptions.map((c) => (
+                <option key={c.chainId} value={c.chainId}>
+                  Chain: {c.chainName} ({c.outlets.length} outlets)
+                </option>
+              ))}
+            </select>
+          )}
+
           {/* Date Range Picker */}
           <div className="flex p-1 rounded-xl bg-gray-200 dark:bg-zinc-800">
             {(['today', '7days', '30days', 'all'] as const).map((r) => (
@@ -422,6 +583,97 @@ export const Reports: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Combined Chain Totals & Per-Outlet Breakdown */}
+      {chainBreakdown && (
+        <div className="bg-white dark:bg-zinc-900 border border-amber-200 dark:border-amber-900/50 rounded-3xl p-6 shadow-xs space-y-4">
+          {chainBreakdown.mode === 'single_chain' ? (
+            <>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-gray-100 dark:border-zinc-800">
+                <div className="flex items-center gap-2">
+                  <Building2 className="w-5 h-5 text-amber-500" />
+                  <div>
+                    <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                      Chain Combined Report: {chainBreakdown.chainName}
+                    </h3>
+                    <p className="text-xs text-gray-400">
+                      Combined totals ({chainBreakdown.totalOrders} orders, {chainBreakdown.totalDelivered} delivered, ₱{chainBreakdown.totalRevenue.toFixed(2)} gross) &amp; per-outlet breakdown.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setChainFilter('all')}
+                  className="text-xs font-bold text-amber-600 hover:underline self-start sm:self-auto"
+                >
+                  Show all chains
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-gray-50 dark:bg-zinc-850/60 uppercase font-bold text-gray-500 border-b border-gray-100 dark:border-zinc-800">
+                    <tr>
+                      <th className="px-4 py-2.5">Outlet</th>
+                      <th className="px-4 py-2.5">Total Orders</th>
+                      <th className="px-4 py-2.5">Delivered</th>
+                      <th className="px-4 py-2.5">Gross Sales</th>
+                      <th className="px-4 py-2.5">Est. Commission</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-zinc-800">
+                    {chainBreakdown.rows.map((r, i) => (
+                      <tr key={i} className="hover:bg-gray-50 dark:hover:bg-zinc-800/40">
+                        <td className="px-4 py-2.5 font-bold text-gray-900 dark:text-white">{r.label}</td>
+                        <td className="px-4 py-2.5">{r.orders}</td>
+                        <td className="px-4 py-2.5">{r.delivered}</td>
+                        <td className="px-4 py-2.5 font-bold text-emerald-600">₱{r.revenue.toFixed(2)}</td>
+                        <td className="px-4 py-2.5 font-bold text-amber-600">₱{r.commission.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 pb-2 border-b border-gray-100 dark:border-zinc-800">
+                <Building2 className="w-5 h-5 text-amber-500" />
+                <div>
+                  <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                    Multi-Outlet Chains Summary
+                  </h3>
+                  <p className="text-xs text-gray-400">
+                    Combined totals per chain. Click a chain to inspect its per-outlet breakdown.
+                  </p>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {chainBreakdown.chainsSummary.map((c) => (
+                  <button
+                    key={c.chainId}
+                    type="button"
+                    onClick={() => setChainFilter(c.chainId)}
+                    className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-850 hover:bg-amber-50 dark:hover:bg-zinc-800 border border-gray-200 dark:border-zinc-800 text-left transition-colors flex items-center justify-between"
+                  >
+                    <div>
+                      <div className="font-bold text-xs text-gray-900 dark:text-white">
+                        {c.chainName} ({c.outletCount} outlets)
+                      </div>
+                      <div className="text-[11px] text-gray-400 mt-0.5">
+                        {c.delivered} delivered / {c.ordersCount} total orders
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-black text-emerald-600 text-xs">₱{c.revenue.toFixed(2)}</div>
+                      <div className="text-[10px] text-amber-600 font-bold">Breakdown &rarr;</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Service Type & Taxi Fleet Performance Section */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

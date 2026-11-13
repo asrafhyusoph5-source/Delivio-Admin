@@ -10,6 +10,7 @@ import {
   doc,
   updateDoc,
   getDoc,
+  getDocs,
   arrayUnion,
   Timestamp,
   runTransaction,
@@ -23,7 +24,8 @@ import { exportToCsv } from '../utils/exportCsv';
 import { ExportDateModal } from '../components/common/ExportDateModal';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
 import { formatOrderNumber, matchesOrderSearch } from '../utils/orderNumber';
-import type { Order, OrderStatus, OrderServiceType } from '../types';
+import { getChainOptions, resolveOrderChainId, resolveOrderMerchantDisplay } from '../utils/outletUtils';
+import type { Order, OrderStatus, OrderServiceType, Merchant } from '../types';
 import {
   VEHICLE_TYPES,
   VEHICLE_LABELS,
@@ -63,7 +65,8 @@ import {
   Split,
   Route,
   MessageSquare,
-  ShoppingBag
+  ShoppingBag,
+  Building2
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { OrderChatsViewer } from '../components/chat/OrderChatsViewer';
@@ -754,6 +757,8 @@ export const LiveOrders: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [paymentFilter, setPaymentFilter] = useState<string>('all');
   const [dateFilter, setDateFilter] = useState<'all' | 'today' | '7days'>('all');
+  const [chainFilter, setChainFilter] = useState<string>('all');
+  const [merchantsById, setMerchantsById] = useState<Record<string, Merchant>>({});
 
   // Selected Order for Detail Drawer/Modal
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
@@ -796,6 +801,9 @@ export const LiveOrders: React.FC = () => {
             customerPhone: data.customerPhone,
             merchantId: data.merchantId,
             merchantName: data.merchantName,
+            branchName: data.branchName,
+            branchCode: data.branchCode,
+            chainId: data.chainId,
             merchantPhone: data.merchantPhone,
             merchantAddress: data.merchantAddress,
             riderId: data.riderId,
@@ -891,6 +899,44 @@ export const LiveOrders: React.FC = () => {
 
     return () => unsubscribe();
   }, [selectedOrder?.id]);
+
+  // Fetch merchants directory for chain filtering and branch/code display
+  useEffect(() => {
+    const loadMerchants = async () => {
+      try {
+        const snap = await getDocs(query(collection(db, 'merchants'), limit(300)));
+        const map: Record<string, Merchant> = {};
+        snap.forEach((d) => {
+          const dt = d.data();
+          map[d.id] = {
+            id: d.id,
+            name: dt.name || 'Store',
+            ownerName: dt.ownerName || '',
+            email: dt.email || '',
+            phone: dt.phone || '',
+            type: dt.type || 'food',
+            status: dt.status || 'active',
+            isOpen: Boolean(dt.isOpen),
+            address: dt.address || '',
+            lat: Number(dt.lat) || 0,
+            lng: Number(dt.lng) || 0,
+            commissionRate: dt.commissionRate ?? 15,
+            chainId: dt.chainId,
+            chainName: dt.chainName,
+            isBranch: dt.isBranch,
+            branchName: dt.branchName,
+            branchCode: dt.branchCode
+          };
+        });
+        setMerchantsById(map);
+      } catch (err) {
+        console.warn('Could not load merchants lookup:', err);
+      }
+    };
+    loadMerchants();
+  }, []);
+
+  const chainOptions = useMemo(() => getChainOptions(Object.values(merchantsById)), [merchantsById]);
 
   // Set search if navigated with ?search=...
   useEffect(() => {
@@ -1001,6 +1047,11 @@ export const LiveOrders: React.FC = () => {
           if (now - orderTime > 7 * 24 * 60 * 60 * 1000) return false;
         }
       }
+      // 6b. Chain Filter
+      if (chainFilter !== 'all') {
+        const orderChainId = resolveOrderChainId(order, merchantsById);
+        if (orderChainId !== chainFilter) return false;
+      }
       // 7. Search Query
       if (searchQuery.trim()) {
         const matchesNumOrId = matchesOrderSearch(order, searchQuery);
@@ -1008,11 +1059,13 @@ export const LiveOrders: React.FC = () => {
           const q = searchQuery.toLowerCase().trim();
           const cName = (order.customerName || '').toLowerCase();
           const cPhone = (order.customerPhone || '').toLowerCase();
+          const mDisplay = resolveOrderMerchantDisplay(order, merchantsById, true).toLowerCase();
           const mName = (order.merchantName || '').toLowerCase();
           const rName = (order.riderName || '').toLowerCase();
           if (
             !cName.includes(q) &&
             !cPhone.includes(q) &&
+            !mDisplay.includes(q) &&
             !mName.includes(q) &&
             !rName.includes(q)
           ) {
@@ -1022,7 +1075,63 @@ export const LiveOrders: React.FC = () => {
       }
       return true;
     });
-  }, [orders, selectedCityId, serviceFilter, statusFilter, fulfillmentFilter, paymentFilter, dateFilter, searchQuery]);
+  }, [orders, selectedCityId, serviceFilter, statusFilter, fulfillmentFilter, paymentFilter, dateFilter, chainFilter, merchantsById, searchQuery]);
+
+  // Combined Chain Totals & Per-Outlet Breakdown
+  const selectedChainBreakdown = useMemo(() => {
+    if (chainFilter === 'all') return null;
+    const chain = chainOptions.find((c) => c.chainId === chainFilter);
+    const byOutlet = new Map<string, { label: string; orders: number; delivered: number; revenue: number }>();
+
+    if (chain) {
+      chain.outlets.forEach((o) => {
+        byOutlet.set(o.id, {
+          label: o.branchName ? `${o.branchName}${o.branchCode ? ` (${o.branchCode})` : ''}` : o.name,
+          orders: 0,
+          delivered: 0,
+          revenue: 0
+        });
+      });
+    }
+
+    let totalOrders = 0;
+    let totalDelivered = 0;
+    let totalRevenue = 0;
+
+    filteredOrders.forEach((o) => {
+      totalOrders += 1;
+      const isDeliv = o.status === 'Delivered' || o.status === 'Completed';
+      const rev = isDeliv ? Number(o.fees?.total || 0) : 0;
+      if (isDeliv) {
+        totalDelivered += 1;
+        totalRevenue += rev;
+      }
+
+      const key = o.merchantId || 'unknown';
+      if (!byOutlet.has(key)) {
+        byOutlet.set(key, {
+          label: resolveOrderMerchantDisplay(o, merchantsById, true) || key,
+          orders: 0,
+          delivered: 0,
+          revenue: 0
+        });
+      }
+      const cur = byOutlet.get(key)!;
+      cur.orders += 1;
+      if (isDeliv) {
+        cur.delivered += 1;
+        cur.revenue += rev;
+      }
+    });
+
+    return {
+      chainName: chain?.chainName || 'Chain',
+      totalOrders,
+      totalDelivered,
+      totalRevenue,
+      outlets: Array.from(byOutlet.values())
+    };
+  }, [chainFilter, chainOptions, filteredOrders, merchantsById]);
 
   // Grouped batches for Batches view
   const batchedGroups = useMemo(() => {
@@ -1473,7 +1582,10 @@ export const LiveOrders: React.FC = () => {
       Status: o.status,
       Customer: o.customerName,
       CustomerPhone: o.customerPhone || '',
-      Merchant: o.merchantName || '',
+      Merchant: resolveOrderMerchantDisplay(o, merchantsById, true) || o.merchantName || '',
+      BranchName: o.branchName || merchantsById[o.merchantId || '']?.branchName || '',
+      BranchCode: o.branchCode || merchantsById[o.merchantId || '']?.branchCode || '',
+      ChainId: resolveOrderChainId(o, merchantsById) || '',
       Driver: o.isPickup ? 'No driver (Pick Up)' : o.riderName || 'Unassigned',
       DriverPhone: o.riderPhone || '',
       Tip: o.fees?.tip || 0,
@@ -1629,7 +1741,7 @@ export const LiveOrders: React.FC = () => {
                     {schedOrder.customerName}
                   </div>
                   <div className="text-[11px] text-gray-500 dark:text-zinc-400 truncate">
-                    {schedOrder.merchantName || schedOrder.serviceType}
+                    {resolveOrderMerchantDisplay(schedOrder, merchantsById, true) || schedOrder.serviceType}
                   </div>
                 </div>
                 <div className="mt-2.5 pt-2 border-t border-gray-100 dark:border-zinc-800 flex items-center justify-between text-xs">
@@ -1746,7 +1858,7 @@ export const LiveOrders: React.FC = () => {
           </button>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-8 gap-3">
           {/* Search bar */}
           <div className="lg:col-span-2 relative">
             <Search className="w-4 h-4 absolute left-3.5 top-3 text-gray-400" />
@@ -1754,9 +1866,25 @@ export const LiveOrders: React.FC = () => {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search order #, customer, merchant/stop, phone..."
+              placeholder="Search order #, customer, merchant/branch/code..."
               className="w-full pl-9 pr-4 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
             />
+          </div>
+
+          {/* Chain Filter */}
+          <div>
+            <select
+              value={chainFilter}
+              onChange={(e) => setChainFilter(e.target.value)}
+              className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400 font-semibold"
+            >
+              <option value="all">All Chains</option>
+              {chainOptions.map((c) => (
+                <option key={c.chainId} value={c.chainId}>
+                  {c.chainName} ({c.outlets.length})
+                </option>
+              ))}
+            </select>
           </div>
 
           {/* Fulfillment Filter */}
@@ -1835,6 +1963,37 @@ export const LiveOrders: React.FC = () => {
             </select>
           </div>
         </div>
+
+        {/* Combined Chain Totals & Per-Outlet Breakdown */}
+        {selectedChainBreakdown && (
+          <div className="p-4 rounded-2xl bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-extrabold text-amber-900 dark:text-amber-200">
+                <Building2 className="w-4 h-4 text-amber-600" />
+                <span>Chain Totals: {selectedChainBreakdown.chainName}</span>
+              </div>
+              <div className="flex items-center gap-4 text-xs font-bold text-gray-800 dark:text-zinc-200">
+                <span>Orders: <strong>{selectedChainBreakdown.totalOrders}</strong></span>
+                <span>Delivered: <strong>{selectedChainBreakdown.totalDelivered}</strong></span>
+                <span>Gross Revenue: <strong className="text-emerald-600">₱{selectedChainBreakdown.totalRevenue.toFixed(2)}</strong></span>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+              {selectedChainBreakdown.outlets.map((ob, idx) => (
+                <div
+                  key={idx}
+                  className="p-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-amber-200/70 dark:border-zinc-800 text-xs flex items-center justify-between"
+                >
+                  <span className="font-bold text-gray-900 dark:text-white truncate pr-2">{ob.label}</span>
+                  <div className="text-right shrink-0">
+                    <div className="font-extrabold text-gray-900 dark:text-white">{ob.orders} orders</div>
+                    <div className="text-[10px] text-emerald-600 font-bold">₱{ob.revenue.toFixed(0)}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Main Content: Table or Kanban */}
@@ -1923,7 +2082,7 @@ export const LiveOrders: React.FC = () => {
                         <div className="font-semibold text-gray-900 dark:text-white">
                           {order.serviceType === 'taxi'
                             ? (order.pickup?.address || 'Pickup Pin')
-                            : (order.merchantName || order.pickup?.label || 'Direct Pickup')}
+                            : (resolveOrderMerchantDisplay(order, merchantsById, true) || order.pickup?.label || 'Direct Pickup')}
                         </div>
                         <div className="text-[10px] text-gray-400 truncate max-w-[150px]">
                           {order.pickup?.address || '—'}
@@ -2101,7 +2260,7 @@ export const LiveOrders: React.FC = () => {
                         </div>
 
                         <p className="text-xs font-semibold text-gray-900 dark:text-zinc-100">
-                          {ord.serviceType === 'taxi' ? `Taxi: ${ord.pickup?.address || 'Pickup'}` : ord.merchantName || ord.serviceType}
+                          {ord.serviceType === 'taxi' ? `Taxi: ${ord.pickup?.address || 'Pickup'}` : resolveOrderMerchantDisplay(ord, merchantsById, true) || ord.serviceType}
                         </p>
                         <p className="text-[11px] text-gray-500 dark:text-zinc-400 mb-2">
                           Customer: {ord.customerName}
@@ -2276,7 +2435,7 @@ export const LiveOrders: React.FC = () => {
                                 Pickup {idx + 1} ({formatOrderNumber(ord)})
                               </span>
                               <p className="font-medium text-gray-900 dark:text-zinc-100 truncate">
-                                {ord.merchantName || ord.pickup?.address || 'Pickup Point'}
+                                {resolveOrderMerchantDisplay(ord, merchantsById, true) || ord.pickup?.address || 'Pickup Point'}
                               </p>
                             </div>
                           </div>
@@ -2324,7 +2483,7 @@ export const LiveOrders: React.FC = () => {
                                 <HoldCountdown order={ord} />
                               </div>
                               <div className="text-gray-500 truncate text-[11px]">
-                                {ord.customerName} • {ord.merchantName || ord.serviceType}
+                                {ord.customerName} • {resolveOrderMerchantDisplay(ord, merchantsById, true) || ord.serviceType}
                               </div>
                             </div>
                             <div className="text-right shrink-0">
@@ -2585,7 +2744,7 @@ export const LiveOrders: React.FC = () => {
                   <div className="font-bold text-gray-900 dark:text-white truncate">
                     {selectedOrder.serviceType === 'taxi'
                       ? 'Passenger Ride-Hailing'
-                      : selectedOrder.merchantName || 'Direct Service'}
+                      : resolveOrderMerchantDisplay(selectedOrder, merchantsById, true) || 'Direct Service'}
                   </div>
                   {selectedOrder.merchantPhone ? (
                     <a

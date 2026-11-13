@@ -30,6 +30,8 @@ export interface UserProfile {
   location?: UserLocation;
   adminNote?: string;
   cityId?: string;
+  outletsPinHash?: string | null;
+  outletsPinSalt?: string | null;
   createdAt?: any;
   updatedAt?: any;
 }
@@ -148,6 +150,9 @@ export interface Order {
   customerPhone?: string;
   merchantId?: string;
   merchantName?: string;
+  branchName?: string | null;
+  branchCode?: string | null;
+  chainId?: string | null;
   merchantPhone?: string;
   merchantAddress?: string;
   riderId?: string | null;
@@ -325,6 +330,12 @@ export interface Merchant {
   openUntil?: any;
   specialRadius?: MerchantSpecialRadius;
   locationChangedAt?: any;
+  chainId?: string | null;
+  chainName?: string | null;
+  isBranch?: boolean;
+  branchName?: string;
+  branchCode?: string;
+  branchSetupDone?: boolean;
   createdAt?: any;
 }
 
@@ -366,7 +377,7 @@ export interface Subcategory {
 }
 
 export interface MerchantMenuSchedule {
-  days: number[]; // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+  days: (number | string)[]; // 0 = Sun, 1 = Mon, ..., 6 = Sat, or day keys ('mon'...'sun')
   start: string;  // e.g. "08:00"
   end: string;    // e.g. "22:00"
 }
@@ -382,12 +393,22 @@ export interface MerchantMenu {
   [key: string]: any;
 }
 
+export interface ItemAvailability {
+  days?: (number | string)[]; // 0 = Sun, 1 = Mon, ..., 6 = Sat, or day keys ('mon'...'sun')
+  start?: string;           // "08:00"
+  end?: string;             // "22:00"
+  dateFrom?: string | null; // "YYYY-MM-DD"
+  dateTo?: string | null;   // "YYYY-MM-DD"
+}
+
 export interface MenuItem {
   id: string;
   categoryId?: string;
   subcategoryId?: string | null;
   subcategoryName?: string | null;
   customName?: string | null;
+  itemSize?: string | null;
+  availability?: ItemAvailability | null;
   name: string;
   price: number;
   description?: string;
@@ -810,6 +831,11 @@ export interface SupportTicket {
   customerPhone?: string;
   orderId?: string;
   orderNumber?: string;
+  merchantId?: string | null;
+  merchantName?: string | null;
+  branchName?: string | null;
+  branchCode?: string | null;
+  chainId?: string | null;
   batchId?: string;
   serviceType?: OrderServiceType | string;
   splitItems?: any[];

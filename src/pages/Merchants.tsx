@@ -16,7 +16,8 @@ import {
   addDoc,
   Timestamp,
   writeBatch,
-  runTransaction
+  runTransaction,
+  deleteField
 } from '../firebase';
 import { useCity } from '../context/CityContext';
 import { useAuth } from '../context/AuthContext';
@@ -28,6 +29,7 @@ import { formatTimestamp, formatRelativeTime } from '../utils/date';
 import type {
   Merchant,
   MenuItem,
+  ItemAvailability,
   MenuCategory,
   MenuChoice,
   MenuSet,
@@ -91,11 +93,18 @@ import {
   Compass,
   Save,
   Sparkles,
-  Ticket
+  Ticket,
+  Building2,
+  ChevronDown,
+  ChevronRight,
+  KeyRound,
+  Info
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
 import { PromoCodesTab } from '../components/promos/PromoCodesTab';
+import { AddOutletModal, EditOutletModal } from '../components/merchants/OutletModals';
+import { formatShopDisplayName, getChainOptions, type ChainOption } from '../utils/outletUtils';
 
 export const DEFAULT_WEEKLY_HOURS: MerchantWeeklyHours = {
   monday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
@@ -107,64 +116,277 @@ export const DEFAULT_WEEKLY_HOURS: MerchantWeeklyHours = {
 };
 
 export const DAYS_OF_WEEK = [
-  { id: 1, short: 'Mon', full: 'Monday' },
-  { id: 2, short: 'Tue', full: 'Tuesday' },
-  { id: 3, short: 'Wed', full: 'Wednesday' },
-  { id: 4, short: 'Thu', full: 'Thursday' },
-  { id: 5, short: 'Fri', full: 'Friday' },
-  { id: 6, short: 'Sat', full: 'Saturday' },
-  { id: 0, short: 'Sun', full: 'Sunday' }
+  { id: 1, key: 'mon', short: 'Mon', full: 'Monday' },
+  { id: 2, key: 'tue', short: 'Tue', full: 'Tuesday' },
+  { id: 3, key: 'wed', short: 'Wed', full: 'Wednesday' },
+  { id: 4, key: 'thu', short: 'Thu', full: 'Thursday' },
+  { id: 5, key: 'fri', short: 'Fri', full: 'Friday' },
+  { id: 6, key: 'sat', short: 'Sat', full: 'Saturday' },
+  { id: 0, key: 'sun', short: 'Sun', full: 'Sunday' }
 ];
+
+export const ORDERED_DAY_KEYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
+export type DayKey = typeof ORDERED_DAY_KEYS[number];
+
+export const PREV_DAY_KEYS: Record<string, string> = {
+  mon: 'sun',
+  tue: 'mon',
+  wed: 'tue',
+  thu: 'wed',
+  fri: 'thu',
+  sat: 'fri',
+  sun: 'sat'
+};
+
+export const DAY_KEY_TO_NUM: Record<string, number[]> = {
+  mon: [1],
+  tue: [2],
+  wed: [3],
+  thu: [4],
+  fri: [5],
+  sat: [6],
+  sun: [0, 7]
+};
+
+/**
+ * Converts a date to the day key with the browser's Intl in the Asia/Manila time zone
+ * (Monday is "mon", Sunday is "sun"), not a numeric day index, along with overnight yesterday key.
+ */
+export function getManilaDayInfo(now: Date = new Date()): {
+  todayKey: string;
+  yesterdayKey: string;
+  currentTimeStr: string;
+  currentMinutes: number;
+  todayDateStr: string;
+  yesterdayDateStr: string;
+} {
+  const tz = 'Asia/Manila';
+
+  let todayKey = 'mon';
+  let currentTimeStr = '12:00';
+  let todayDateStr = '';
+  let yesterdayDateStr = '';
+
+  try {
+    const dayFormatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      weekday: 'short'
+    });
+    todayKey = dayFormatter.format(now).toLowerCase(); // 'mon'...'sun'
+
+    const timeFormatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone: tz,
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23'
+    });
+    currentTimeStr = timeFormatter.format(now);
+
+    const dateFormatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    });
+    todayDateStr = dateFormatter.format(now);
+
+    const yesterdayDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    yesterdayDateStr = dateFormatter.format(yesterdayDate);
+  } catch {
+    const dayKeys = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+    todayKey = dayKeys[now.getDay()];
+    currentTimeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    todayDateStr = now.toISOString().slice(0, 10);
+    const yesterdayDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    yesterdayDateStr = yesterdayDate.toISOString().slice(0, 10);
+  }
+
+  const yesterdayKey = PREV_DAY_KEYS[todayKey] || 'sun';
+  const [cH, cM] = currentTimeStr.split(':').map(Number);
+  const currentMinutes = (cH || 0) * 60 + (cM || 0);
+
+  return {
+    todayKey,
+    yesterdayKey,
+    currentTimeStr,
+    currentMinutes,
+    todayDateStr,
+    yesterdayDateStr
+  };
+}
+
+/**
+ * Checks if a scheduled days array includes a target day key ('mon'...'sun').
+ * Supports both string day keys and numeric day indices.
+ */
+export function scheduleIncludesDayKey(days: any[] | undefined | null, targetDayKey: string): boolean {
+  if (!days || !Array.isArray(days) || days.length === 0) {
+    return true; // No restriction = all days
+  }
+  const cleanTarget = targetDayKey.toLowerCase().trim();
+  const validNumbers = DAY_KEY_TO_NUM[cleanTarget] || [];
+
+  return days.some((d: any) => {
+    if (d === null || d === undefined) return false;
+    if (typeof d === 'string') {
+      const s = d.toLowerCase().trim();
+      return s === cleanTarget || s.startsWith(cleanTarget);
+    }
+    return validNumbers.includes(Number(d));
+  });
+}
+
+/**
+ * Evaluates whether a schedule window (days, start, end, dateFrom, dateTo) is active now
+ * converting today's date to day key in Asia/Manila, and checking yesterday for overnight windows.
+ */
+export function checkScheduleActiveNow(
+  schedule: {
+    days?: any[];
+    start?: string;
+    end?: string;
+    dateFrom?: string | null;
+    dateTo?: string | null;
+  },
+  now: Date = new Date()
+): { active: boolean; reason?: string } {
+  const { todayKey, yesterdayKey, currentMinutes, todayDateStr, yesterdayDateStr } = getManilaDayInfo(now);
+
+  const { days, start, end, dateFrom, dateTo } = schedule;
+  const sStart = start || '00:00';
+  const sEnd = end || '23:59';
+  const [sH, sM] = sStart.split(':').map(Number);
+  const [eH, eM] = sEnd.split(':').map(Number);
+  const startTotal = (sH || 0) * 60 + (sM || 0);
+  const endTotal = (eH || 0) * 60 + (eM || 0);
+  const isOvernight = startTotal > endTotal;
+
+  // 1. Check yesterday overnight window
+  if (isOvernight) {
+    const yesterdayDateMatches = (!dateFrom || yesterdayDateStr >= dateFrom) && (!dateTo || yesterdayDateStr <= dateTo);
+    if (yesterdayDateMatches && scheduleIncludesDayKey(days, yesterdayKey)) {
+      if (currentMinutes <= endTotal) {
+        return { active: true, reason: `Active from yesterday (${yesterdayKey.toUpperCase()}) overnight until ${sEnd}` };
+      }
+    }
+  }
+
+  // 2. Check today window
+  if (dateFrom && todayDateStr < dateFrom) {
+    return { active: false, reason: `Available starting ${dateFrom}` };
+  }
+  if (dateTo && todayDateStr > dateTo) {
+    return { active: false, reason: `Expired on ${dateTo}` };
+  }
+
+  if (!scheduleIncludesDayKey(days, todayKey)) {
+    return { active: false, reason: 'Not available today' };
+  }
+
+  if (isOvernight) {
+    if (currentMinutes >= startTotal) {
+      return { active: true, reason: `Active until ${sEnd} tomorrow` };
+    }
+    return { active: false, reason: `Available between ${sStart} and ${sEnd}` };
+  } else {
+    if (currentMinutes >= startTotal && currentMinutes <= endTotal) {
+      return { active: true };
+    }
+    return { active: false, reason: `Available between ${sStart} and ${sEnd}` };
+  }
+}
+
+export function isMenuAvailableNow(menu: MerchantMenu, now: Date = new Date()): boolean {
+  if (!menu.active) return false;
+  if (!menu.schedule) return true; // active menu without schedule = available all day
+  return checkScheduleActiveNow(menu.schedule, now).active;
+}
+
+export function formatItemAvailabilitySummary(avail: ItemAvailability | null | undefined): string {
+  if (!avail) {
+    return 'Always available (follows shop / menu schedule)';
+  }
+
+  const { days, start, end, dateFrom, dateTo } = avail;
+  const parts: string[] = [];
+
+  // Date range
+  if (dateFrom && dateTo) {
+    parts.push(`${dateFrom} to ${dateTo}`);
+  } else if (dateFrom) {
+    parts.push(`From ${dateFrom}`);
+  } else if (dateTo) {
+    parts.push(`Until ${dateTo}`);
+  }
+
+  // Days
+  if (days && days.length > 0) {
+    if (days.length === 7) {
+      parts.push('Every day');
+    } else {
+      const hasMon = scheduleIncludesDayKey(days, 'mon');
+      const hasTue = scheduleIncludesDayKey(days, 'tue');
+      const hasWed = scheduleIncludesDayKey(days, 'wed');
+      const hasThu = scheduleIncludesDayKey(days, 'thu');
+      const hasFri = scheduleIncludesDayKey(days, 'fri');
+      const hasSat = scheduleIncludesDayKey(days, 'sat');
+      const hasSun = scheduleIncludesDayKey(days, 'sun');
+
+      if (hasMon && hasTue && hasWed && hasThu && hasFri && !hasSat && !hasSun) {
+        parts.push('Weekdays');
+      } else if (!hasMon && !hasTue && !hasWed && !hasThu && !hasFri && hasSat && hasSun) {
+        parts.push('Weekends');
+      } else {
+        const labels = days.map((d: any) => {
+          if (typeof d === 'string') {
+            const match = DAYS_OF_WEEK.find((x) => x.key === d.toLowerCase() || x.short.toLowerCase() === d.toLowerCase());
+            return match?.short || d;
+          }
+          const match = DAYS_OF_WEEK.find((x) => x.id === Number(d));
+          return match?.short || String(d);
+        });
+        parts.push(labels.join(', '));
+      }
+    }
+  } else {
+    parts.push('Every day');
+  }
+
+  // Hours
+  if (start && end) {
+    parts.push(`${start} - ${end}`);
+  } else {
+    parts.push('All day');
+  }
+
+  return parts.join(' · ');
+}
 
 export const isItemAvailableNow = (
   item: MenuItem,
-  merchantMenus: MerchantMenu[]
+  merchantMenus: MerchantMenu[],
+  now: Date = new Date()
 ): { available: boolean; reason?: string } => {
   if (item.available === false) {
     return { available: false, reason: 'Marked unavailable' };
   }
 
-  // If item belongs to specific menus
+  // 1. Check custom item availability schedule (days, start, end, dateFrom, dateTo)
+  if (item.availability) {
+    const itemSchedCheck = checkScheduleActiveNow(item.availability, now);
+    if (!itemSchedCheck.active) {
+      return { available: false, reason: itemSchedCheck.reason || 'Not available now' };
+    }
+  }
+
+  // 2. If item belongs to specific menus
   if (item.menuIds && item.menuIds.length > 0) {
     const assignedMenus = merchantMenus.filter((m) => item.menuIds?.includes(m.id));
     if (assignedMenus.length === 0) {
       return { available: false, reason: 'Assigned menu unavailable' };
     }
 
-    // Check against current Philippine Time (Asia/Manila, UTC+8)
-    const nowPHT = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
-    const currentDay = nowPHT.getDay(); // 0 = Sun, 1 = Mon...
-    const currentHour = nowPHT.getHours();
-    const currentMinute = nowPHT.getMinutes();
-    const currentTotalMinutes = currentHour * 60 + currentMinute;
-
-    const anyMenuMatches = assignedMenus.some((menu) => {
-      if (!menu.active) return false;
-      if (!menu.schedule) return true; // active menu without schedule = available all day
-
-      const { days, start, end } = menu.schedule;
-      if (days && days.length > 0) {
-        const dayNumbers = days.map((d: any) => Number(d));
-        if (!dayNumbers.includes(currentDay)) return false;
-      }
-
-      if (start && end) {
-        const [startH, startM] = start.split(':').map(Number);
-        const [endH, endM] = end.split(':').map(Number);
-        const startTotal = (startH || 0) * 60 + (startM || 0);
-        const endTotal = (endH || 0) * 60 + (endM || 0);
-
-        if (startTotal <= endTotal) {
-          return currentTotalMinutes >= startTotal && currentTotalMinutes <= endTotal;
-        } else {
-          // Overnight window (e.g. 21:00 to 03:00)
-          return currentTotalMinutes >= startTotal || currentTotalMinutes <= endTotal;
-        }
-      }
-
-      return true;
-    });
-
+    const anyMenuMatches = assignedMenus.some((menu) => isMenuAvailableNow(menu, now));
     if (!anyMenuMatches) {
       return { available: false, reason: 'Outside scheduled menu hours' };
     }
@@ -490,10 +712,28 @@ export const Merchants: React.FC = () => {
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'suspended'>('all');
   const [openFilter, setOpenFilter] = useState<'all' | 'open' | 'closed'>('all');
+  const [chainFilter, setChainFilter] = useState<string>('all');
+  const [expandedChainIds, setExpandedChainIds] = useState<Record<string, boolean>>({});
 
   // Selected Merchant for detail
   const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(null);
-  const [activeTab, setActiveTab] = useState<'details' | 'status' | 'location' | 'radius' | 'specialRadius' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet' | 'reviews' | 'vouchers'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'outlets' | 'status' | 'location' | 'radius' | 'specialRadius' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet' | 'reviews' | 'vouchers'>('details');
+
+  // Outlets & Chain Management State
+  const [addOutletModalOpen, setAddOutletModalOpen] = useState(false);
+  const [editOutletTarget, setEditOutletTarget] = useState<Merchant | null>(null);
+  const [outletToDelete, setOutletToDelete] = useState<Merchant | null>(null);
+  const [deletingOutlet, setDeletingOutlet] = useState(false);
+  const [ownerPinSet, setOwnerPinSet] = useState(false);
+  const [loadingOwnerPin, setLoadingOwnerPin] = useState(false);
+  const [confirmResetPinOpen, setConfirmResetPinOpen] = useState(false);
+  const [resettingPin, setResettingPin] = useState(false);
+  const [outletOrdersTodayMap, setOutletOrdersTodayMap] = useState<Record<string, number>>({});
+  const [outletOrderCountMap, setOutletOrderCountMap] = useState<Record<string, number>>({});
+  const [loadingOutletsStats, setLoadingOutletsStats] = useState(false);
+  const [payoutScope, setPayoutScope] = useState<'outlet' | 'chain'>('outlet');
+  const [chainOrders, setChainOrders] = useState<Order[]>([]);
+  const [chainPayouts, setChainPayouts] = useState<any[]>([]);
 
   // Special Radius State (merchants/{id}.specialRadius & settings/dispatch.searchRadiusKm)
   const [globalDispatchRadiusKm, setGlobalDispatchRadiusKm] = useState<number>(5);
@@ -607,6 +847,13 @@ export const Merchants: React.FC = () => {
   const [itemAvailable, setItemAvailable] = useState(true);
   const [itemSets, setItemSets] = useState<MenuSet[]>([]);
   const [itemMenuIds, setItemMenuIds] = useState<string[]>([]);
+  const [itemSize, setItemSize] = useState<string>('');
+  const [itemHasAvailability, setItemHasAvailability] = useState<boolean>(false);
+  const [itemAvailabilityDays, setItemAvailabilityDays] = useState<(number | string)[]>([1, 2, 3, 4, 5, 6, 0]);
+  const [itemAvailabilityStart, setItemAvailabilityStart] = useState<string>('08:00');
+  const [itemAvailabilityEnd, setItemAvailabilityEnd] = useState<string>('22:00');
+  const [itemAvailabilityDateFrom, setItemAvailabilityDateFrom] = useState<string>('');
+  const [itemAvailabilityDateTo, setItemAvailabilityDateTo] = useState<string>('');
   const [savingItem, setSavingItem] = useState(false);
 
   // Menus & Schedules (merchants/{id}/menus)
@@ -618,7 +865,7 @@ export const Merchants: React.FC = () => {
   const [menuFormActive, setMenuFormActive] = useState(true);
   const [menuFormSortOrder, setMenuFormSortOrder] = useState<number>(0);
   const [menuFormHasSchedule, setMenuFormHasSchedule] = useState(true);
-  const [menuFormDays, setMenuFormDays] = useState<number[]>([0, 1, 2, 3, 4, 5, 6]);
+  const [menuFormDays, setMenuFormDays] = useState<(number | string)[]>([1, 2, 3, 4, 5, 6, 0]);
   const [menuFormStart, setMenuFormStart] = useState('08:00');
   const [menuFormEnd, setMenuFormEnd] = useState('22:00');
   const [savingMenu, setSavingMenu] = useState(false);
@@ -717,6 +964,12 @@ export const Merchants: React.FC = () => {
           closedUntil: dt.closedUntil || null,
           openUntil: dt.openUntil || null,
           specialRadius: dt.specialRadius || null,
+          chainId: dt.chainId || undefined,
+          chainName: dt.chainName || undefined,
+          isBranch: dt.isBranch,
+          branchName: dt.branchName || '',
+          branchCode: dt.branchCode || '',
+          branchSetupDone: dt.branchSetupDone,
           createdAt: dt.createdAt
         });
       });
@@ -811,7 +1064,111 @@ export const Merchants: React.FC = () => {
     fetchEditHistory(selectedMerchant.id);
     // Fetch Best Sellers
     fetchMerchantBestSellers(selectedMerchant.id);
-  }, [selectedMerchant]);
+    // Fetch Outlets / Owner PIN / Chain stats
+    fetchOutletsAndOwnerData(selectedMerchant);
+  }, [selectedMerchant?.id, selectedMerchant?.chainId]);
+
+  const fetchOutletsAndOwnerData = async (shop: Merchant, allShopsList?: Merchant[]) => {
+    const sourceMerchants = allShopsList || merchants;
+    const ownerUid = shop.ownerUid || shop.id;
+
+    // 1. Check Owner Outlets PIN state
+    setLoadingOwnerPin(true);
+    try {
+      const ownerSnap = await getDoc(doc(db, 'users', ownerUid));
+      if (ownerSnap.exists()) {
+        const uDt = ownerSnap.data();
+        setOwnerPinSet(Boolean(uDt.outletsPinHash));
+      } else {
+        setOwnerPinSet(false);
+      }
+    } catch {
+      setOwnerPinSet(false);
+    } finally {
+      setLoadingOwnerPin(false);
+    }
+
+    // 2. Gather outlets in chain
+    const targetOutlets = shop.chainId
+      ? sourceMerchants.filter((m) => m.chainId === shop.chainId)
+      : [shop];
+
+    if (targetOutlets.length === 0) {
+      targetOutlets.push(shop);
+    }
+
+    setLoadingOutletsStats(true);
+    try {
+      const todayKey = new Intl.DateTimeFormat('en-CA', { timeZone: platformTimezone || 'Asia/Manila' }).format(new Date());
+      const ordersTodayMap: Record<string, number> = {};
+      const totalOrdersMap: Record<string, number> = {};
+      const aggregatedOrders: Order[] = [];
+      const aggregatedPayouts: any[] = [];
+
+      await Promise.all(
+        targetOutlets.map(async (outlet) => {
+          const [oSnap, pSnap] = await Promise.all([
+            getDocs(query(collection(db, 'orders'), where('merchantId', '==', outlet.id), limit(200))),
+            getDocs(query(collection(db, 'merchantPayouts'), where('merchantId', '==', outlet.id), limit(50)))
+          ]);
+
+          totalOrdersMap[outlet.id] = oSnap.size;
+          let todayCount = 0;
+
+          oSnap.forEach((d) => {
+            const dt = d.data();
+            const cDate = parseDate(dt.createdAt);
+            if (cDate) {
+              const dKey = new Intl.DateTimeFormat('en-CA', { timeZone: platformTimezone || 'Asia/Manila' }).format(cDate);
+              if (dKey === todayKey) todayCount += 1;
+            }
+            aggregatedOrders.push({
+              id: d.id,
+              orderNumber: dt.orderNumber || d.id.substring(0, 8),
+              serviceType: dt.serviceType,
+              customerId: dt.customerId,
+              customerName: dt.customerName,
+              merchantId: dt.merchantId,
+              merchantName: dt.merchantName || outlet.name,
+              branchName: dt.branchName ?? outlet.branchName,
+              branchCode: dt.branchCode ?? outlet.branchCode,
+              chainId: dt.chainId ?? outlet.chainId,
+              status: dt.status,
+              statusHistory: dt.statusHistory || [],
+              fees: dt.fees || { subtotal: 0, deliveryFee: 0, serviceFee: 0, discount: 0, total: 0 },
+              paymentMethod: dt.paymentMethod,
+              createdAt: dt.createdAt
+            });
+          });
+
+          ordersTodayMap[outlet.id] = todayCount;
+
+          pSnap.forEach((pd) => {
+            const pdt = pd.data();
+            aggregatedPayouts.push({
+              id: pd.id,
+              ...pdt,
+              merchantName: pdt.merchantName || outlet.name,
+              branchName: pdt.branchName ?? outlet.branchName,
+              branchCode: pdt.branchCode ?? outlet.branchCode
+            });
+          });
+        })
+      );
+
+      aggregatedOrders.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+      aggregatedPayouts.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+
+      setOutletOrdersTodayMap(ordersTodayMap);
+      setOutletOrderCountMap(totalOrdersMap);
+      setChainOrders(aggregatedOrders);
+      setChainPayouts(aggregatedPayouts);
+    } catch (err) {
+      console.error('Failed to load outlets stats:', err);
+    } finally {
+      setLoadingOutletsStats(false);
+    }
+  };
 
   // Fetch Best Sellers stats document
   const fetchMerchantBestSellers = async (merchantId: string) => {
@@ -1689,6 +2046,16 @@ export const Merchants: React.FC = () => {
           subcategoryId: dt.subcategoryId || null,
           subcategoryName: dt.subcategoryName || null,
           customName: dt.customName || null,
+          itemSize: dt.itemSize || null,
+          availability: dt.availability ? {
+            days: Array.isArray(dt.availability.days)
+              ? dt.availability.days.map((d: any) => (typeof d === 'string' ? d.toLowerCase().trim() : Number(d)))
+              : [1, 2, 3, 4, 5, 6, 0],
+            start: dt.availability.start || '00:00',
+            end: dt.availability.end || '23:59',
+            dateFrom: dt.availability.dateFrom || null,
+            dateTo: dt.availability.dateTo || null
+          } : null,
           menuIds: Array.isArray(dt.menuIds) ? dt.menuIds : [],
           name: dt.name || 'Item',
           price: Number(dt.price) || 0,
@@ -2006,9 +2373,19 @@ export const Merchants: React.FC = () => {
         updatedAt: Timestamp.now()
       });
 
-      if (selectedMerchant.ownerUid || selectedMerchant.id) {
-        const uRef = doc(db, 'users', selectedMerchant.ownerUid || selectedMerchant.id);
-        batch.update(uRef, { status: newStatus });
+      const ownerUid = selectedMerchant.ownerUid || selectedMerchant.id;
+      if (ownerUid) {
+        if (newStatus === 'active') {
+          batch.update(doc(db, 'users', ownerUid), { status: 'active' });
+        } else {
+          // Only suspend owner login account if no other active outlets remain for this owner
+          const otherActiveOutlets = merchants.some(
+            (m) => m.id !== selectedMerchant.id && (m.ownerUid || m.id) === ownerUid && m.status !== 'suspended'
+          );
+          if (!otherActiveOutlets) {
+            batch.update(doc(db, 'users', ownerUid), { status: 'suspended' });
+          }
+        }
       }
 
       await batch.commit();
@@ -2019,7 +2396,7 @@ export const Merchants: React.FC = () => {
         action: isSuspended ? 'RESTORE_MERCHANT' : 'SUSPEND_MERCHANT',
         entityType: 'merchant',
         entityId: selectedMerchant.id,
-        details: `${isSuspended ? 'Restored' : 'Suspended'} merchant ${selectedMerchant.name}`
+        details: `${isSuspended ? 'Restored' : 'Suspended'} merchant ${formatShopDisplayName(selectedMerchant, true)}`
       });
 
       showSuccess(`Merchant marked as ${newStatus}.`);
@@ -2045,6 +2422,139 @@ export const Merchants: React.FC = () => {
       );
     } catch (err: any) {
       showError(err);
+    }
+  };
+
+  // Reset Outlets PIN on users/{ownerUid}
+  const handleResetOutletsPin = async () => {
+    if (!selectedMerchant) return;
+    const ownerUid = selectedMerchant.ownerUid || selectedMerchant.id;
+    try {
+      setResettingPin(true);
+      await updateDoc(doc(db, 'users', ownerUid), {
+        outletsPinHash: deleteField(),
+        outletsPinSalt: deleteField(),
+        updatedAt: Timestamp.now()
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'RESET_OUTLETS_PIN',
+        entityType: 'user',
+        entityId: ownerUid,
+        details: `Reset Outlets PIN for owner ${selectedMerchant.ownerName || ownerUid} (${formatShopDisplayName(selectedMerchant, true)})`
+      });
+
+      setOwnerPinSet(false);
+      setConfirmResetPinOpen(false);
+      showSuccess('Outlets PIN cleared. The owner can set a new PIN in the Merchant app.');
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setResettingPin(false);
+    }
+  };
+
+  // Deactivate / Activate specific outlet
+  const handleToggleDeactivateOutlet = async (outlet: Merchant) => {
+    try {
+      const isSuspended = outlet.status === 'suspended';
+      const newStatus: 'active' | 'suspended' = isSuspended ? 'active' : 'suspended';
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'merchants', outlet.id), {
+        status: newStatus,
+        ...(newStatus === 'suspended' ? { isOpen: false } : {}),
+        updatedAt: Timestamp.now()
+      });
+
+      const ownerUid = outlet.ownerUid || outlet.id;
+      if (ownerUid) {
+        if (newStatus === 'active') {
+          batch.update(doc(db, 'users', ownerUid), { status: 'active' });
+        } else {
+          const otherActive = merchants.some(
+            (m) => m.id !== outlet.id && (m.ownerUid || m.id) === ownerUid && m.status !== 'suspended'
+          );
+          if (!otherActive) {
+            batch.update(doc(db, 'users', ownerUid), { status: 'suspended' });
+          }
+        }
+      }
+
+      await batch.commit();
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        action: newStatus === 'suspended' ? 'DEACTIVATE_OUTLET' : 'ACTIVATE_OUTLET',
+        entityType: 'merchant',
+        entityId: outlet.id,
+        details: `${newStatus === 'suspended' ? 'Deactivated' : 'Activated'} outlet ${formatShopDisplayName(outlet, true)}`
+      });
+
+      setMerchants((prev) =>
+        prev.map((m) =>
+          m.id === outlet.id ? { ...m, status: newStatus, ...(newStatus === 'suspended' ? { isOpen: false } : {}) } : m
+        )
+      );
+      if (selectedMerchant?.id === outlet.id) {
+        setSelectedMerchant((prev) =>
+          prev ? { ...prev, status: newStatus, ...(newStatus === 'suspended' ? { isOpen: false } : {}) } : null
+        );
+      }
+      showSuccess(`Outlet ${formatShopDisplayName(outlet, true)} ${newStatus === 'suspended' ? 'deactivated' : 'reactivated'}.`);
+    } catch (err: any) {
+      showError(err);
+    }
+  };
+
+  // Delete outlet (ONLY allowed when outlet has 0 orders)
+  const handleDeleteOutlet = async () => {
+    if (!outletToDelete) return;
+    try {
+      setDeletingOutlet(true);
+      // Verify live in Firestore that this outlet has 0 orders
+      const ordersCheck = await getDocs(
+        query(collection(db, 'orders'), where('merchantId', '==', outletToDelete.id), limit(1))
+      );
+      if (!ordersCheck.empty) {
+        showError('Cannot delete an outlet that has existing orders. Deactivate it instead.');
+        setOutletOrderCountMap((prev) => ({ ...prev, [outletToDelete.id]: Math.max(1, prev[outletToDelete.id] || 1) }));
+        setOutletToDelete(null);
+        return;
+      }
+
+      await deleteDoc(doc(db, 'merchants', outletToDelete.id));
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        action: 'DELETE_OUTLET',
+        entityType: 'merchant',
+        entityId: outletToDelete.id,
+        details: `Deleted zero-order outlet ${formatShopDisplayName(outletToDelete, true)} from chain ${outletToDelete.chainId || ''}`
+      });
+
+      const deletedId = outletToDelete.id;
+      const updatedList = merchants.filter((m) => m.id !== deletedId);
+      setMerchants(updatedList);
+      setOutletToDelete(null);
+
+      if (selectedMerchant?.id === deletedId) {
+        const fallback =
+          updatedList.find((m) => m.chainId && m.chainId === outletToDelete.chainId) || null;
+        setSelectedMerchant(fallback);
+      } else if (selectedMerchant) {
+        fetchOutletsAndOwnerData(selectedMerchant, updatedList);
+      }
+
+      showSuccess(`Outlet ${formatShopDisplayName(outletToDelete, true)} permanently deleted.`);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setDeletingOutlet(false);
     }
   };
 
@@ -2499,12 +3009,16 @@ export const Merchants: React.FC = () => {
     setMenuFormSortOrder(typeof menu.sortOrder === 'number' ? menu.sortOrder : 0);
     if (menu.schedule) {
       setMenuFormHasSchedule(true);
-      setMenuFormDays(Array.isArray(menu.schedule.days) ? menu.schedule.days : [0, 1, 2, 3, 4, 5, 6]);
+      setMenuFormDays(
+        Array.isArray(menu.schedule.days) && menu.schedule.days.length > 0
+          ? menu.schedule.days.map((d: any) => (typeof d === 'string' ? d.toLowerCase().trim() : Number(d)))
+          : [1, 2, 3, 4, 5, 6, 0]
+      );
       setMenuFormStart(menu.schedule.start || '08:00');
       setMenuFormEnd(menu.schedule.end || '22:00');
     } else {
       setMenuFormHasSchedule(false);
-      setMenuFormDays([0, 1, 2, 3, 4, 5, 6]);
+      setMenuFormDays([1, 2, 3, 4, 5, 6, 0]);
       setMenuFormStart('08:00');
       setMenuFormEnd('22:00');
     }
@@ -2523,7 +3037,10 @@ export const Merchants: React.FC = () => {
       setSavingMenu(true);
       const scheduleObj: MerchantMenuSchedule | null = menuFormHasSchedule
         ? {
-            days: menuFormDays.length > 0 ? menuFormDays : [0, 1, 2, 3, 4, 5, 6],
+            days:
+              menuFormDays.length > 0
+                ? menuFormDays.map((d: any) => (typeof d === 'string' ? d.toLowerCase().trim() : Number(d)))
+                : [1, 2, 3, 4, 5, 6, 0],
             start: menuFormStart || '00:00',
             end: menuFormEnd || '23:59'
           }
@@ -2787,8 +3304,26 @@ export const Merchants: React.FC = () => {
       }
       const hasSets = sanitizedSets.length > 0;
 
+      // Never drop itemSize or availability when saving other fields
+      const finalItemSize = selectedMerchant.type === 'convenience'
+        ? (itemSize.trim().slice(0, 20) || null)
+        : (editingItem ? (editingItem.itemSize ?? null) : null);
+
+      const finalAvailability: ItemAvailability | null = itemHasAvailability
+        ? {
+            days:
+              itemAvailabilityDays && itemAvailabilityDays.length > 0
+                ? itemAvailabilityDays.map((d: any) => (typeof d === 'string' ? d.toLowerCase().trim() : Number(d)))
+                : [1, 2, 3, 4, 5, 6, 0],
+            start: itemAvailabilityStart || '08:00',
+            end: itemAvailabilityEnd || '22:00',
+            dateFrom: itemAvailabilityDateFrom ? itemAvailabilityDateFrom.trim() : null,
+            dateTo: itemAvailabilityDateTo ? itemAvailabilityDateTo.trim() : null
+          }
+        : null;
+
       if (editingItem) {
-        // Edit - never drop menuIds, sets, subcategoryId, or customName
+        // Edit - never drop menuIds, sets, subcategoryId, customName, itemSize, or availability
         const itemDoc = doc(db, 'merchants', selectedMerchant.id, 'items', editingItem.id);
         const updatePayload: Record<string, any> = {
           name: itemName.trim(),
@@ -2799,6 +3334,8 @@ export const Merchants: React.FC = () => {
           subcategoryId: subcategoryIdVal,
           subcategoryName: subcategoryNameVal,
           customName: editingItem.customName ?? null,
+          itemSize: finalItemSize,
+          availability: finalAvailability,
           menuIds: itemMenuIds,
           available: itemAvailable,
           hasSets,
@@ -2818,6 +3355,8 @@ export const Merchants: React.FC = () => {
                 subcategoryId: subcategoryIdVal,
                 subcategoryName: subcategoryNameVal,
                 customName: editingItem.customName ?? null,
+                itemSize: finalItemSize,
+                availability: finalAvailability,
                 menuIds: itemMenuIds,
                 available: itemAvailable,
                 hasSets,
@@ -2837,6 +3376,8 @@ export const Merchants: React.FC = () => {
           subcategoryId: subcategoryIdVal,
           subcategoryName: subcategoryNameVal,
           customName: null,
+          itemSize: finalItemSize,
+          availability: finalAvailability,
           menuIds: itemMenuIds,
           available: itemAvailable,
           hasSets,
@@ -2853,6 +3394,8 @@ export const Merchants: React.FC = () => {
           subcategoryId: subcategoryIdVal,
           subcategoryName: subcategoryNameVal,
           customName: null,
+          itemSize: finalItemSize,
+          availability: finalAvailability,
           menuIds: itemMenuIds,
           available: itemAvailable,
           hasSets,
@@ -2963,6 +3506,9 @@ export const Merchants: React.FC = () => {
       await addDoc(pRef, {
         merchantId: selectedMerchant.id,
         merchantName: selectedMerchant.name,
+        branchName: selectedMerchant.branchName || '',
+        branchCode: selectedMerchant.branchCode || '',
+        chainId: selectedMerchant.chainId || null,
         amount: Number(payoutAmount),
         status: 'Pending',
         createdAt: Timestamp.now()
@@ -2971,6 +3517,7 @@ export const Merchants: React.FC = () => {
       showSuccess('Payout request generated.');
       setPayoutAmount(0);
       fetchOrdersAndPayouts(selectedMerchant.id);
+      fetchOutletsAndOwnerData(selectedMerchant);
     } catch (err: any) {
       showError(err);
     } finally {
@@ -3141,6 +3688,31 @@ export const Merchants: React.FC = () => {
   }, [typeFilter]);
 
   // Filter list
+  const chainOptions: ChainOption[] = useMemo(() => getChainOptions(merchants), [merchants]);
+
+  const currentChainOutlets: Merchant[] = useMemo(() => {
+    if (!selectedMerchant) return [];
+    if (!selectedMerchant.chainId) return [selectedMerchant];
+    return merchants
+      .filter((m) => m.chainId === selectedMerchant.chainId)
+      .sort((a, b) => {
+        const aMain = a.isBranch === false || a.id === selectedMerchant.chainId ? 0 : 1;
+        const bMain = b.isBranch === false || b.id === selectedMerchant.chainId ? 0 : 1;
+        if (aMain !== bMain) return aMain - bMain;
+        return (a.branchName || a.name).localeCompare(b.branchName || b.name);
+      });
+  }, [selectedMerchant, merchants]);
+
+  const currentMainShop: Merchant | null = useMemo(() => {
+    if (!selectedMerchant) return null;
+    if (!selectedMerchant.chainId) return selectedMerchant;
+    return (
+      currentChainOutlets.find((o) => o.isBranch === false || o.id === selectedMerchant.chainId) ||
+      currentChainOutlets[0] ||
+      selectedMerchant
+    );
+  }, [selectedMerchant, currentChainOutlets]);
+
   const filteredMerchants = useMemo(() => {
     return merchants.filter((m) => {
       if (selectedCityId !== 'all' && m.cityId && m.cityId !== selectedCityId) return false;
@@ -3149,6 +3721,11 @@ export const Merchants: React.FC = () => {
         if (!m.cuisineTags || !m.cuisineTags.includes(categoryFilter)) return false;
       }
       if (statusFilter !== 'all' && m.status !== statusFilter) return false;
+      if (chainFilter === 'chains_only' && !m.chainId) return false;
+      if (chainFilter === 'single_only' && m.chainId) return false;
+      if (chainFilter !== 'all' && chainFilter !== 'chains_only' && chainFilter !== 'single_only') {
+        if (m.chainId !== chainFilter) return false;
+      }
       const sOn = isMerchantServiceOn(m);
       const cObj = cities.find((c) => c.id === m.cityId);
       const eff = effectiveOpen(m, platformTimezone, sOn, cObj?.name);
@@ -3157,13 +3734,68 @@ export const Merchants: React.FC = () => {
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const n = (m.name || '').toLowerCase();
+        const bn = (m.branchName || '').toLowerCase();
+        const bc = (m.branchCode || '').toLowerCase();
+        const cn = (m.chainName || '').toLowerCase();
         const o = (m.ownerName || '').toLowerCase();
         const p = (m.phone || '').toLowerCase();
-        if (!n.includes(q) && !o.includes(q) && !p.includes(q)) return false;
+        if (!n.includes(q) && !bn.includes(q) && !bc.includes(q) && !cn.includes(q) && !o.includes(q) && !p.includes(q)) return false;
       }
       return true;
     });
-  }, [merchants, selectedCityId, typeFilter, categoryFilter, statusFilter, openFilter, searchQuery, platformTimezone, platformServices, cities]);
+  }, [merchants, selectedCityId, typeFilter, categoryFilter, statusFilter, chainFilter, openFilter, searchQuery, platformTimezone, platformServices, cities]);
+
+  // Group filteredMerchants into expandable chain rows and standalone single shop rows
+  const groupedDisplayRows = useMemo(() => {
+    const chainMap = new Map<string, Merchant[]>();
+    const standaloneRows: Array<{ kind: 'single'; merchant: Merchant }> = [];
+
+    filteredMerchants.forEach((m) => {
+      if (m.chainId) {
+        const arr = chainMap.get(m.chainId) || [];
+        arr.push(m);
+        chainMap.set(m.chainId, arr);
+      } else {
+        standaloneRows.push({ kind: 'single', merchant: m });
+      }
+    });
+
+    type DisplayRow =
+      | { kind: 'single'; sortKey: string; merchant: Merchant }
+      | { kind: 'chain'; sortKey: string; chainId: string; chainName: string; mainShop: Merchant; outlets: Merchant[] };
+
+    const rows: DisplayRow[] = [];
+
+    chainMap.forEach((outlets, chainId) => {
+      const sorted = [...outlets].sort((a, b) => {
+        const aMain = a.isBranch === false || a.id === chainId ? 0 : 1;
+        const bMain = b.isBranch === false || b.id === chainId ? 0 : 1;
+        if (aMain !== bMain) return aMain - bMain;
+        return (a.branchName || a.name).localeCompare(b.branchName || b.name);
+      });
+      const mainShop = sorted[0];
+      const chainName = mainShop.chainName || mainShop.name;
+      rows.push({
+        kind: 'chain',
+        sortKey: chainName.toLowerCase(),
+        chainId,
+        chainName,
+        mainShop,
+        outlets: sorted
+      });
+    });
+
+    standaloneRows.forEach((r) => {
+      rows.push({
+        kind: 'single',
+        sortKey: (r.merchant.name || '').toLowerCase(),
+        merchant: r.merchant
+      });
+    });
+
+    rows.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    return rows;
+  }, [filteredMerchants]);
 
   const [exportModalOpen, setExportModalOpen] = useState(false);
 
@@ -3270,16 +3902,33 @@ export const Merchants: React.FC = () => {
 
       {/* Filter Toolbar */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-4 shadow-xs">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3.5 top-3 text-gray-400" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search store name, owner, phone..."
+              placeholder="Search store, branch, code, owner..."
               className="w-full pl-9 pr-4 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
             />
+          </div>
+
+          <div>
+            <select
+              value={chainFilter}
+              onChange={(e) => setChainFilter(e.target.value)}
+              className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400 font-semibold"
+            >
+              <option value="all">All Chains &amp; Shops</option>
+              <option value="chains_only">Multi-Outlet Chains Only</option>
+              <option value="single_only">Single Shops Only</option>
+              {chainOptions.map((c) => (
+                <option key={c.chainId} value={c.chainId}>
+                  Chain: {c.chainName} ({c.outlets.length} outlets)
+                </option>
+              ))}
+            </select>
           </div>
 
           <div>
@@ -3377,150 +4026,414 @@ export const Merchants: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 font-medium">
-                {filteredMerchants.length === 0 ? (
+                {groupedDisplayRows.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="text-center py-12 text-gray-400 text-xs">
                       No matching merchants found.
                     </td>
                   </tr>
                 ) : (
-                  filteredMerchants.map((m) => (
-                    <tr
-                      key={m.id}
-                      onClick={() => setSelectedMerchant(m)}
-                      className="hover:bg-amber-50/50 dark:hover:bg-zinc-800/50 cursor-pointer transition-colors"
-                    >
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 font-bold flex items-center justify-center shrink-0 overflow-hidden">
-                            {m.logoUrl ? (
-                              <img
-                                src={m.logoUrl}
-                                alt={m.name}
-                                className="w-full h-full object-cover"
-                              />
-                            ) : (
-                              <Store className="w-5 h-5 text-amber-600" />
-                            )}
-                          </div>
-                          <div>
-                            <div className="font-bold text-gray-900 dark:text-white">{m.name}</div>
-                            <div className="text-[10px] text-gray-400 truncate max-w-[180px]">
-                              {m.address || 'No address set'}
+                  groupedDisplayRows.map((row) => {
+                    if (row.kind === 'chain') {
+                      const isExpanded =
+                        Boolean(expandedChainIds[row.chainId]) ||
+                        (chainFilter !== 'all' && chainFilter !== 'chains_only' && chainFilter !== 'single_only') ||
+                        Boolean(searchQuery.trim());
+                      const openCount = row.outlets.filter((o) => {
+                        if (o.status === 'suspended') return false;
+                        const sOn = isMerchantServiceOn(o);
+                        const cObj = cities.find((c) => c.id === o.cityId);
+                        return effectiveOpen(o, platformTimezone, sOn, cObj?.name).isOpen;
+                      }).length;
+                      const suspendedCount = row.outlets.filter((o) => o.status === 'suspended').length;
+                      const closedCount = row.outlets.length - openCount - suspendedCount;
+
+                      return (
+                        <React.Fragment key={`chain-${row.chainId}`}>
+                          {/* Expandable Chain Summary Row */}
+                          <tr
+                            onClick={() =>
+                              setExpandedChainIds((prev) => ({
+                                ...prev,
+                                [row.chainId]: !prev[row.chainId]
+                              }))
+                            }
+                            className="bg-amber-50/40 dark:bg-zinc-850/70 hover:bg-amber-50 dark:hover:bg-zinc-800/80 cursor-pointer transition-colors"
+                          >
+                            <td className="px-4 py-3.5">
+                              <div className="flex items-center gap-3">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setExpandedChainIds((prev) => ({
+                                      ...prev,
+                                      [row.chainId]: !prev[row.chainId]
+                                    }));
+                                  }}
+                                  className="p-1 rounded-lg bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 shrink-0"
+                                >
+                                  {isExpanded ? (
+                                    <ChevronDown className="w-4 h-4" />
+                                  ) : (
+                                    <ChevronRight className="w-4 h-4" />
+                                  )}
+                                </button>
+                                <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 font-bold flex items-center justify-center shrink-0 overflow-hidden">
+                                  {row.mainShop.logoUrl ? (
+                                    <img
+                                      src={row.mainShop.logoUrl}
+                                      alt={row.chainName}
+                                      className="w-full h-full object-cover"
+                                    />
+                                  ) : (
+                                    <Building2 className="w-5 h-5 text-amber-600" />
+                                  )}
+                                </div>
+                                <div>
+                                  <div className="font-extrabold text-gray-900 dark:text-white flex items-center gap-2 flex-wrap">
+                                    <span>
+                                      {row.chainName} - {row.outlets.length} {row.outlets.length === 1 ? 'outlet' : 'outlets'}
+                                    </span>
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-400 text-black">
+                                      Chain
+                                    </span>
+                                  </div>
+                                  <div className="text-[10px] text-gray-500 dark:text-zinc-400">
+                                    Click to {isExpanded ? 'collapse' : 'expand'} outlets
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3.5">
+                              <div className="font-semibold text-gray-900 dark:text-white">
+                                {row.mainShop.ownerName || '—'}
+                              </div>
+                              <div className="text-[11px] text-gray-400">{row.mainShop.email || row.mainShop.phone}</div>
+                            </td>
+                            <td className="px-4 py-3.5">
+                              <span className="capitalize px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
+                                {row.mainShop.type}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3.5">
+                              <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-bold">
+                                {openCount > 0 && (
+                                  <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                                    {openCount} Open
+                                  </span>
+                                )}
+                                {closedCount > 0 && (
+                                  <span className="px-2 py-0.5 rounded-full bg-gray-200 text-gray-700 dark:bg-zinc-800 dark:text-zinc-300">
+                                    {closedCount} Closed
+                                  </span>
+                                )}
+                                {suspendedCount > 0 && (
+                                  <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300">
+                                    {suspendedCount} Suspended
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3.5 font-bold text-amber-600">
+                              {(() => {
+                                const rates = Array.from(new Set(row.outlets.map((o) => o.commissionRate ?? 15)));
+                                return rates.length === 1 ? `${rates[0]}%` : `${Math.min(...rates)}–${Math.max(...rates)}%`;
+                              })()}
+                            </td>
+                            <td className="px-4 py-3.5 text-right">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedMerchant(row.mainShop);
+                                  setActiveTab('outlets');
+                                }}
+                                className="px-3 py-1 rounded-lg text-xs font-bold bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 hover:bg-amber-200 transition-colors"
+                              >
+                                Manage Chain &rarr;
+                              </button>
+                            </td>
+                          </tr>
+
+                          {/* Nested Outlet Rows */}
+                          {isExpanded &&
+                            row.outlets.map((m) => (
+                              <tr
+                                key={m.id}
+                                onClick={() => setSelectedMerchant(m)}
+                                className="bg-gray-50/40 dark:bg-zinc-900/40 hover:bg-amber-50/60 dark:hover:bg-zinc-800/60 cursor-pointer transition-colors"
+                              >
+                                <td className="px-4 py-3 pl-12">
+                                  <div className="flex items-center gap-2.5">
+                                    <div className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                                    <div>
+                                      <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5 flex-wrap">
+                                        <span>{formatShopDisplayName(m, false)}</span>
+                                        {m.branchCode && (
+                                          <span className="px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 font-mono text-[10px] font-bold">
+                                            {m.branchCode}
+                                          </span>
+                                        )}
+                                        {(m.isBranch === false || m.id === row.chainId) && (
+                                          <span className="px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 text-[9px] font-extrabold uppercase">
+                                            Main
+                                          </span>
+                                        )}
+                                        {m.branchSetupDone === false && (
+                                          <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 text-[9px] font-bold">
+                                            Setup pending
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="text-[10px] text-gray-400 truncate max-w-[240px]">
+                                        {m.address || 'No address set'}
+                                      </div>
+                                    </div>
+                                  </div>
+                                </td>
+                                <td className="px-4 py-3">
+                                  <div className="font-semibold text-gray-900 dark:text-white">
+                                    {m.ownerName || '—'}
+                                  </div>
+                                  <div className="text-[11px] text-gray-400">{m.phone || '—'}</div>
+                                </td>
+                                <td className="px-4 py-3">
+                                  <span className="capitalize px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
+                                    {m.type}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3">
+                                  {(() => {
+                                    const sOn = isMerchantServiceOn(m);
+                                    const cObj = cities.find((c) => c.id === m.cityId);
+                                    const eff = effectiveOpen(m, platformTimezone, sOn, cObj?.name);
+                                    const isSuspended = m.status === 'suspended';
+                                    return (
+                                      <div className="flex flex-col gap-1">
+                                        <div className="flex items-center gap-1.5" title={eff.reason}>
+                                          <span
+                                            className={`w-2 h-2 rounded-full shrink-0 ${
+                                              isSuspended
+                                                ? 'bg-red-500'
+                                                : eff.isOpen
+                                                ? 'bg-emerald-500'
+                                                : 'bg-gray-400'
+                                            }`}
+                                          />
+                                          <span
+                                            className={`font-bold ${
+                                              isSuspended
+                                                ? 'text-red-600 dark:text-red-400'
+                                                : eff.isOpen
+                                                ? 'text-emerald-700 dark:text-emerald-400'
+                                                : 'text-gray-700 dark:text-zinc-300'
+                                            }`}
+                                          >
+                                            {isSuspended ? 'Suspended' : eff.isOpen ? 'Open' : 'Closed'}
+                                          </span>
+                                        </div>
+                                        <span className="text-[10px] text-gray-500 dark:text-zinc-400 truncate max-w-[180px]" title={eff.reason}>
+                                          {eff.reason}
+                                        </span>
+                                      </div>
+                                    );
+                                  })()}
+                                </td>
+                                <td className="px-4 py-3 font-bold text-amber-600">
+                                  {m.commissionRate || 15}%
+                                </td>
+                                <td className="px-4 py-3 text-right">
+                                  <div className="flex items-center justify-end gap-1.5">
+                                    {(() => {
+                                      const isForceClosed = Boolean(
+                                        m.closedUntil &&
+                                        parseDate(m.closedUntil) &&
+                                        new Date().getTime() < parseDate(m.closedUntil)!.getTime()
+                                      );
+                                      if (isForceClosed) {
+                                        return (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleReopenMerchant(m);
+                                            }}
+                                            className="px-2 py-1 rounded-lg text-[11px] font-bold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 hover:bg-emerald-100"
+                                          >
+                                            Reopen
+                                          </button>
+                                        );
+                                      }
+                                      return (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleForceCloseMerchant(m);
+                                          }}
+                                          className="px-2 py-1 rounded-lg text-[11px] font-bold bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800 hover:bg-amber-100"
+                                        >
+                                          Force close
+                                        </button>
+                                      );
+                                    })()}
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setSelectedMerchant(m);
+                                      }}
+                                      className="px-2.5 py-1 rounded-lg text-xs font-bold text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40"
+                                    >
+                                      Manage &rarr;
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                        </React.Fragment>
+                      );
+                    }
+
+                    const m = row.merchant;
+                    return (
+                      <tr
+                        key={m.id}
+                        onClick={() => setSelectedMerchant(m)}
+                        className="hover:bg-amber-50/50 dark:hover:bg-zinc-800/50 cursor-pointer transition-colors"
+                      >
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 font-bold flex items-center justify-center shrink-0 overflow-hidden">
+                              {m.logoUrl ? (
+                                <img
+                                  src={m.logoUrl}
+                                  alt={m.name}
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                <Store className="w-5 h-5 text-amber-600" />
+                              )}
+                            </div>
+                            <div>
+                              <div className="font-bold text-gray-900 dark:text-white">{formatShopDisplayName(m, true)}</div>
+                              <div className="text-[10px] text-gray-400 truncate max-w-[180px]">
+                                {m.address || 'No address set'}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="font-semibold text-gray-900 dark:text-white">
-                          {m.ownerName || '—'}
-                        </div>
-                        <div className="text-[11px] text-gray-400">{m.phone}</div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="capitalize px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
-                          {m.type}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        {(() => {
-                          const sOn = isMerchantServiceOn(m);
-                          const cObj = cities.find((c) => c.id === m.cityId);
-                          const eff = effectiveOpen(m, platformTimezone, sOn, cObj?.name);
-                          const isSuspended = m.status === 'suspended';
-                          return (
-                            <div className="flex flex-col gap-1">
-                              <div className="flex items-center gap-1.5" title={eff.reason}>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="font-semibold text-gray-900 dark:text-white">
+                            {m.ownerName || '—'}
+                          </div>
+                          <div className="text-[11px] text-gray-400">{m.phone}</div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="capitalize px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
+                            {m.type}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          {(() => {
+                            const sOn = isMerchantServiceOn(m);
+                            const cObj = cities.find((c) => c.id === m.cityId);
+                            const eff = effectiveOpen(m, platformTimezone, sOn, cObj?.name);
+                            const isSuspended = m.status === 'suspended';
+                            return (
+                              <div className="flex flex-col gap-1">
+                                <div className="flex items-center gap-1.5" title={eff.reason}>
+                                  <span
+                                    className={`w-2 h-2 rounded-full shrink-0 ${
+                                      isSuspended
+                                        ? 'bg-red-500'
+                                        : eff.isOpen
+                                        ? 'bg-emerald-500'
+                                        : 'bg-gray-400'
+                                    }`}
+                                  />
+                                  <span
+                                    className={`font-bold ${
+                                      isSuspended
+                                        ? 'text-red-600 dark:text-red-400'
+                                        : eff.isOpen
+                                        ? 'text-emerald-700 dark:text-emerald-400'
+                                        : 'text-gray-700 dark:text-zinc-300'
+                                    }`}
+                                  >
+                                    {isSuspended ? 'Suspended' : eff.isOpen ? 'Open' : 'Closed'}
+                                  </span>
+                                </div>
+                                {!sOn && (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-md text-[9px] font-extrabold bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300 border border-red-300 w-fit">
+                                    <AlertTriangle className="w-2.5 h-2.5 text-red-500" />
+                                    <span>Service off in {cObj?.name || 'city'}</span>
+                                  </span>
+                                )}
                                 <span
-                                  className={`w-2 h-2 rounded-full shrink-0 ${
-                                    isSuspended
-                                      ? 'bg-red-500'
-                                      : eff.isOpen
-                                      ? 'bg-emerald-500'
-                                      : 'bg-gray-400'
-                                  }`}
-                                />
-                                <span
-                                  className={`font-bold ${
-                                    isSuspended
-                                      ? 'text-red-600 dark:text-red-400'
-                                      : eff.isOpen
-                                      ? 'text-emerald-700 dark:text-emerald-400'
-                                      : 'text-gray-700 dark:text-zinc-300'
-                                  }`}
+                                  className="text-[10px] text-gray-500 dark:text-zinc-400 truncate max-w-[200px]"
+                                  title={eff.reason}
                                 >
-                                  {isSuspended ? 'Suspended' : eff.isOpen ? 'Open' : 'Closed'}
+                                  {eff.reason}
                                 </span>
                               </div>
-                              {!sOn && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-md text-[9px] font-extrabold bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300 border border-red-300 w-fit">
-                                  <AlertTriangle className="w-2.5 h-2.5 text-red-500" />
-                                  <span>Service off in {cObj?.name || 'city'}</span>
-                                </span>
-                              )}
-                              <span
-                                className="text-[10px] text-gray-500 dark:text-zinc-400 truncate max-w-[200px]"
-                                title={eff.reason}
-                              >
-                                {eff.reason}
-                              </span>
-                            </div>
-                          );
-                        })()}
-                      </td>
-                      <td className="px-4 py-3 font-bold text-amber-600">
-                        {m.commissionRate || 15}%
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
-                          {(() => {
-                            const isForceClosed = Boolean(
-                              m.closedUntil &&
-                              parseDate(m.closedUntil) &&
-                              new Date().getTime() < parseDate(m.closedUntil)!.getTime()
                             );
-                            if (isForceClosed) {
+                          })()}
+                        </td>
+                        <td className="px-4 py-3 font-bold text-amber-600">
+                          {m.commissionRate || 15}%
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {(() => {
+                              const isForceClosed = Boolean(
+                                m.closedUntil &&
+                                parseDate(m.closedUntil) &&
+                                new Date().getTime() < parseDate(m.closedUntil)!.getTime()
+                              );
+                              if (isForceClosed) {
+                                return (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleReopenMerchant(m);
+                                    }}
+                                    title="Clear closedUntil and reopen this merchant"
+                                    className="px-2 py-1 rounded-lg text-[11px] font-bold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 hover:bg-emerald-100 transition-colors"
+                                  >
+                                    Reopen
+                                  </button>
+                                );
+                              }
                               return (
                                 <button
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    handleReopenMerchant(m);
+                                    handleForceCloseMerchant(m);
                                   }}
-                                  title="Clear closedUntil and reopen this merchant"
-                                  className="px-2 py-1 rounded-lg text-[11px] font-bold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 hover:bg-emerald-100 transition-colors"
+                                  title="Force close until next opening or 2100-01-01"
+                                  className="px-2 py-1 rounded-lg text-[11px] font-bold bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800 hover:bg-amber-100 transition-colors"
                                 >
-                                  Reopen
+                                  Force close
                                 </button>
                               );
-                            }
-                            return (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleForceCloseMerchant(m);
-                                }}
-                                title="Force close until next opening or 2100-01-01"
-                                className="px-2 py-1 rounded-lg text-[11px] font-bold bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800 hover:bg-amber-100 transition-colors"
-                              >
-                                Force close
-                              </button>
-                            );
-                          })()}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setSelectedMerchant(m);
-                            }}
-                            className="px-2.5 py-1 rounded-lg text-xs font-bold text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40 transition-colors"
-                          >
-                            Manage &rarr;
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
+                            })()}
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedMerchant(m);
+                              }}
+                              className="px-2.5 py-1 rounded-lg text-xs font-bold text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40 transition-colors"
+                            >
+                              Manage &rarr;
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -3551,7 +4464,14 @@ export const Merchants: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="font-extrabold text-lg text-gray-900 dark:text-white flex items-center gap-2 flex-wrap">
-                    <span>{selectedMerchant.name}</span>
+                    <span>{formatShopDisplayName(selectedMerchant, true)}</span>
+                    {selectedMerchant.chainId && (
+                      <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                        {selectedMerchant.isBranch === false || selectedMerchant.id === selectedMerchant.chainId
+                          ? 'Main Shop'
+                          : 'Branch Outlet'}
+                      </span>
+                    )}
                     {(() => {
                       const sOn = isMerchantServiceOn(selectedMerchant);
                       const cObj = cities.find((c) => c.id === selectedMerchant.cityId);
@@ -3580,7 +4500,12 @@ export const Merchants: React.FC = () => {
                       );
                     })()}
                   </h3>
-                  <p className="text-xs text-gray-400">ID: {selectedMerchant.id}</p>
+                  <p className="text-xs text-gray-400">
+                    ID: {selectedMerchant.id}
+                    {selectedMerchant.chainId && (
+                      <span className="ml-2">• Chain: <code className="font-mono text-amber-600">{selectedMerchant.chainId}</code></span>
+                    )}
+                  </p>
                 </div>
               </div>
 
@@ -3628,6 +4553,7 @@ export const Merchants: React.FC = () => {
             <div className="flex border-b border-gray-200 dark:border-zinc-800 px-5 pt-2 overflow-x-auto">
               {[
                 { id: 'details', label: 'Details' },
+                { id: 'outlets', label: selectedMerchant.chainId ? `Outlets (${currentChainOutlets.length})` : 'Outlets' },
                 { id: 'status', label: 'Status & Hours' },
                 { id: 'wallet', label: 'Wallet' },
                 { id: 'location', label: 'Location Map' },
@@ -3848,8 +4774,243 @@ export const Merchants: React.FC = () => {
                     </button>
                   </div>
                 </form>
+
+                  {/* Owner & Outlets PIN Security Card */}
+                  <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <KeyRound className="w-4 h-4 text-amber-500" />
+                        <h4 className="font-extrabold text-xs uppercase tracking-wider text-gray-900 dark:text-white">
+                          Owner Account &amp; Outlets PIN
+                        </h4>
+                        {loadingOwnerPin ? (
+                          <Loader2 className="w-3 h-3 animate-spin text-gray-400" />
+                        ) : ownerPinSet ? (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                            Outlets PIN Active
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-200 text-gray-700 dark:bg-zinc-800 dark:text-zinc-300">
+                            No PIN Set
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-gray-500 dark:text-zinc-400">
+                        Owner UID: <code className="font-mono">{selectedMerchant.ownerUid || selectedMerchant.id}</code>
+                        {selectedMerchant.chainId && ' • Shared login across all outlets in this chain.'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmResetPinOpen(true)}
+                      disabled={resettingPin}
+                      className="px-3.5 py-2 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-300 text-xs font-bold hover:bg-amber-100 transition-colors flex items-center gap-1.5 self-start sm:self-auto shrink-0"
+                    >
+                      <KeyRound className="w-3.5 h-3.5" />
+                      <span>Reset Outlets PIN</span>
+                    </button>
+                  </div>
               </div>
             )}
+
+              {/* TAB: OUTLETS */}
+              {activeTab === 'outlets' && (
+                <div className="space-y-5">
+                  {/* Owner Section & Actions */}
+                  <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <Building2 className="w-4 h-4 text-amber-500" />
+                        <h4 className="font-extrabold text-xs uppercase tracking-wider text-gray-900 dark:text-white">
+                          {selectedMerchant.chainId
+                            ? `${selectedMerchant.chainName || selectedMerchant.name} — Chain Outlets (${currentChainOutlets.length})`
+                            : `${selectedMerchant.name} — Single Shop`}
+                        </h4>
+                      </div>
+                      <p className="text-[11px] text-gray-500 dark:text-zinc-400">
+                        Owner: <strong>{selectedMerchant.ownerName || selectedMerchant.email || 'Owner'}</strong> (<code className="font-mono">{selectedMerchant.ownerUid || selectedMerchant.id}</code>)
+                        {' • '}
+                        {loadingOwnerPin ? 'Checking PIN...' : ownerPinSet ? 'Outlets PIN configured' : 'Outlets PIN not set'}
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setConfirmResetPinOpen(true)}
+                        disabled={resettingPin}
+                        className="px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 text-xs font-bold hover:bg-gray-100 dark:hover:bg-zinc-700 flex items-center gap-1.5"
+                      >
+                        <KeyRound className="w-3.5 h-3.5 text-amber-500" />
+                        <span>Reset Outlets PIN</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAddOutletModalOpen(true)}
+                        className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-extrabold flex items-center gap-1.5 shadow-xs"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>{selectedMerchant.chainId ? 'Add outlet' : 'Add the first outlet'}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {!selectedMerchant.chainId ? (
+                    <div className="p-8 rounded-2xl border border-dashed border-amber-300 dark:border-amber-900/60 bg-amber-50/40 dark:bg-amber-950/10 text-center space-y-3">
+                      <div className="w-12 h-12 rounded-2xl bg-amber-100 dark:bg-amber-950 text-amber-600 flex items-center justify-center mx-auto">
+                        <Building2 className="w-6 h-6" />
+                      </div>
+                      <div className="max-w-md mx-auto space-y-1.5">
+                        <h5 className="font-extrabold text-sm text-gray-900 dark:text-white">
+                          This shop currently operates as a single location
+                        </h5>
+                        <p className="text-xs text-gray-600 dark:text-zinc-400 leading-relaxed">
+                          Adding an outlet converts <strong>{selectedMerchant.name}</strong> into a multi-branch chain. All branches share the owner's single login (email and password), while keeping their own branch name, code, address, hours, wallet, and menu.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setAddOutletModalOpen(true)}
+                        className="delivio-btn-yellow px-5 py-2.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-2 shadow-xs"
+                      >
+                        <Plus className="w-4 h-4" />
+                        <span>Add the first outlet</span>
+                      </button>
+                    </div>
+                  ) : loadingOutletsStats ? (
+                    <div className="py-10 text-center text-xs text-gray-400">
+                      <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-amber-500" />
+                      Loading outlets overview...
+                    </div>
+                  ) : (
+                    <div className="border border-gray-200 dark:border-zinc-800 rounded-2xl overflow-hidden shadow-xs">
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs">
+                          <thead className="bg-gray-50 dark:bg-zinc-850/60 uppercase font-bold text-gray-500 dark:text-zinc-400 border-b border-gray-200 dark:border-zinc-800">
+                            <tr>
+                              <th className="px-4 py-3">Branch Name</th>
+                              <th className="px-4 py-3">Code</th>
+                              <th className="px-4 py-3">Phone</th>
+                              <th className="px-4 py-3">Status</th>
+                              <th className="px-4 py-3">Orders Today</th>
+                              <th className="px-4 py-3">Wallet Balance</th>
+                              <th className="px-4 py-3 text-right">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 font-medium">
+                            {currentChainOutlets.map((o) => {
+                              const isMain = o.isBranch === false || o.id === selectedMerchant.chainId;
+                              const isCurrent = o.id === selectedMerchant.id;
+                              const orderCount = outletOrderCountMap[o.id] || 0;
+                              const ordersToday = outletOrdersTodayMap[o.id] || 0;
+                              const sOn = isMerchantServiceOn(o);
+                              const cObj = cities.find((c) => c.id === o.cityId);
+                              const eff = effectiveOpen(o, platformTimezone, sOn, cObj?.name);
+
+                              return (
+                                <tr
+                                  key={o.id}
+                                  className={isCurrent ? 'bg-amber-50/50 dark:bg-amber-950/20' : 'hover:bg-gray-50 dark:hover:bg-zinc-800/40'}
+                                >
+                                  <td className="px-4 py-3">
+                                    <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5 flex-wrap">
+                                      <span>{o.branchName || (o.branchSetupDone === false ? 'Pending setup' : o.name)}</span>
+                                      {isMain && (
+                                        <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 text-[9px] font-extrabold uppercase">
+                                          Main
+                                        </span>
+                                      )}
+                                      {isCurrent && (
+                                        <span className="px-1.5 py-0.5 rounded bg-zinc-200 text-zinc-800 dark:bg-zinc-700 dark:text-zinc-200 text-[9px] font-bold">
+                                          Viewing
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-[10px] text-gray-400 truncate max-w-[180px]">{o.address || 'No address'}</div>
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    {o.branchCode ? (
+                                      <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 font-mono font-bold text-[11px] text-gray-900 dark:text-white">
+                                        {o.branchCode}
+                                      </span>
+                                    ) : (
+                                      <span className="text-[10px] text-amber-600 italic">Not set</span>
+                                    )}
+                                  </td>
+                                  <td className="px-4 py-3 text-gray-600 dark:text-zinc-300">
+                                    {o.phone || '—'}
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <div className="flex flex-col gap-0.5">
+                                      <span
+                                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold w-fit ${
+                                          o.status === 'suspended'
+                                            ? 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300'
+                                            : eff.isOpen
+                                            ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                                            : 'bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-300'
+                                        }`}
+                                      >
+                                        {o.status === 'suspended' ? 'Deactivated' : eff.isOpen ? 'Active • Open' : 'Active • Closed'}
+                                      </span>
+                                    </div>
+                                  </td>
+                                  <td className="px-4 py-3 font-extrabold text-gray-900 dark:text-white">
+                                    {ordersToday}
+                                  </td>
+                                  <td className="px-4 py-3 font-bold text-emerald-600">
+                                    ₱{Number(o.walletBalance || 0).toFixed(2)}
+                                  </td>
+                                  <td className="px-4 py-3 text-right">
+                                    <div className="flex items-center justify-end gap-1 flex-wrap">
+                                      {!isCurrent && (
+                                        <button
+                                          type="button"
+                                          onClick={() => setSelectedMerchant(o)}
+                                          className="px-2 py-1 rounded-lg text-[11px] font-bold text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/40"
+                                        >
+                                          Open
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditOutletTarget(o)}
+                                        className="px-2 py-1 rounded-lg text-[11px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-zinc-200 hover:bg-gray-200"
+                                      >
+                                        Edit
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleDeactivateOutlet(o)}
+                                        className={`px-2 py-1 rounded-lg text-[11px] font-bold ${
+                                          o.status === 'suspended'
+                                            ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 hover:bg-emerald-100'
+                                            : 'bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 hover:bg-amber-100'
+                                        }`}
+                                      >
+                                        {o.status === 'suspended' ? 'Activate' : 'Deactivate'}
+                                      </button>
+                                      {!isMain && orderCount === 0 && (
+                                        <button
+                                          type="button"
+                                          onClick={() => setOutletToDelete(o)}
+                                          className="px-2 py-1 rounded-lg text-[11px] font-bold bg-red-50 text-red-600 dark:bg-red-950/60 dark:text-red-300 hover:bg-red-100"
+                                        >
+                                          Delete
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* TAB 2: STATUS & OPERATING HOURS */}
               {activeTab === 'status' && (
@@ -4810,37 +5971,22 @@ export const Merchants: React.FC = () => {
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                           {menus.map((menu) => {
                             const productCount = menuItems.filter((i) => i.menuIds?.includes(menu.id)).length;
-                            const nowPHT = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
-                            const curDay = nowPHT.getDay();
-                            const curHour = nowPHT.getHours();
-                            const curMin = nowPHT.getMinutes();
-                            const curMins = curHour * 60 + curMin;
-
-                            let isActiveNow = menu.active;
-                            if (isActiveNow && menu.schedule) {
-                              const { days, start, end } = menu.schedule;
-                              if (days && days.length > 0 && !days.map(Number).includes(curDay)) {
-                                isActiveNow = false;
-                              }
-                              if (start && end) {
-                                const [sH, sM] = start.split(':').map(Number);
-                                const [eH, eM] = end.split(':').map(Number);
-                                const sTotal = (sH || 0) * 60 + (sM || 0);
-                                const eTotal = (eH || 0) * 60 + (eM || 0);
-                                if (sTotal <= eTotal) {
-                                  if (curMins < sTotal || curMins > eTotal) isActiveNow = false;
-                                } else {
-                                  if (curMins < sTotal && curMins > eTotal) isActiveNow = false;
-                                }
-                              }
-                            }
+                            const isActiveNow = isMenuAvailableNow(menu);
 
                             const dayLabels =
                               menu.schedule?.days && menu.schedule.days.length > 0
                                 ? menu.schedule.days.length === 7
                                   ? 'Every day'
                                   : menu.schedule.days
-                                      .map((d: any) => DAYS_OF_WEEK.find((x) => x.id === Number(d))?.short || d)
+                                      .map((d: any) => {
+                                        if (typeof d === 'string') {
+                                          const match = DAYS_OF_WEEK.find(
+                                            (x) => x.key === d.toLowerCase() || x.short.toLowerCase() === d.toLowerCase()
+                                          );
+                                          return match?.short || d;
+                                        }
+                                        return DAYS_OF_WEEK.find((x) => x.id === Number(d))?.short || d;
+                                      })
                                       .join(', ')
                                 : 'All days';
 
@@ -5000,6 +6146,13 @@ export const Merchants: React.FC = () => {
                               setItemAvailable(true);
                               setItemSets([]);
                               setItemMenuIds([]);
+                              setItemSize('');
+                              setItemHasAvailability(false);
+                              setItemAvailabilityDays([1, 2, 3, 4, 5, 6, 0]);
+                              setItemAvailabilityStart('08:00');
+                              setItemAvailabilityEnd('22:00');
+                              setItemAvailabilityDateFrom('');
+                              setItemAvailabilityDateTo('');
                               setItemModalOpen(true);
                             }}
                             className="delivio-btn-yellow px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 shadow-xs"
@@ -5283,6 +6436,14 @@ export const Merchants: React.FC = () => {
                                           {item.subcategoryName}
                                         </span>
                                       )}
+                                      {item.itemSize && (
+                                        <span
+                                          className="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700"
+                                          title={`Size: ${item.itemSize}`}
+                                        >
+                                          {item.itemSize}
+                                        </span>
+                                      )}
                                       {(item.hasSets || (item.sets && item.sets.length > 0)) && (
                                         <span
                                           className="inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-purple-100 text-purple-800 dark:bg-purple-950/70 dark:text-purple-300 border border-purple-200 dark:border-purple-800"
@@ -5306,6 +6467,15 @@ export const Merchants: React.FC = () => {
                                           </span>
                                         );
                                       })}
+                                      {item.availability && (
+                                        <span
+                                          className="inline-flex items-center gap-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800"
+                                          title={formatItemAvailabilitySummary(item.availability)}
+                                        >
+                                          <Clock className="w-2.5 h-2.5 shrink-0" />
+                                          <span>Custom Hours</span>
+                                        </span>
+                                      )}
                                       {/* Not available now chip */}
                                       {(() => {
                                         const availStatus = isItemAvailableNow(item, menus);
@@ -5362,6 +6532,26 @@ export const Merchants: React.FC = () => {
                                       );
                                       setItemAvailable(item.available);
                                       setItemMenuIds(Array.isArray(item.menuIds) ? item.menuIds : []);
+                                      setItemSize(item.itemSize || '');
+                                      if (item.availability) {
+                                        setItemHasAvailability(true);
+                                        setItemAvailabilityDays(
+                                          Array.isArray(item.availability.days) && item.availability.days.length > 0
+                                            ? item.availability.days.map((d: any) => (typeof d === 'string' ? d.toLowerCase().trim() : Number(d)))
+                                            : [1, 2, 3, 4, 5, 6, 0]
+                                        );
+                                        setItemAvailabilityStart(item.availability.start || '08:00');
+                                        setItemAvailabilityEnd(item.availability.end || '22:00');
+                                        setItemAvailabilityDateFrom(item.availability.dateFrom || '');
+                                        setItemAvailabilityDateTo(item.availability.dateTo || '');
+                                      } else {
+                                        setItemHasAvailability(false);
+                                        setItemAvailabilityDays([1, 2, 3, 4, 5, 6, 0]);
+                                        setItemAvailabilityStart('08:00');
+                                        setItemAvailabilityEnd('22:00');
+                                        setItemAvailabilityDateFrom('');
+                                        setItemAvailabilityDateTo('');
+                                      }
                                       setItemSets(
                                         item.sets && Array.isArray(item.sets)
                                           ? JSON.parse(JSON.stringify(item.sets)).map(
@@ -5440,94 +6630,244 @@ export const Merchants: React.FC = () => {
               {/* TAB 5: ORDERS & EARNINGS */}
               {activeTab === 'orders' && (
                 <div className="space-y-6">
-                  {/* Financials Overview Cards */}
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800">
-                      <span className="text-[10px] uppercase font-bold text-gray-400">
-                        Gross Goods Subtotal
-                      </span>
-                      <div className="text-base font-black text-gray-900 dark:text-white mt-1">
-                        ₱{financials.grossSubtotal.toFixed(2)}
+                  {selectedMerchant.chainId && currentChainOutlets.length > 1 && (
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-2xl bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50">
+                      <div className="text-xs">
+                        <span className="font-extrabold text-amber-900 dark:text-amber-200 block">
+                          Chain Financials &amp; Payout Scope
+                        </span>
+                        <span className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
+                          Switch between this outlet and combined totals across all {currentChainOutlets.length} outlets.
+                        </span>
                       </div>
-                    </div>
-                    <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200">
-                      <span className="text-[10px] uppercase font-bold text-amber-800 dark:text-amber-300">
-                        Platform Comm. ({selectedMerchant.commissionRate}%)
-                      </span>
-                      <div className="text-base font-black text-amber-600 mt-1">
-                        ₱{financials.commission.toFixed(2)}
-                      </div>
-                    </div>
-                    <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200">
-                      <span className="text-[10px] uppercase font-bold text-emerald-800 dark:text-emerald-300">
-                        Net Merchant Payout
-                      </span>
-                      <div className="text-base font-black text-emerald-600 mt-1">
-                        ₱{financials.netEarnings.toFixed(2)}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Create Payout Generator */}
-                  <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 space-y-3">
-                    <span className="text-xs font-bold uppercase text-gray-700 dark:text-zinc-300 block">
-                      Generate Merchant Remittance Payout
-                    </span>
-                    <div className="flex gap-2">
-                      <input
-                        type="number"
-                        value={payoutAmount}
-                        onChange={(e) => setPayoutAmount(Number(e.target.value))}
-                        placeholder="Amount in PHP"
-                        className="flex-1 px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
-                      />
-                      <button
-                        onClick={handleCreatePayout}
-                        disabled={creatingPayout || payoutAmount <= 0}
-                        className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold"
-                      >
-                        Create Payout
-                      </button>
-                    </div>
-
-                    {/* Payouts list */}
-                    <div className="space-y-1.5 pt-2">
-                      {payouts.map((p) => (
-                        <div
-                          key={p.id}
-                          className="flex items-center justify-between p-2.5 rounded-xl bg-white dark:bg-zinc-850 text-xs border border-gray-100 dark:border-zinc-800"
+                      <div className="flex items-center gap-1.5 bg-white dark:bg-zinc-900 p-1 rounded-xl border border-amber-200 dark:border-zinc-700 self-start sm:self-auto">
+                        <button
+                          type="button"
+                          onClick={() => setPayoutScope('outlet')}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                            payoutScope === 'outlet'
+                              ? 'bg-amber-400 text-black'
+                              : 'text-gray-600 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-800'
+                          }`}
                         >
-                          <div>
-                            <span className="font-bold text-gray-900 dark:text-white">
-                              ₱{Number(p.amount).toFixed(2)}
+                          This Outlet ({selectedMerchant.branchCode || 'Selected'})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPayoutScope('chain')}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                            payoutScope === 'chain'
+                              ? 'bg-amber-400 text-black'
+                              : 'text-gray-600 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-800'
+                          }`}
+                        >
+                          Entire Chain ({currentChainOutlets.length} outlets)
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {(() => {
+                    const useChain = Boolean(selectedMerchant.chainId && currentChainOutlets.length > 1 && payoutScope === 'chain');
+                    const displayOrders = useChain ? chainOrders : merchantOrders;
+                    const displayPayouts = useChain ? chainPayouts : payouts;
+
+                    let scopeGross = 0;
+                    let scopeComm = 0;
+                    const outletMap = new Map<string, Merchant>();
+                    currentChainOutlets.forEach((o) => outletMap.set(o.id, o));
+
+                    const breakdownMap: Record<string, { outlet: Merchant; ordersCount: number; deliveredCount: number; gross: number; comm: number; net: number; paidOut: number; pendingOut: number }> = {};
+                    if (useChain) {
+                      currentChainOutlets.forEach((o) => {
+                        breakdownMap[o.id] = { outlet: o, ordersCount: 0, deliveredCount: 0, gross: 0, comm: 0, net: 0, paidOut: 0, pendingOut: 0 };
+                      });
+                    }
+
+                    displayOrders.forEach((o) => {
+                      const outletObj = (o.merchantId && outletMap.get(o.merchantId)) || selectedMerchant;
+                      const rate = outletObj.commissionRate ?? 15;
+                      const sub = Number(o.fees?.subtotal || 0);
+                      const isDelivered = o.status === 'Delivered';
+
+                      if (useChain && o.merchantId && breakdownMap[o.merchantId]) {
+                        breakdownMap[o.merchantId].ordersCount += 1;
+                      }
+
+                      if (isDelivered) {
+                        const c = (sub * rate) / 100;
+                        scopeGross += sub;
+                        scopeComm += c;
+                        if (useChain && o.merchantId && breakdownMap[o.merchantId]) {
+                          breakdownMap[o.merchantId].deliveredCount += 1;
+                          breakdownMap[o.merchantId].gross += sub;
+                          breakdownMap[o.merchantId].comm += c;
+                          breakdownMap[o.merchantId].net += (sub - c);
+                        }
+                      }
+                    });
+
+                    if (useChain) {
+                      displayPayouts.forEach((p) => {
+                        if (p.merchantId && breakdownMap[p.merchantId]) {
+                          if (p.status === 'Paid') breakdownMap[p.merchantId].paidOut += Number(p.amount || 0);
+                          else breakdownMap[p.merchantId].pendingOut += Number(p.amount || 0);
+                        }
+                      });
+                    }
+
+                    const scopeNet = scopeGross - scopeComm;
+
+                    return (
+                      <>
+                        {/* Financials Overview Cards */}
+                        <div className="grid grid-cols-3 gap-3">
+                          <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800">
+                            <span className="text-[10px] uppercase font-bold text-gray-400">
+                              {useChain ? 'Chain Gross Subtotal' : 'Gross Goods Subtotal'}
                             </span>
-                            <span className="text-gray-400 ml-2">
-                              {formatTimestamp(p.createdAt)}
-                            </span>
+                            <div className="text-base font-black text-gray-900 dark:text-white mt-1">
+                              ₱{(useChain ? scopeGross : financials.grossSubtotal).toFixed(2)}
+                            </div>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                p.status === 'Paid'
-                                  ? 'bg-emerald-100 text-emerald-800'
-                                  : 'bg-amber-100 text-amber-800'
-                              }`}
-                            >
-                              {p.status}
+                          <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200">
+                            <span className="text-[10px] uppercase font-bold text-amber-800 dark:text-amber-300">
+                              {useChain ? 'Combined Comm.' : `Platform Comm. (${selectedMerchant.commissionRate}%)`}
                             </span>
-                            {p.status === 'Pending' && (
-                              <button
-                                onClick={() => handleMarkPayoutPaid(p.id)}
-                                className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold text-[11px]"
-                              >
-                                Mark as paid
-                              </button>
+                            <div className="text-base font-black text-amber-600 mt-1">
+                              ₱{(useChain ? scopeComm : financials.commission).toFixed(2)}
+                            </div>
+                          </div>
+                          <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200">
+                            <span className="text-[10px] uppercase font-bold text-emerald-800 dark:text-emerald-300">
+                              {useChain ? 'Chain Net Payout' : 'Net Merchant Payout'}
+                            </span>
+                            <div className="text-base font-black text-emerald-600 mt-1">
+                              ₱{(useChain ? scopeNet : financials.netEarnings).toFixed(2)}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Per-Outlet Breakdown Table when Chain Scope selected */}
+                        {useChain && (
+                          <div className="border border-gray-200 dark:border-zinc-800 rounded-2xl overflow-hidden shadow-xs">
+                            <div className="px-4 py-2.5 bg-gray-50 dark:bg-zinc-850/60 border-b border-gray-200 dark:border-zinc-800 font-extrabold text-[11px] uppercase tracking-wider text-gray-700 dark:text-zinc-300">
+                              Per-Outlet Financial Breakdown
+                            </div>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left text-xs">
+                                <thead className="bg-gray-50/70 dark:bg-zinc-900 uppercase font-bold text-[10px] text-gray-500 border-b border-gray-100 dark:border-zinc-800">
+                                  <tr>
+                                    <th className="px-3.5 py-2.5">Outlet</th>
+                                    <th className="px-3.5 py-2.5">Delivered / Total</th>
+                                    <th className="px-3.5 py-2.5">Gross</th>
+                                    <th className="px-3.5 py-2.5">Comm.</th>
+                                    <th className="px-3.5 py-2.5">Net</th>
+                                    <th className="px-3.5 py-2.5">Payouts (Paid / Pending)</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-100 dark:divide-zinc-800">
+                                  {Object.values(breakdownMap).map((b) => (
+                                    <tr key={b.outlet.id} className="hover:bg-gray-50 dark:hover:bg-zinc-800/40">
+                                      <td className="px-3.5 py-2.5 font-bold text-gray-900 dark:text-white">
+                                        {formatShopDisplayName(b.outlet, true)}
+                                      </td>
+                                      <td className="px-3.5 py-2.5">
+                                        {b.deliveredCount} / {b.ordersCount}
+                                      </td>
+                                      <td className="px-3.5 py-2.5 font-semibold">₱{b.gross.toFixed(2)}</td>
+                                      <td className="px-3.5 py-2.5 text-amber-600 font-semibold">₱{b.comm.toFixed(2)}</td>
+                                      <td className="px-3.5 py-2.5 text-emerald-600 font-bold">₱{b.net.toFixed(2)}</td>
+                                      <td className="px-3.5 py-2.5 text-[11px]">
+                                        <span className="text-emerald-600 font-bold">₱{b.paidOut.toFixed(0)}</span>
+                                        {' / '}
+                                        <span className="text-amber-600 font-bold">₱{b.pendingOut.toFixed(0)}</span>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Create Payout Generator */}
+                        <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 space-y-3">
+                          <span className="text-xs font-bold uppercase text-gray-700 dark:text-zinc-300 block">
+                            Generate Merchant Remittance Payout ({formatShopDisplayName(selectedMerchant, true)})
+                          </span>
+                          <div className="flex gap-2">
+                            <input
+                              type="number"
+                              value={payoutAmount}
+                              onChange={(e) => setPayoutAmount(Number(e.target.value))}
+                              placeholder="Amount in PHP"
+                              className="flex-1 px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                            />
+                            <button
+                              onClick={handleCreatePayout}
+                              disabled={creatingPayout || payoutAmount <= 0}
+                              className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-bold"
+                            >
+                              Create Payout
+                            </button>
+                          </div>
+
+                          {/* Payouts list */}
+                          <div className="space-y-1.5 pt-2">
+                            {displayPayouts.length === 0 ? (
+                              <div className="text-center text-xs text-gray-400 py-4">No payouts recorded yet.</div>
+                            ) : (
+                              displayPayouts.map((p) => (
+                                <div
+                                  key={p.id}
+                                  className="flex items-center justify-between p-2.5 rounded-xl bg-white dark:bg-zinc-850 text-xs border border-gray-100 dark:border-zinc-800"
+                                >
+                                  <div>
+                                    <span className="font-bold text-gray-900 dark:text-white">
+                                      ₱{Number(p.amount).toFixed(2)}
+                                    </span>
+                                    <span className="text-[11px] font-semibold text-gray-600 dark:text-zinc-300 ml-2">
+                                      {formatShopDisplayName(
+                                        {
+                                          name: p.merchantName || selectedMerchant.name,
+                                          branchName: p.branchName,
+                                          branchCode: p.branchCode
+                                        },
+                                        true
+                                      )}
+                                    </span>
+                                    <span className="text-gray-400 ml-2">
+                                      {formatTimestamp(p.createdAt)}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <span
+                                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                        p.status === 'Paid'
+                                          ? 'bg-emerald-100 text-emerald-800'
+                                          : 'bg-amber-100 text-amber-800'
+                                      }`}
+                                    >
+                                      {p.status}
+                                    </span>
+                                    {p.status === 'Pending' && (
+                                      <button
+                                        onClick={() => handleMarkPayoutPaid(p.id)}
+                                        className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold text-[11px]"
+                                      >
+                                        Mark as paid
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              ))
                             )}
                           </div>
                         </div>
-                      ))}
-                    </div>
-                  </div>
+                      </>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -5963,7 +7303,7 @@ export const Merchants: React.FC = () => {
       {/* Add / Edit Menu Item Modal */}
       {itemModalOpen && selectedMerchant && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
-          <div className="w-full max-w-xl max-h-[90vh] flex flex-col bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl shadow-2xl overflow-hidden">
+          <div className="w-full max-w-3xl max-h-[90vh] flex flex-col bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl shadow-2xl overflow-hidden">
             <div className="p-5 border-b border-gray-100 dark:border-zinc-800 flex items-center justify-between">
               <div>
                 <h3 className="font-bold text-base text-gray-900 dark:text-white">
@@ -6034,6 +7374,29 @@ export const Merchants: React.FC = () => {
                   </select>
                 </div>
               </div>
+
+              {/* Item Size (Optional) for Convenience Shops */}
+              {selectedMerchant.type === 'convenience' && (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400">
+                      Item size (optional)
+                    </label>
+                    <span className="text-[10px] text-gray-400">{itemSize.length}/20</span>
+                  </div>
+                  <input
+                    type="text"
+                    maxLength={20}
+                    value={itemSize}
+                    onChange={(e) => setItemSize(e.target.value.slice(0, 20))}
+                    placeholder="e.g. 500ml, 1L, Large, 250g, 1 pack"
+                    className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium"
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    Optional package, bottle, or container size (max 20 characters).
+                  </p>
+                </div>
+              )}
 
               {/* Category Class (Subcategory) */}
               <div>
@@ -6137,94 +7500,295 @@ export const Merchants: React.FC = () => {
                 />
               </div>
 
-              {/* Menus Multi-Select (menuIds) */}
-              <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="block text-xs font-semibold uppercase text-gray-700 dark:text-zinc-300">
-                    Menus ({itemMenuIds.length} selected)
-                  </label>
-                  {menus.length > 0 && (
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setItemMenuIds(menus.map((m) => m.id))}
-                        className="text-[10px] font-bold text-amber-600 hover:text-amber-700 dark:text-amber-400"
-                      >
-                        Select All
-                      </button>
-                      <span className="text-gray-300 dark:text-zinc-700">|</span>
-                      <button
-                        type="button"
-                        onClick={() => setItemMenuIds([])}
-                        className="text-[10px] font-bold text-gray-500 hover:text-gray-700 dark:text-zinc-400"
-                      >
-                        Clear
-                      </button>
+              {/* Menus Multi-Select and Availability Editor side by side */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 items-start">
+                {/* Menus Multi-Select (menuIds) */}
+                <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-2 flex flex-col justify-between">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-xs font-semibold uppercase text-gray-700 dark:text-zinc-300">
+                        Menus ({itemMenuIds.length} selected)
+                      </label>
+                      {menus.length > 0 && (
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setItemMenuIds(menus.map((m) => m.id))}
+                            className="text-[10px] font-bold text-amber-600 hover:text-amber-700 dark:text-amber-400"
+                          >
+                            Select All
+                          </button>
+                          <span className="text-gray-300 dark:text-zinc-700">|</span>
+                          <button
+                            type="button"
+                            onClick={() => setItemMenuIds([])}
+                            className="text-[10px] font-bold text-gray-500 hover:text-gray-700 dark:text-zinc-400"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  )}
+
+                    {menus.length === 0 ? (
+                      <div className="text-[11px] text-gray-400">
+                        No custom menus created yet. This item will be available all day during normal shop opening hours.
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                        {menus.map((menu) => {
+                          const isChecked = itemMenuIds.includes(menu.id);
+                          const timeStr =
+                            menu.schedule?.start && menu.schedule?.end
+                              ? `${menu.schedule.start} - ${menu.schedule.end}`
+                              : 'All day';
+
+                          return (
+                            <label
+                              key={menu.id}
+                              className={`flex items-center justify-between p-2 rounded-lg border text-xs cursor-pointer transition-colors ${
+                                isChecked
+                                  ? 'bg-amber-50/80 dark:bg-amber-950/30 border-amber-300 dark:border-amber-800'
+                                  : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-800 hover:bg-gray-50'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setItemMenuIds([...itemMenuIds, menu.id]);
+                                    } else {
+                                      setItemMenuIds(itemMenuIds.filter((id) => id !== menu.id));
+                                    }
+                                  }}
+                                  className="w-4 h-4 rounded-sm text-amber-500 focus:ring-amber-400"
+                                />
+                                <div>
+                                  <span className="font-bold text-gray-900 dark:text-white block">
+                                    {menu.name}
+                                  </span>
+                                  <span className="text-[10px] text-gray-400">
+                                    {timeStr} {!menu.active && '(Paused)'}
+                                  </span>
+                                </div>
+                              </div>
+                              <span
+                                className={`text-[10px] font-bold px-1.5 py-0.5 rounded-sm ${
+                                  menu.active
+                                    ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                    : 'bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400'
+                                }`}
+                              >
+                                {menu.active ? 'Active' : 'Inactive'}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-gray-400 pt-1">
+                    Select which menu schedule(s) this item belongs to. If no menus are selected, the item is part of the general all-day catalog.
+                  </p>
                 </div>
 
-                {menus.length === 0 ? (
-                  <div className="text-[11px] text-gray-400">
-                    No custom menus created yet. This item will be available all day during normal shop opening hours.
+                {/* Availability Editor (item.availability: days, start, end, dateFrom, dateTo) */}
+                <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-700 dark:text-zinc-300">
+                        Availability Schedule
+                      </label>
+                      <span className="text-[10px] text-gray-400">
+                        Specific days, hours & date range
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setItemHasAvailability(!itemHasAvailability)}
+                      className={`px-2.5 py-1 rounded-full text-xs font-bold transition-colors ${
+                        itemHasAvailability
+                          ? 'bg-amber-400 text-black shadow-2xs font-extrabold'
+                          : 'bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300 hover:bg-gray-300'
+                      }`}
+                    >
+                      {itemHasAvailability ? 'Custom Schedule' : 'Always Available'}
+                    </button>
                   </div>
-                ) : (
-                  <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-                    {menus.map((menu) => {
-                      const isChecked = itemMenuIds.includes(menu.id);
-                      const timeStr =
-                        menu.schedule?.start && menu.schedule?.end
-                          ? `${menu.schedule.start} - ${menu.schedule.end}`
-                          : 'All day';
 
-                      return (
-                        <label
-                          key={menu.id}
-                          className={`flex items-center justify-between p-2 rounded-lg border text-xs cursor-pointer transition-colors ${
-                            isChecked
-                              ? 'bg-amber-50/80 dark:bg-amber-950/30 border-amber-300 dark:border-amber-800'
-                              : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-800 hover:bg-gray-50'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={(e) => {
-                                if (e.target.checked) {
-                                  setItemMenuIds([...itemMenuIds, menu.id]);
-                                } else {
-                                  setItemMenuIds(itemMenuIds.filter((id) => id !== menu.id));
-                                }
-                              }}
-                              className="w-4 h-4 rounded-sm text-amber-500 focus:ring-amber-400"
-                            />
-                            <div>
-                              <span className="font-bold text-gray-900 dark:text-white block">
-                                {menu.name}
-                              </span>
-                              <span className="text-[10px] text-gray-400">
-                                {timeStr} {!menu.active && '(Paused)'}
-                              </span>
-                            </div>
-                          </div>
-                          <span
-                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded-sm ${
-                              menu.active
-                                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                                : 'bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400'
-                            }`}
-                          >
-                            {menu.active ? 'Active' : 'Inactive'}
-                          </span>
-                        </label>
-                      );
-                    })}
+                  {/* Summary Line */}
+                  <div className="p-2.5 rounded-lg bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-900/40 text-[11px] flex items-start gap-2">
+                    <Clock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                    <div className="space-y-0.5 min-w-0">
+                      <span className="text-[10px] uppercase font-extrabold tracking-wider text-amber-900 dark:text-amber-300 block">
+                        Availability Summary
+                      </span>
+                      <p className="font-bold text-gray-800 dark:text-zinc-200 leading-tight">
+                        {formatItemAvailabilitySummary(
+                          itemHasAvailability
+                            ? {
+                                days: itemAvailabilityDays,
+                                start: itemAvailabilityStart,
+                                end: itemAvailabilityEnd,
+                                dateFrom: itemAvailabilityDateFrom || null,
+                                dateTo: itemAvailabilityDateTo || null
+                              }
+                            : null
+                        )}
+                      </p>
+                    </div>
                   </div>
-                )}
-                <p className="text-[11px] text-gray-400">
-                  Select which menu schedule(s) this item belongs to. If no menus are selected, the item is part of the general all-day catalog.
-                </p>
+
+                  {itemHasAvailability ? (
+                    <div className="space-y-2.5 pt-1">
+                      {/* Days of Week */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] font-bold uppercase text-gray-600 dark:text-zinc-400">
+                            Active Days
+                          </span>
+                          <div className="flex items-center gap-1.5 text-[10px]">
+                            <button
+                              type="button"
+                              onClick={() => setItemAvailabilityDays([0, 1, 2, 3, 4, 5, 6])}
+                              className="font-bold text-amber-600 hover:underline"
+                            >
+                              All
+                            </button>
+                            <span className="text-gray-300">|</span>
+                            <button
+                              type="button"
+                              onClick={() => setItemAvailabilityDays([1, 2, 3, 4, 5])}
+                              className="font-bold text-amber-600 hover:underline"
+                            >
+                              Weekdays
+                            </button>
+                            <span className="text-gray-300">|</span>
+                            <button
+                              type="button"
+                              onClick={() => setItemAvailabilityDays([6, 0])}
+                              className="font-bold text-amber-600 hover:underline"
+                            >
+                              Weekends
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-1.5 w-full">
+                          {DAYS_OF_WEEK.map((day) => {
+                            const isSelected = itemAvailabilityDays.some(
+                              (d) => d === day.id || d === day.key || String(d).toLowerCase() === day.key
+                            );
+                            return (
+                              <button
+                                type="button"
+                                key={day.id}
+                                onClick={() => {
+                                  if (isSelected) {
+                                    if (itemAvailabilityDays.length > 1) {
+                                      setItemAvailabilityDays(
+                                        itemAvailabilityDays.filter(
+                                          (d) => d !== day.id && d !== day.key && String(d).toLowerCase() !== day.key
+                                        )
+                                      );
+                                    } else {
+                                      showError('Item must be available on at least one day.');
+                                    }
+                                  } else {
+                                    setItemAvailabilityDays([...itemAvailabilityDays, day.id]);
+                                  }
+                                }}
+                                className={`flex-1 min-w-[40px] py-1.5 px-1.5 text-center text-xs font-bold rounded-lg transition-all border whitespace-nowrap flex items-center justify-center leading-none select-none cursor-pointer ${
+                                  isSelected
+                                    ? 'bg-amber-400 text-black border-amber-500 shadow-2xs font-black ring-1 ring-amber-400'
+                                    : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 border-gray-200 dark:border-zinc-700 hover:bg-gray-50'
+                                }`}
+                                title={`${day.full} (${isSelected ? 'Active' : 'Inactive'})`}
+                              >
+                                <span>{day.short}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Daily Hours */}
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] font-bold uppercase text-gray-600 dark:text-zinc-400 mb-0.5">
+                            Start Time (24h)
+                          </label>
+                          <input
+                            type="time"
+                            value={itemAvailabilityStart}
+                            onChange={(e) => setItemAvailabilityStart(e.target.value)}
+                            required={itemHasAvailability}
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-mono text-xs font-bold"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold uppercase text-gray-600 dark:text-zinc-400 mb-0.5">
+                            End Time (24h)
+                          </label>
+                          <input
+                            type="time"
+                            value={itemAvailabilityEnd}
+                            onChange={(e) => setItemAvailabilityEnd(e.target.value)}
+                            required={itemHasAvailability}
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-mono text-xs font-bold"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Optional Date Range (dateFrom, dateTo) */}
+                      <div>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <label className="block text-[10px] font-bold uppercase text-gray-600 dark:text-zinc-400">
+                            Date Window (Optional)
+                          </label>
+                          {(itemAvailabilityDateFrom || itemAvailabilityDateTo) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setItemAvailabilityDateFrom('');
+                                setItemAvailabilityDateTo('');
+                              }}
+                              className="text-[10px] font-bold text-red-500 hover:underline"
+                            >
+                              Clear Dates
+                            </button>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <input
+                              type="date"
+                              value={itemAvailabilityDateFrom}
+                              onChange={(e) => setItemAvailabilityDateFrom(e.target.value)}
+                              placeholder="From YYYY-MM-DD"
+                              className="w-full px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white text-xs font-medium"
+                            />
+                          </div>
+                          <div>
+                            <input
+                              type="date"
+                              value={itemAvailabilityDateTo}
+                              onChange={(e) => setItemAvailabilityDateTo(e.target.value)}
+                              placeholder="To YYYY-MM-DD"
+                              className="w-full px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white text-xs font-medium"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-gray-400 italic">
+                      Item is available whenever the shop is open, or during its assigned menu schedule hours.
+                    </p>
+                  )}
+                </div>
               </div>
 
               <div className="flex items-center gap-2 pt-1">
@@ -7453,7 +9017,7 @@ export const Merchants: React.FC = () => {
                           <span className="text-gray-300">|</span>
                           <button
                             type="button"
-                            onClick={() => setMenuFormDays([0, 6])}
+                            onClick={() => setMenuFormDays([6, 0])}
                             className="font-bold text-amber-600 hover:underline"
                           >
                             Weekends
@@ -7461,9 +9025,11 @@ export const Merchants: React.FC = () => {
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-7 gap-1">
+                      <div className="flex flex-wrap gap-1.5 w-full">
                         {DAYS_OF_WEEK.map((day) => {
-                          const isSelected = menuFormDays.includes(day.id);
+                          const isSelected = menuFormDays.some(
+                            (d) => d === day.id || d === day.key || String(d).toLowerCase() === day.key
+                          );
                           return (
                             <button
                               type="button"
@@ -7471,7 +9037,11 @@ export const Merchants: React.FC = () => {
                               onClick={() => {
                                 if (isSelected) {
                                   if (menuFormDays.length > 1) {
-                                    setMenuFormDays(menuFormDays.filter((d) => d !== day.id));
+                                    setMenuFormDays(
+                                      menuFormDays.filter(
+                                        (d) => d !== day.id && d !== day.key && String(d).toLowerCase() !== day.key
+                                      )
+                                    );
                                   } else {
                                     showError('Menu must be active for at least one day.');
                                   }
@@ -7479,13 +9049,14 @@ export const Merchants: React.FC = () => {
                                   setMenuFormDays([...menuFormDays, day.id]);
                                 }
                               }}
-                              className={`py-2 rounded-xl text-center text-xs font-bold transition-all border ${
+                              className={`flex-1 min-w-[44px] py-2 px-2 text-center text-xs font-bold rounded-xl transition-all border whitespace-nowrap flex items-center justify-center leading-none select-none cursor-pointer ${
                                 isSelected
-                                  ? 'bg-amber-400 text-black border-amber-500 shadow-2xs font-black'
-                                  : 'bg-white dark:bg-zinc-800 text-gray-500 dark:text-zinc-400 border-gray-200 dark:border-zinc-700 hover:bg-gray-50'
+                                  ? 'bg-amber-400 text-black border-amber-500 shadow-2xs font-black ring-1 ring-amber-400'
+                                  : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 border-gray-200 dark:border-zinc-700 hover:bg-gray-50'
                               }`}
+                              title={`${day.full} (${isSelected ? 'Active' : 'Inactive'})`}
                             >
-                              {day.short}
+                              <span>{day.short}</span>
                             </button>
                           );
                         })}
@@ -7824,6 +9395,80 @@ export const Merchants: React.FC = () => {
           description="Filter merchants by registration date or export all registered stores."
           totalRecords={filteredMerchants.length}
           onExport={handleExportMerchantsWithDateFilter}
+        />
+      )}
+
+      {/* Add Outlet Modal */}
+      {selectedMerchant && currentMainShop && (
+        <AddOutletModal
+          isOpen={addOutletModalOpen}
+          onClose={() => setAddOutletModalOpen(false)}
+          mainShop={currentMainShop}
+          chainOutlets={currentChainOutlets}
+          cities={cities}
+          defaultWeeklyHours={DEFAULT_WEEKLY_HOURS}
+          adminProfile={adminProfile}
+          onSuccess={(createdOutlet, updatedMain) => {
+            setMerchants((prev) => {
+              const next = prev.map((m) => (updatedMain && m.id === updatedMain.id ? updatedMain : m));
+              next.push(createdOutlet);
+              next.sort((a, b) => a.name.localeCompare(b.name));
+              return next;
+            });
+            if (updatedMain && selectedMerchant.id === updatedMain.id) {
+              setSelectedMerchant(updatedMain);
+            } else {
+              fetchOutletsAndOwnerData(selectedMerchant, [
+                ...merchants.map((m) => (updatedMain && m.id === updatedMain.id ? updatedMain : m)),
+                createdOutlet
+              ]);
+            }
+          }}
+        />
+      )}
+
+      {/* Edit Outlet Modal */}
+      {selectedMerchant && (
+        <EditOutletModal
+          isOpen={Boolean(editOutletTarget)}
+          outlet={editOutletTarget}
+          chainId={selectedMerchant.chainId || selectedMerchant.id}
+          adminProfile={adminProfile}
+          onClose={() => setEditOutletTarget(null)}
+          onSuccess={(updatedOutlet) => {
+            setMerchants((prev) => prev.map((m) => (m.id === updatedOutlet.id ? updatedOutlet : m)));
+            if (selectedMerchant?.id === updatedOutlet.id) {
+              setSelectedMerchant(updatedOutlet);
+            }
+          }}
+        />
+      )}
+
+      {/* Delete Zero-Order Outlet Confirmation Modal */}
+      {outletToDelete && (
+        <ConfirmationModal
+          isOpen={Boolean(outletToDelete)}
+          onClose={() => setOutletToDelete(null)}
+          onConfirm={handleDeleteOutlet}
+          title={`Delete Outlet "${formatShopDisplayName(outletToDelete, true)}"?`}
+          message="This outlet has 0 orders and will be permanently deleted from Firestore. This action cannot be undone."
+          confirmLabel={deletingOutlet ? 'Deleting...' : 'Delete Outlet Permanently'}
+          reasonRequired={false}
+          isDestructive={true}
+        />
+      )}
+
+      {/* Reset Outlets PIN Confirmation Modal */}
+      {confirmResetPinOpen && selectedMerchant && (
+        <ConfirmationModal
+          isOpen={confirmResetPinOpen}
+          onClose={() => setConfirmResetPinOpen(false)}
+          onConfirm={handleResetOutletsPin}
+          title="Reset Outlets PIN?"
+          message={`Are you sure you want to clear the Outlets PIN (outletsPinHash and outletsPinSalt) for owner ${selectedMerchant.ownerName || selectedMerchant.ownerUid || selectedMerchant.id}? This will be logged in auditLogs.`}
+          confirmLabel={resettingPin ? 'Resetting...' : 'Reset Outlets PIN'}
+          reasonRequired={false}
+          isDestructive={true}
         />
       )}
     </div>
