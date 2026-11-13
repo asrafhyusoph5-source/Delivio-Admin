@@ -312,7 +312,6 @@ export interface Merchant {
   lat: number;
   lng: number;
   logoUrl?: string;
-  bannerUrl?: string;
   description?: string;
   commissionRate: number; // e.g. 15 for 15%
   rating?: number;
@@ -344,6 +343,22 @@ export interface MerchantSpecialRadius {
   radiusKm: number;
   customerExtraFee: number; // ₱
   riderExtraFee: number; // ₱
+  updatedAt?: any;
+  updatedBy?: string;
+}
+
+export interface MainCategoryItem {
+  id: string;
+  name: string;
+  imageUrl: string;
+  sortOrder: number;
+  active: boolean;
+  aliases: string[];
+}
+
+export interface MainCategoriesDoc {
+  food: MainCategoryItem[];
+  convenience: MainCategoryItem[];
   updatedAt?: any;
   updatedBy?: string;
 }

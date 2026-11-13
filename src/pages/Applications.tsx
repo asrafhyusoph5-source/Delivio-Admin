@@ -250,7 +250,6 @@ export const Applications: React.FC = () => {
         lat: Number(app.lat) || 0,
         lng: Number(app.lng) || 0,
         logoUrl: app.logoUrl || '',
-        bannerUrl: app.storePhotoUrl || '',
         commissionRate: 15,
         cuisineTags: [],
         createdAt: now

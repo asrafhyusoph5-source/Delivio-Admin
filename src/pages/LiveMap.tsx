@@ -224,7 +224,6 @@ export const LiveMap: React.FC = () => {
             lat: Number(dt.lat) || 0,
             lng: Number(dt.lng) || 0,
             logoUrl: dt.logoUrl,
-            bannerUrl: dt.bannerUrl,
             commissionRate: dt.commissionRate ?? 15,
             rating: dt.rating || 5
           });

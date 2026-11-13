@@ -8,7 +8,8 @@ import {
   collection,
   writeBatch,
   Timestamp,
-  deleteDoc
+  deleteDoc,
+  deleteField
 } from '../firebase';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
@@ -102,6 +103,11 @@ export const Settings: React.FC = () => {
   // Expired chats cleanup state
   const [cleanupChatsModalOpen, setCleanupChatsModalOpen] = useState(false);
   const [cleaningUpChats, setCleaningUpChats] = useState(false);
+
+  // One-time store banner removal state
+  const [removeBannersModalOpen, setRemoveBannersModalOpen] = useState(false);
+  const [removingBanners, setRemovingBanners] = useState(false);
+  const [removeBannersResult, setRemoveBannersResult] = useState<string | null>(null);
 
   // Platform Service Switches
   const [platformServices, setPlatformServices] = useState<Record<OrderServiceType, boolean>>({
@@ -608,6 +614,64 @@ export const Settings: React.FC = () => {
     }
   };
 
+  // One-time Maintenance: Remove old store banner fields (bannerUrl, bannerImageUrl, banner) from all merchants docs
+  const handleRemoveOldStoreBanners = async () => {
+    try {
+      setRemovingBanners(true);
+      const bannerFieldNames = ['bannerUrl', 'bannerImageUrl', 'banner'] as const;
+      const merchSnap = await getDocs(collection(db, 'merchants'));
+
+      const docsToUpdate: { id: string; fields: string[] }[] = [];
+      merchSnap.forEach((d) => {
+        const dt = d.data() || {};
+        const present = bannerFieldNames.filter((key) =>
+          Object.prototype.hasOwnProperty.call(dt, key)
+        );
+        if (present.length > 0) {
+          docsToUpdate.push({ id: d.id, fields: present });
+        }
+      });
+
+      if (docsToUpdate.length > 0) {
+        const CHUNK_SIZE = 400;
+        const now = Timestamp.now();
+        for (let i = 0; i < docsToUpdate.length; i += CHUNK_SIZE) {
+          const slice = docsToUpdate.slice(i, i + CHUNK_SIZE);
+          const batch = writeBatch(db);
+          slice.forEach((item) => {
+            const payload: Record<string, any> = { updatedAt: now };
+            item.fields.forEach((f) => {
+              payload[f] = deleteField();
+            });
+            batch.update(doc(db, 'merchants', item.id), payload);
+          });
+          await batch.commit();
+        }
+      }
+
+      const count = docsToUpdate.length;
+      const summaryMsg = `Removed from ${count} ${count === 1 ? 'shop' : 'shops'}`;
+      setRemoveBannersResult(summaryMsg);
+      setRemoveBannersModalOpen(false);
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'REMOVE_OLD_STORE_BANNERS',
+        entityType: 'merchant',
+        entityId: 'all',
+        details: `${summaryMsg} (deleted banner fields: ${bannerFieldNames.join(', ')})`
+      });
+
+      showSuccess(summaryMsg);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setRemovingBanners(false);
+    }
+  };
+
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -1056,7 +1120,7 @@ export const Settings: React.FC = () => {
           { id: 'taxes' as const, label: 'Taxes & Fees', icon: Percent },
           { id: 'services' as const, label: 'Service Switches', icon: Layers },
           { id: 'staff' as const, label: 'Staff & Roles', icon: Users },
-          { id: 'tools' as const, label: 'Database & Tools', icon: Database },
+          { id: 'tools' as const, label: 'Maintenance', icon: Database },
         ].map((tab) => {
           const Icon = tab.icon;
           const isActive = settingsTab === tab.id;
@@ -2572,9 +2636,45 @@ export const Settings: React.FC = () => {
       </div>
       )}
 
-      {/* DATABASE & TOOLS TAB */}
+      {/* MAINTENANCE & TOOLS TAB */}
       {settingsTab === 'tools' && (
       <>
+      {/* One-Time Banner Fields Cleanup Card */}
+      <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="p-2.5 rounded-2xl bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 shrink-0">
+              <Trash2 className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                Remove old store banners
+              </h3>
+              <p className="text-xs text-gray-600 dark:text-zinc-400 mt-0.5 max-w-2xl">
+                One-time cleanup that deletes deprecated banner fields (<code className="font-mono text-amber-700 dark:text-amber-300">bannerUrl</code>, <code className="font-mono text-amber-700 dark:text-amber-300">bannerImageUrl</code>, <code className="font-mono text-amber-700 dark:text-amber-300">banner</code>) from every document in <code className="font-mono text-amber-700 dark:text-amber-300">merchants</code> and records an audit entry.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setRemoveBannersModalOpen(true)}
+            disabled={removingBanners}
+            className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-xs shrink-0 disabled:opacity-50 whitespace-nowrap"
+          >
+            {removingBanners ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+            <span>Remove old store banners</span>
+          </button>
+        </div>
+
+        {removeBannersResult && (
+          <div className="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900 text-xs font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>{removeBannersResult}</span>
+          </div>
+        )}
+      </div>
+
       {/* Migration to Drivers & Taxi Panel */}
       <div className="bg-gradient-to-r from-amber-500/10 via-amber-400/5 to-transparent dark:from-amber-950/20 dark:via-zinc-900 border border-amber-200 dark:border-amber-900/40 rounded-3xl p-6 shadow-xs space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -2912,6 +3012,20 @@ export const Settings: React.FC = () => {
           title="Delete all expired chats now?"
           message="This will search platform-wide for up to 300 expired order chat threads and messages (older than 10 days) and permanently delete them from Firestore. This action cannot be undone."
           confirmLabel={cleaningUpChats ? "Cleaning up..." : "Delete All Expired Chats Now"}
+          reasonRequired={false}
+          isDestructive={true}
+        />
+      )}
+
+      {/* Confirmation Modal for Removing Old Store Banners */}
+      {removeBannersModalOpen && (
+        <ConfirmationModal
+          isOpen={removeBannersModalOpen}
+          onClose={() => setRemoveBannersModalOpen(false)}
+          onConfirm={handleRemoveOldStoreBanners}
+          title="Remove old store banners from all shops?"
+          message="This will scan every document in the merchants collection and permanently delete bannerUrl, bannerImageUrl, and banner fields. This action cannot be undone and will be logged in auditLogs."
+          confirmLabel={removingBanners ? "Removing..." : "Remove Old Store Banners"}
           reasonRequired={false}
           isDestructive={true}
         />

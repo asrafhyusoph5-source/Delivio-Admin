@@ -311,7 +311,6 @@ export const AddOutletModal: React.FC<AddOutletModalProps> = ({
         walletBalance: 0,
         closedUntil: null,
         logoUrl: mainShop.logoUrl || '',
-        bannerUrl: mainShop.bannerUrl || '',
         description: mainShop.description || '',
         hours: copyHours ? (mainShop.hours || defaultWeeklyHours) : customHours,
         autoSchedule: copyHours ? Boolean(mainShop.autoSchedule) : customAutoSchedule,

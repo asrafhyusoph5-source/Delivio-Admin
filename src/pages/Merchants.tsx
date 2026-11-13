@@ -46,9 +46,17 @@ import type {
   MerchantBestSellers,
   BestSellerItem,
   MerchantMenu,
-  MerchantMenuSchedule
+  MerchantMenuSchedule,
+  MainCategoriesDoc,
+  MainCategoryItem
 } from '../types';
 import { FOOD_CATEGORIES, CONVENIENCE_CATEGORIES } from '../constants';
+import {
+  getDefaultMainCategoriesDoc,
+  loadOrInitMainCategories,
+  categoryMatchesTag,
+  resolveMerchantActiveCategories
+} from '../utils/mainCategories';
 import { formatOrderNumber } from '../utils/orderNumber';
 import {
   Search,
@@ -104,6 +112,7 @@ import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
 import { PromoCodesTab } from '../components/promos/PromoCodesTab';
 import { AddOutletModal, EditOutletModal } from '../components/merchants/OutletModals';
+import { CustomerVisibilityCheckPanel } from '../components/merchants/CustomerVisibilityCheckPanel';
 import { formatShopDisplayName, getChainOptions, type ChainOption } from '../utils/outletUtils';
 
 export const DEFAULT_WEEKLY_HOURS: MerchantWeeklyHours = {
@@ -706,6 +715,18 @@ export const Merchants: React.FC = () => {
     return globalOn && cityOn;
   };
 
+  const getMerchantSetupWarnings = (shop: Merchant): string[] => {
+    const warnings: string[] = [];
+    if (!shop.lat || !shop.lng || !Number.isFinite(shop.lat) || !Number.isFinite(shop.lng)) {
+      warnings.push('Missing latitude/longitude');
+    }
+    const cityExists = Boolean(shop.cityId && cities.some((c) => c.id === shop.cityId));
+    if (!cityExists) {
+      warnings.push(shop.cityId ? `City "${shop.cityId}" does not exist` : 'No city assigned');
+    }
+    return warnings;
+  };
+
   // Filters
   const [searchQuery, setSearchQuery] = useState(initialSearch);
   const [typeFilter, setTypeFilter] = useState<'all' | 'food' | 'convenience'>('all');
@@ -811,8 +832,11 @@ export const Merchants: React.FC = () => {
   const [email, setEmail] = useState('');
   const [description, setDescription] = useState('');
   const [logoUrl, setLogoUrl] = useState('');
-  const [bannerUrl, setBannerUrl] = useState('');
   const [commissionRate, setCommissionRate] = useState<number>(15);
+  const [mainCategories, setMainCategories] = useState<MainCategoriesDoc>(() =>
+    getDefaultMainCategoriesDoc()
+  );
+  const [selectedCuisineTags, setSelectedCuisineTags] = useState<string[]>([]);
   const [savingDetails, setSavingDetails] = useState(false);
 
   // Menu Categories & Items
@@ -949,7 +973,6 @@ export const Merchants: React.FC = () => {
           lat: Number(dt.lat) || 0,
           lng: Number(dt.lng) || 0,
           logoUrl: dt.logoUrl,
-          bannerUrl: dt.bannerUrl,
           description: dt.description || '',
           commissionRate: dt.commissionRate ?? 15,
           walletBalance: Number(dt.walletBalance || 0),
@@ -1021,6 +1044,9 @@ export const Merchants: React.FC = () => {
       }
     };
     fetchPlatformSettings();
+    loadOrInitMainCategories(adminProfile?.name || 'Admin', false)
+      .then(({ data }) => setMainCategories(data))
+      .catch((err) => console.warn('Could not load mainCategories:', err));
   }, []);
 
   // Sync selected merchant fields when selected
@@ -1032,7 +1058,6 @@ export const Merchants: React.FC = () => {
     setEmail(selectedMerchant.email || '');
     setDescription(selectedMerchant.description || '');
     setLogoUrl(selectedMerchant.logoUrl || '');
-    setBannerUrl(selectedMerchant.bannerUrl || '');
     setCommissionRate(selectedMerchant.commissionRate ?? 15);
     setLocLat(selectedMerchant.lat || 9.7392);
     setLocLng(selectedMerchant.lng || 118.7353);
@@ -1067,6 +1092,23 @@ export const Merchants: React.FC = () => {
     // Fetch Outlets / Owner PIN / Chain stats
     fetchOutletsAndOwnerData(selectedMerchant);
   }, [selectedMerchant?.id, selectedMerchant?.chainId]);
+
+  // Keep selectedCuisineTags synced with selectedMerchant & loaded mainCategories
+  useEffect(() => {
+    if (!selectedMerchant) {
+      setSelectedCuisineTags([]);
+      return;
+    }
+    const groupCats =
+      selectedMerchant.type === 'convenience'
+        ? mainCategories.convenience
+        : mainCategories.food;
+    const resolved = resolveMerchantActiveCategories(
+      selectedMerchant.cuisineTags,
+      groupCats
+    );
+    setSelectedCuisineTags(resolved.matchedNames);
+  }, [selectedMerchant?.id, selectedMerchant?.type, selectedMerchant?.cuisineTags, mainCategories]);
 
   const fetchOutletsAndOwnerData = async (shop: Merchant, allShopsList?: Merchant[]) => {
     const sourceMerchants = allShopsList || merchants;
@@ -2307,6 +2349,17 @@ export const Merchants: React.FC = () => {
     try {
       setSavingDetails(true);
       const mRef = doc(db, 'merchants', selectedMerchant.id);
+      const groupCats =
+        selectedMerchant.type === 'convenience'
+          ? mainCategories.convenience
+          : mainCategories.food;
+      const activeTagNames = new Set(
+        groupCats.filter((c) => c.active !== false).map((c) => c.name)
+      );
+      const cleanedCuisineTags = Array.from(
+        new Set(selectedCuisineTags.filter((tag) => activeTagNames.has(tag)))
+      );
+
       const updates: Record<string, any> = {
         name: shopName.trim(),
         ownerName: ownerName.trim(),
@@ -2314,7 +2367,7 @@ export const Merchants: React.FC = () => {
         email: email.trim(),
         description: description.trim(),
         logoUrl: logoUrl.trim(),
-        bannerUrl: bannerUrl.trim(),
+        cuisineTags: cleanedCuisineTags,
         commissionRate: Number(commissionRate) || 15,
         updatedAt: Timestamp.now()
       };
@@ -2335,6 +2388,17 @@ export const Merchants: React.FC = () => {
             editedByName: adminProfile?.name || 'Administrator'
           });
         }
+      }
+      if (JSON.stringify(old.cuisineTags || []) !== JSON.stringify(cleanedCuisineTags)) {
+        await logEditHistory({
+          entityType: 'merchant',
+          entityId: selectedMerchant.id,
+          field: 'cuisineTags',
+          oldValue: (old.cuisineTags || []).join(', '),
+          newValue: cleanedCuisineTags.join(', '),
+          editedBy: adminProfile?.uid || 'admin',
+          editedByName: adminProfile?.name || 'Administrator'
+        });
       }
 
       await logAuditEvent({
@@ -2669,13 +2733,24 @@ export const Merchants: React.FC = () => {
     }
   };
 
-  // Recompute merchants/{id}.cuisineTags: distinct categoryName values of available items
+  // Recompute merchants/{id}.cuisineTags only if the shop does not already have explicit cuisineTags
   const recomputeMerchantCuisineTags = async (merchantId: string, currentItems: MenuItem[]) => {
     try {
+      const targetShop =
+        selectedMerchant?.id === merchantId
+          ? selectedMerchant
+          : merchants.find((m) => m.id === merchantId);
+      const existingTags = Array.isArray(targetShop?.cuisineTags) ? targetShop!.cuisineTags : [];
+      if (existingTags.length > 0) {
+        return existingTags;
+      }
+
       const availableItems = currentItems.filter((i) => i.available !== false);
       const tags = Array.from(
         new Set(availableItems.map((i) => i.categoryId).filter(Boolean))
       ) as string[];
+
+      if (tags.length === 0) return existingTags;
 
       const mRef = doc(db, 'merchants', merchantId);
       await updateDoc(mRef, {
@@ -3682,10 +3757,12 @@ export const Merchants: React.FC = () => {
   }, [merchantOrders, selectedMerchant]);
 
   const availableCategoriesForFilter = useMemo(() => {
-    if (typeFilter === 'food') return FOOD_CATEGORIES;
-    if (typeFilter === 'convenience') return CONVENIENCE_CATEGORIES;
-    return Array.from(new Set([...FOOD_CATEGORIES, ...CONVENIENCE_CATEGORIES]));
-  }, [typeFilter]);
+    const foodNames = mainCategories.food.filter((c) => c.active !== false).map((c) => c.name);
+    const convNames = mainCategories.convenience.filter((c) => c.active !== false).map((c) => c.name);
+    if (typeFilter === 'food') return foodNames;
+    if (typeFilter === 'convenience') return convNames;
+    return Array.from(new Set([...foodNames, ...convNames]));
+  }, [typeFilter, mainCategories]);
 
   // Filter list
   const chainOptions: ChainOption[] = useMemo(() => getChainOptions(merchants), [merchants]);
@@ -3714,11 +3791,28 @@ export const Merchants: React.FC = () => {
   }, [selectedMerchant, currentChainOutlets]);
 
   const filteredMerchants = useMemo(() => {
+    const allCategoryObjects: MainCategoryItem[] = [
+      ...mainCategories.food,
+      ...mainCategories.convenience
+    ];
+
     return merchants.filter((m) => {
       if (selectedCityId !== 'all' && m.cityId && m.cityId !== selectedCityId) return false;
       if (typeFilter !== 'all' && m.type !== typeFilter) return false;
       if (categoryFilter !== 'all') {
-        if (!m.cuisineTags || !m.cuisineTags.includes(categoryFilter)) return false;
+        const catObj = allCategoryObjects.find(
+          (c) =>
+            c.name === categoryFilter &&
+            (typeFilter === 'all' ||
+              (m.type === 'convenience'
+                ? mainCategories.convenience.some((mc) => mc.id === c.id && mc.name === c.name)
+                : mainCategories.food.some((mf) => mf.id === c.id && mf.name === c.name)))
+        );
+        const tags = Array.isArray(m.cuisineTags) ? m.cuisineTags : [];
+        const matched = catObj
+          ? tags.some((t) => categoryMatchesTag(catObj, t))
+          : tags.includes(categoryFilter);
+        if (!matched) return false;
       }
       if (statusFilter !== 'all' && m.status !== statusFilter) return false;
       if (chainFilter === 'chains_only' && !m.chainId) return false;
@@ -3743,7 +3837,7 @@ export const Merchants: React.FC = () => {
       }
       return true;
     });
-  }, [merchants, selectedCityId, typeFilter, categoryFilter, statusFilter, chainFilter, openFilter, searchQuery, platformTimezone, platformServices, cities]);
+  }, [merchants, selectedCityId, typeFilter, categoryFilter, statusFilter, chainFilter, openFilter, searchQuery, platformTimezone, platformServices, cities, mainCategories]);
 
   // Group filteredMerchants into expandable chain rows and standalone single shop rows
   const groupedDisplayRows = useMemo(() => {
@@ -4098,6 +4192,21 @@ export const Merchants: React.FC = () => {
                                     <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-400 text-black">
                                       Chain
                                     </span>
+                                    {(() => {
+                                      const outletsWithWarnings = row.outlets.filter(
+                                        (o) => getMerchantSetupWarnings(o).length > 0
+                                      );
+                                      if (outletsWithWarnings.length === 0) return null;
+                                      return (
+                                        <span
+                                          title={`${outletsWithWarnings.length} outlet(s) missing coordinates or valid city`}
+                                          className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 dark:text-amber-400"
+                                        >
+                                          <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
+                                          <span>{outletsWithWarnings.length} setup warning</span>
+                                        </span>
+                                      );
+                                    })()}
                                   </div>
                                   <div className="text-[10px] text-gray-500 dark:text-zinc-400">
                                     Click to {isExpanded ? 'collapse' : 'expand'} outlets
@@ -4170,6 +4279,19 @@ export const Merchants: React.FC = () => {
                                     <div>
                                       <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5 flex-wrap">
                                         <span>{formatShopDisplayName(m, false)}</span>
+                                        {(() => {
+                                          const warnings = getMerchantSetupWarnings(m);
+                                          if (warnings.length === 0) return null;
+                                          return (
+                                            <span
+                                              title={warnings.join(' • ')}
+                                              className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 dark:text-amber-400"
+                                            >
+                                              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                                              <span className="sr-only">{warnings.join(' • ')}</span>
+                                            </span>
+                                          );
+                                        })()}
                                         {m.branchCode && (
                                           <span className="px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 font-mono text-[10px] font-bold">
                                             {m.branchCode}
@@ -4316,7 +4438,22 @@ export const Merchants: React.FC = () => {
                               )}
                             </div>
                             <div>
-                              <div className="font-bold text-gray-900 dark:text-white">{formatShopDisplayName(m, true)}</div>
+                              <div className="font-bold text-gray-900 dark:text-white flex items-center gap-1.5 flex-wrap">
+                                <span>{formatShopDisplayName(m, true)}</span>
+                                {(() => {
+                                  const warnings = getMerchantSetupWarnings(m);
+                                  if (warnings.length === 0) return null;
+                                  return (
+                                    <span
+                                      title={warnings.join(' • ')}
+                                      className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 dark:text-amber-400"
+                                    >
+                                      <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                                      <span className="sr-only">{warnings.join(' • ')}</span>
+                                    </span>
+                                  );
+                                })()}
+                              </div>
                               <div className="text-[10px] text-gray-400 truncate max-w-[180px]">
                                 {m.address || 'No address set'}
                               </div>
@@ -4584,6 +4721,15 @@ export const Merchants: React.FC = () => {
               {/* TAB 1: DETAILS */}
               {activeTab === 'details' && (
                 <div className="space-y-5">
+                  {/* Customer Visibility Diagnostic */}
+                  <CustomerVisibilityCheckPanel
+                    merchant={selectedMerchant}
+                    cities={cities}
+                    platformServices={platformServices}
+                    platformTimezone={platformTimezone}
+                    globalDispatchRadiusKm={globalDispatchRadiusKm}
+                  />
+
                   {/* Best Sellers Card */}
                   <div className="p-4 rounded-2xl border border-amber-300 dark:border-amber-900/60 bg-gradient-to-r from-amber-50 to-amber-100/30 dark:from-amber-950/20 dark:to-zinc-900 shadow-xs space-y-3">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -4736,31 +4882,101 @@ export const Merchants: React.FC = () => {
                     />
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                        Logo Image URL
-                      </label>
-                      <input
-                        type="url"
-                        value={logoUrl}
-                        onChange={(e) => setLogoUrl(e.target.value)}
-                        placeholder="https://..."
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white"
-                      />
+                  <div>
+                    <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                      Logo Image URL
+                    </label>
+                    <input
+                      type="url"
+                      value={logoUrl}
+                      onChange={(e) => setLogoUrl(e.target.value)}
+                      placeholder="https://..."
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white"
+                    />
+                  </div>
+
+                  {/* Shop Categories (cuisineTags) Multi-Select */}
+                  <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-gray-50/70 dark:bg-zinc-900/70 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <label className="block text-xs font-extrabold uppercase text-gray-700 dark:text-zinc-300">
+                          Shop categories
+                        </label>
+                        <p className="text-[11px] text-gray-500 dark:text-zinc-400">
+                          Active {selectedMerchant.type === 'convenience' ? 'Convenience' : 'Food'} categories shown on the customer home screen.
+                        </p>
+                      </div>
+                      {(() => {
+                        const groupCats =
+                          selectedMerchant.type === 'convenience'
+                            ? mainCategories.convenience
+                            : mainCategories.food;
+                        const activeCats = groupCats.filter((c) => c.active !== false);
+                        const hasMatchingActive = selectedCuisineTags.some((tag) =>
+                          activeCats.some((c) => categoryMatchesTag(c, tag))
+                        );
+                        if (hasMatchingActive) return null;
+                        return (
+                          <span className="px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                            Others
+                          </span>
+                        );
+                      })()}
                     </div>
-                    <div>
-                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                        Store Banner Image URL
-                      </label>
-                      <input
-                        type="url"
-                        value={bannerUrl}
-                        onChange={(e) => setBannerUrl(e.target.value)}
-                        placeholder="https://..."
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white"
-                      />
+
+                    <div className="flex flex-wrap gap-2">
+                      {(selectedMerchant.type === 'convenience'
+                        ? mainCategories.convenience
+                        : mainCategories.food
+                      )
+                        .filter((c) => c.active !== false)
+                        .map((cat) => {
+                          const isSelected = selectedCuisineTags.includes(cat.name);
+                          return (
+                            <button
+                              key={cat.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedCuisineTags((prev) =>
+                                  prev.includes(cat.name)
+                                    ? prev.filter((name) => name !== cat.name)
+                                    : [...prev, cat.name]
+                                );
+                              }}
+                              className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-2 transition-colors ${
+                                isSelected
+                                  ? 'border-amber-500 bg-amber-100 text-amber-950 dark:bg-amber-950/60 dark:text-amber-200 dark:border-amber-700'
+                                  : 'border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-700 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-700'
+                              }`}
+                            >
+                              <span
+                                className={`w-4 h-4 rounded flex items-center justify-center border ${
+                                  isSelected
+                                    ? 'bg-amber-500 border-amber-500 text-white'
+                                    : 'border-gray-300 dark:border-zinc-600'
+                                }`}
+                              >
+                                {isSelected && <Check className="w-3 h-3" />}
+                              </span>
+                              {cat.imageUrl && (
+                                <img
+                                  src={cat.imageUrl}
+                                  alt={cat.name}
+                                  referrerPolicy="no-referrer"
+                                  className="w-4 h-4 rounded object-contain shrink-0"
+                                />
+                              )}
+                              <span>{cat.name}</span>
+                            </button>
+                          );
+                        })}
                     </div>
+
+                    {selectedCuisineTags.length === 0 && (
+                      <p className="text-[11px] text-amber-700 dark:text-amber-400 font-medium">
+                        No matching active category selected — this shop will appear under <strong>Others</strong>.
+                      </p>
+                    )}
                   </div>
 
                   <div className="flex justify-end pt-2">
