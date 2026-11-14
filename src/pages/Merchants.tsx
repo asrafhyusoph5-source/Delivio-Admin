@@ -30,6 +30,8 @@ import type {
   Merchant,
   MenuItem,
   ItemAvailability,
+  ItemVariation,
+  ItemVariant,
   MenuCategory,
   MenuChoice,
   MenuSet,
@@ -704,20 +706,76 @@ export function getMerchantRealRating(merchant: Pick<Merchant, 'ratingSum' | 'ra
   return { hasRatings: false, avg: '0.0', count: 0 };
 }
 
+export function getVariationSummary(item: Pick<MenuItem, 'price' | 'priceMax' | 'stockCount' | 'inStock' | 'variationsEnabled' | 'variations' | 'variants'>) {
+  const variations = Array.isArray(item.variations) ? item.variations : [];
+  const variants = Array.isArray(item.variants) ? item.variants : [];
+  const prices = variants.map((v) => Number(v.price) || 0);
+  const priceMin = variants.length > 0 ? Math.min(...prices) : (Number(item.price) || 0);
+  const priceMax = variants.length > 0 ? Math.max(...prices) : (typeof item.priceMax === 'number' ? item.priceMax : priceMin);
+  const stockCount =
+    variants.length > 0
+      ? variants.reduce((sum, v) => sum + Math.max(0, Number(v.stock) || 0), 0)
+      : (typeof item.stockCount === 'number' ? item.stockCount : 0);
+  const inStock = variants.length > 0 ? stockCount > 0 : Boolean(item.inStock ?? stockCount > 0);
+
+  const firstVar = variations[0];
+  const optionImageMap = new Map<string, string>();
+  if (firstVar?.imageEnabled && Array.isArray(firstVar.options)) {
+    firstVar.options.forEach((opt) => {
+      if (opt.id && opt.imageUrl) {
+        optionImageMap.set(opt.id, opt.imageUrl);
+      }
+    });
+  }
+
+  return {
+    variations,
+    variationsCount: variations.length,
+    variants,
+    priceMin,
+    priceMax,
+    stockCount,
+    inStock,
+    optionImageMap
+  };
+}
+
 export function getActivePriceDrop(
-  item: Pick<MenuItem, 'price' | 'salePrice' | 'saleStartsAt' | 'saleEndsAt' | 'saleActive'>,
+  item: Pick<MenuItem, 'price' | 'salePrice' | 'saleStartsAt' | 'saleEndsAt' | 'saleActive' | 'variationsEnabled' | 'variants'>,
   nowMs: number = Date.now()
 ): { salePrice: number; discountPercent: number } | null {
   if (item.saleActive !== true) return null;
-  const regularPrice = Number(item.price);
-  const salePrice = Number(item.salePrice);
-  if (!Number.isFinite(regularPrice) || !Number.isFinite(salePrice)) return null;
-  if (!(salePrice > 0 && salePrice < regularPrice)) return null;
 
   const startDate = item.saleStartsAt ? parseDate(item.saleStartsAt) : null;
   const endDate = item.saleEndsAt ? parseDate(item.saleEndsAt) : null;
   if (startDate && nowMs < startDate.getTime()) return null;
   if (endDate && nowMs > endDate.getTime()) return null;
+
+  if (item.variationsEnabled && Array.isArray(item.variants) && item.variants.length > 0) {
+    const activeVariantSales = item.variants
+      .map((v) => {
+        const vp = Number(v.price);
+        const vs = Number(v.salePrice);
+        if (Number.isFinite(vp) && Number.isFinite(vs) && vs > 0 && vs < vp) {
+          return {
+            salePrice: vs,
+            discountPercent: Math.round(((vp - vs) / vp) * 100)
+          };
+        }
+        return null;
+      })
+      .filter((x): x is { salePrice: number; discountPercent: number } => Boolean(x));
+
+    if (activeVariantSales.length === 0) return null;
+    const minSale = Math.min(...activeVariantSales.map((x) => x.salePrice));
+    const maxDiscount = Math.max(...activeVariantSales.map((x) => x.discountPercent));
+    return { salePrice: minSale, discountPercent: maxDiscount };
+  }
+
+  const regularPrice = Number(item.price);
+  const salePrice = Number(item.salePrice);
+  if (!Number.isFinite(regularPrice) || !Number.isFinite(salePrice)) return null;
+  if (!(salePrice > 0 && salePrice < regularPrice)) return null;
 
   const discountPercent = Math.round(((regularPrice - salePrice) / regularPrice) * 100);
   return { salePrice, discountPercent };
@@ -2139,10 +2197,16 @@ export const Merchants: React.FC = () => {
           menuIds: Array.isArray(dt.menuIds) ? dt.menuIds : [],
           name: dt.name || 'Item',
           price: Number(dt.price) || 0,
+          priceMax: typeof dt.priceMax === 'number' ? dt.priceMax : undefined,
+          stockCount: typeof dt.stockCount === 'number' ? dt.stockCount : undefined,
+          inStock: typeof dt.inStock === 'boolean' ? dt.inStock : undefined,
           salePrice: typeof dt.salePrice === 'number' ? dt.salePrice : undefined,
           saleStartsAt: dt.saleStartsAt ?? null,
           saleEndsAt: dt.saleEndsAt ?? null,
           saleActive: typeof dt.saleActive === 'boolean' ? dt.saleActive : undefined,
+          variationsEnabled: Boolean(dt.variationsEnabled),
+          variations: Array.isArray(dt.variations) ? (dt.variations as ItemVariation[]) : [],
+          variants: Array.isArray(dt.variants) ? (dt.variants as ItemVariant[]) : [],
           description: dt.description || '',
           imageUrl: dt.imageUrl || '',
           available: dt.available !== false,
@@ -3440,11 +3504,35 @@ export const Merchants: React.FC = () => {
         : null;
 
       if (editingItem) {
-        // Edit - never drop menuIds, sets, subcategoryId, customName, itemSize, or availability
+        // Edit - never drop menuIds, sets, subcategoryId, customName, itemSize, availability,
+        // variationsEnabled, variations, variants, price, priceMax, stockCount, inStock, or sale fields
         const itemDoc = doc(db, 'merchants', selectedMerchant.id, 'items', editingItem.id);
+        const hasVars = Boolean(editingItem.variationsEnabled);
+        const existingVariants = Array.isArray(editingItem.variants) ? editingItem.variants : [];
+        const derivedPrice = hasVars
+          ? (existingVariants.length > 0
+              ? Math.min(...existingVariants.map((v) => Number(v.price) || 0))
+              : Number(editingItem.price) || 0)
+          : (Number(itemPrice) || 0);
+        const derivedPriceMax = hasVars
+          ? (existingVariants.length > 0
+              ? Math.max(...existingVariants.map((v) => Number(v.price) || 0))
+              : (typeof editingItem.priceMax === 'number' ? editingItem.priceMax : derivedPrice))
+          : editingItem.priceMax;
+        const derivedStockCount = hasVars
+          ? (existingVariants.length > 0
+              ? existingVariants.reduce((sum, v) => sum + Math.max(0, Number(v.stock) || 0), 0)
+              : (typeof editingItem.stockCount === 'number' ? editingItem.stockCount : 0))
+          : editingItem.stockCount;
+        const derivedInStock = hasVars
+          ? (existingVariants.length > 0
+              ? (derivedStockCount ?? 0) > 0
+              : Boolean(editingItem.inStock ?? (derivedStockCount ?? 0) > 0))
+          : editingItem.inStock;
+
         const updatePayload: Record<string, any> = {
           name: itemName.trim(),
-          price: Number(itemPrice) || 0,
+          price: derivedPrice,
           description: itemDesc.trim(),
           imageUrl: itemImageUrl.trim(),
           categoryId: itemCategory,
@@ -3457,6 +3545,13 @@ export const Merchants: React.FC = () => {
           available: itemAvailable,
           hasSets,
           sets: sanitizedSets,
+          ...(hasVars
+            ? {
+                priceMax: derivedPriceMax,
+                stockCount: derivedStockCount,
+                inStock: derivedInStock
+              }
+            : {}),
           updatedAt: Timestamp.now()
         };
         await updateDoc(itemDoc, updatePayload);
@@ -3465,7 +3560,14 @@ export const Merchants: React.FC = () => {
             ? {
                 ...i,
                 name: itemName.trim(),
-                price: Number(itemPrice) || 0,
+                price: derivedPrice,
+                ...(hasVars
+                  ? {
+                      priceMax: derivedPriceMax,
+                      stockCount: derivedStockCount,
+                      inStock: derivedInStock
+                    }
+                  : {}),
                 description: itemDesc.trim(),
                 imageUrl: itemImageUrl.trim(),
                 categoryId: itemCategory,
@@ -3577,7 +3679,14 @@ export const Merchants: React.FC = () => {
       setApplyingBulk(true);
       const batch = writeBatch(db);
 
-      menuItems.forEach((item) => {
+      const eligibleItems = menuItems.filter((item) => !item.variationsEnabled);
+      if (eligibleItems.length === 0) {
+        showError('No non-variation items available to adjust. Variation prices are managed per combination.');
+        setApplyingBulk(false);
+        return;
+      }
+
+      eligibleItems.forEach((item) => {
         let newPrice = item.price;
         if (bulkMode === 'percent') {
           const factor = bulkDirection === 'increase' ? 1 + bulkValue / 100 : 1 - bulkValue / 100;
@@ -3601,10 +3710,10 @@ export const Merchants: React.FC = () => {
         action: 'BULK_PRICE_CHANGE',
         entityType: 'merchant',
         entityId: selectedMerchant.id,
-        details: `Bulk adjusted ${menuItems.length} menu items by ${bulkDirection} of ${bulkValue}${bulkMode === 'percent' ? '%' : ' PHP'}`
+        details: `Bulk adjusted ${eligibleItems.length} non-variation menu items by ${bulkDirection} of ${bulkValue}${bulkMode === 'percent' ? '%' : ' PHP'}`
       });
 
-      showSuccess(`Applied bulk price changes to ${menuItems.length} items.`);
+      showSuccess(`Applied bulk price changes to ${eligibleItems.length} items.`);
       setBulkPriceModalOpen(false);
       fetchMenuData(selectedMerchant.id);
     } catch (err: any) {
@@ -6767,6 +6876,20 @@ export const Merchants: React.FC = () => {
                                           Set {item.sets?.length ? `(${item.sets.length})` : ''}
                                         </span>
                                       )}
+                                      {item.variationsEnabled && (() => {
+                                        const vs = getVariationSummary(item);
+                                        return (
+                                          <span
+                                            className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-sky-100 text-sky-800 dark:bg-sky-950/70 dark:text-sky-300 border border-sky-200 dark:border-sky-800 tabular-nums"
+                                            title={`${vs.variationsCount} variation groups · ${vs.variants.length} combinations · ${vs.stockCount} total stock`}
+                                          >
+                                            <Layers className="w-2.5 h-2.5 shrink-0" />
+                                            <span>
+                                              {vs.variationsCount} {vs.variationsCount === 1 ? 'variation' : 'variations'}
+                                            </span>
+                                          </span>
+                                        );
+                                      })()}
                                       {/* Assigned Menus */}
                                       {item.menuIds && item.menuIds.length > 0 && item.menuIds.map((mId) => {
                                         const m = menus.find((x) => x.id === mId);
@@ -6825,21 +6948,27 @@ export const Merchants: React.FC = () => {
                                   </div>
                                   {(() => {
                                     const drop = getActivePriceDrop(item);
+                                    const vs = item.variationsEnabled ? getVariationSummary(item) : null;
+                                    const priceLabel =
+                                      vs && vs.priceMax > vs.priceMin
+                                        ? `₱${vs.priceMin.toFixed(2)}–₱${vs.priceMax.toFixed(2)}`
+                                        : `₱${Number(vs ? vs.priceMin : item.price).toFixed(2)}`;
+
                                     if (drop) {
                                       return (
                                         <div className="text-right shrink-0 tabular-nums">
                                           <span className="block font-extrabold text-rose-600 dark:text-rose-400">
-                                            ₱{drop.salePrice.toFixed(2)}
+                                            {vs ? `From ₱${drop.salePrice.toFixed(2)}` : `₱${drop.salePrice.toFixed(2)}`}
                                           </span>
                                           <span className="block text-[10px] text-gray-400 line-through">
-                                            ₱{Number(item.price).toFixed(2)}
+                                            {priceLabel}
                                           </span>
                                         </div>
                                       );
                                     }
                                     return (
                                       <span className="font-extrabold text-amber-600 shrink-0 tabular-nums">
-                                        ₱{Number(item.price).toFixed(2)}
+                                        {priceLabel}
                                       </span>
                                     );
                                   })()}
@@ -6849,6 +6978,62 @@ export const Merchants: React.FC = () => {
                                     {item.description}
                                   </p>
                                 )}
+                                {/* Read-only Variations Combinations Table inside item card */}
+                                {item.variationsEnabled && (() => {
+                                  const vs = getVariationSummary(item);
+                                  if (vs.variants.length === 0) return null;
+                                  return (
+                                    <div className="mt-2 border border-gray-200 dark:border-zinc-800 rounded-lg overflow-hidden bg-gray-50/70 dark:bg-zinc-950/50">
+                                      <div className="px-2.5 py-1 border-b border-gray-200 dark:border-zinc-800 flex items-center justify-between text-[10px] font-bold text-gray-600 dark:text-zinc-400">
+                                        <span>Combinations ({vs.variants.length})</span>
+                                        <span className={`tabular-nums ${vs.inStock ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
+                                          Total stock: {vs.stockCount}
+                                        </span>
+                                      </div>
+                                      <div className="max-h-32 overflow-y-auto">
+                                        <table className="w-full text-[11px]">
+                                          <thead className="bg-gray-100/80 dark:bg-zinc-900 text-[10px] text-gray-500 dark:text-zinc-400 sticky top-0">
+                                            <tr>
+                                              <th className="text-left px-2.5 py-1 font-semibold">Combination</th>
+                                              <th className="text-right px-2 py-1 font-semibold">Price</th>
+                                              <th className="text-right px-2.5 py-1 font-semibold">Stock</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody className="divide-y divide-gray-200/70 dark:divide-zinc-800/80 tabular-nums">
+                                            {vs.variants.map((v) => {
+                                              const vHasSale =
+                                                item.saleActive === true &&
+                                                typeof v.salePrice === 'number' &&
+                                                v.salePrice > 0 &&
+                                                v.salePrice < v.price &&
+                                                Boolean(getActivePriceDrop(item));
+                                              return (
+                                                <tr key={v.key} className="bg-white/70 dark:bg-zinc-900/50">
+                                                  <td className="px-2.5 py-1 font-medium text-gray-800 dark:text-zinc-200 truncate max-w-[140px]" title={v.label}>
+                                                    {v.label}
+                                                  </td>
+                                                  <td className="px-2 py-1 text-right font-semibold whitespace-nowrap">
+                                                    {vHasSale ? (
+                                                      <span>
+                                                        <span className="text-rose-600 dark:text-rose-400">₱{Number(v.salePrice).toFixed(2)}</span>
+                                                        <span className="text-[10px] text-gray-400 line-through ml-1">₱{Number(v.price).toFixed(2)}</span>
+                                                      </span>
+                                                    ) : (
+                                                      <span className="text-gray-900 dark:text-white">₱{Number(v.price).toFixed(2)}</span>
+                                                    )}
+                                                  </td>
+                                                  <td className={`px-2.5 py-1 text-right font-bold whitespace-nowrap ${Number(v.stock) > 0 ? 'text-gray-700 dark:text-zinc-300' : 'text-red-600 dark:text-red-400'}`}>
+                                                    {Number(v.stock) || 0}
+                                                  </td>
+                                                </tr>
+                                              );
+                                            })}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
                               </div>
 
                               <div className="flex items-center justify-between pt-2 border-t border-gray-100 dark:border-zinc-800 mt-2">
@@ -7685,18 +7870,36 @@ export const Merchants: React.FC = () => {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                    Base Price (PHP) <span className="text-red-500">*</span>
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400">
+                      {editingItem?.variationsEnabled ? 'Derived Price (PHP)' : 'Base Price (PHP)'}{' '}
+                      {!editingItem?.variationsEnabled && <span className="text-red-500">*</span>}
+                    </label>
+                    {editingItem?.variationsEnabled && (
+                      <span className="text-[10px] font-bold text-sky-700 dark:text-sky-400">
+                        Auto-derived
+                      </span>
+                    )}
+                  </div>
                   <input
                     type="number"
                     min="0"
                     step="0.01"
                     value={itemPrice}
+                    disabled={Boolean(editingItem?.variationsEnabled)}
+                    readOnly={Boolean(editingItem?.variationsEnabled)}
                     onChange={(e) => setItemPrice(Number(e.target.value))}
-                    required
-                    className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold"
+                    required={!editingItem?.variationsEnabled}
+                    className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-bold disabled:bg-gray-100 dark:disabled:bg-zinc-900 disabled:text-gray-500 disabled:cursor-not-allowed tabular-nums"
                   />
+                  {editingItem?.variationsEnabled && (() => {
+                    const vs = getVariationSummary(editingItem);
+                    return (
+                      <p className="text-[11px] text-gray-500 dark:text-zinc-400 mt-1 tabular-nums">
+                        Lowest variant price ({vs.priceMax > vs.priceMin ? `₱${vs.priceMin.toFixed(2)}–₱${vs.priceMax.toFixed(2)}` : `₱${vs.priceMin.toFixed(2)}`}). Managed via variations.
+                      </p>
+                    );
+                  })()}
                 </div>
 
                 <div>
@@ -8150,41 +8353,164 @@ export const Merchants: React.FC = () => {
                 </label>
               </div>
 
+              {/* Read-only Variations & Combinations Table (Convenience items with variationsEnabled) */}
+              {editingItem?.variationsEnabled && (() => {
+                const vs = getVariationSummary(editingItem);
+                const itemDropActive = Boolean(getActivePriceDrop(editingItem));
+
+                return (
+                  <div className="pt-3 border-t border-gray-200 dark:border-zinc-800 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <label className="block text-xs font-bold uppercase tracking-wider text-gray-900 dark:text-white">
+                          Variations &amp; Combinations (Read-Only)
+                        </label>
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-sky-100 text-sky-800 dark:bg-sky-950/70 dark:text-sky-300 border border-sky-200 dark:border-sky-800 tabular-nums">
+                          <Layers className="w-3 h-3" />
+                          <span>
+                            {vs.variationsCount} {vs.variationsCount === 1 ? 'variation' : 'variations'}
+                          </span>
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3 text-[11px] font-semibold text-gray-500 dark:text-zinc-400 tabular-nums">
+                        <span>{vs.variants.length} combinations</span>
+                        <span>·</span>
+                        <span className={vs.inStock ? 'text-emerald-600 dark:text-emerald-400 font-bold' : 'text-red-600 dark:text-red-400 font-bold'}>
+                          {vs.stockCount} total stock
+                        </span>
+                      </div>
+                    </div>
+
+                    {vs.variations.length > 0 && (
+                      <div className="flex flex-wrap gap-2 text-[11px] text-gray-600 dark:text-zinc-300">
+                        {vs.variations.map((vGroup) => (
+                          <div
+                            key={vGroup.id}
+                            className="px-2.5 py-1.5 rounded-lg bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800"
+                          >
+                            <span className="font-bold text-gray-900 dark:text-white">{vGroup.name}:</span>{' '}
+                            <span>{(vGroup.options || []).map((o) => o.name).join(', ')}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {vs.variants.length === 0 ? (
+                      <div className="p-3 text-center text-[11px] text-gray-400 bg-gray-50 dark:bg-zinc-800/40 rounded-xl border border-dashed border-gray-200 dark:border-zinc-700">
+                        Variations are enabled, but no variant combinations have been defined yet.
+                      </div>
+                    ) : (
+                      <div className="border border-gray-200 dark:border-zinc-800 rounded-xl overflow-hidden">
+                        <div className="max-h-64 overflow-y-auto">
+                          <table className="w-full text-left text-xs">
+                            <thead className="bg-gray-50 dark:bg-zinc-850 border-b border-gray-200 dark:border-zinc-800 text-[10px] font-bold uppercase text-gray-500 dark:text-zinc-400 sticky top-0">
+                              <tr>
+                                <th className="px-3.5 py-2">Combination</th>
+                                <th className="px-3.5 py-2 text-right">Price</th>
+                                <th className="px-3.5 py-2 text-right">Stock</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 tabular-nums">
+                              {vs.variants.map((variant) => {
+                                const firstOptId = Array.isArray(variant.optionIds) ? variant.optionIds[0] : undefined;
+                                const optImg = firstOptId ? vs.optionImageMap.get(firstOptId) : undefined;
+                                const vPrice = Number(variant.price) || 0;
+                                const vSale = typeof variant.salePrice === 'number' ? variant.salePrice : null;
+                                const vSaleActive = itemDropActive && vSale !== null && vSale > 0 && vSale < vPrice;
+                                const vStock = Math.max(0, Number(variant.stock) || 0);
+
+                                return (
+                                  <tr key={variant.key} className="bg-white dark:bg-zinc-900">
+                                    <td className="px-3.5 py-2">
+                                      <div className="flex items-center gap-2">
+                                        {optImg && (
+                                          <img
+                                            src={optImg}
+                                            alt={variant.label}
+                                            referrerPolicy="no-referrer"
+                                            className="w-6 h-6 rounded object-cover border border-gray-200 dark:border-zinc-700 shrink-0"
+                                          />
+                                        )}
+                                        <span className="font-semibold text-gray-900 dark:text-white">
+                                          {variant.label}
+                                        </span>
+                                      </div>
+                                    </td>
+                                    <td className="px-3.5 py-2 text-right whitespace-nowrap font-bold">
+                                      {vSaleActive ? (
+                                        <span>
+                                          <span className="text-rose-600 dark:text-rose-400">₱{vSale!.toFixed(2)}</span>
+                                          <span className="text-[10px] text-gray-400 line-through ml-1.5">₱{vPrice.toFixed(2)}</span>
+                                        </span>
+                                      ) : (
+                                        <span className="text-gray-900 dark:text-white">₱{vPrice.toFixed(2)}</span>
+                                      )}
+                                    </td>
+                                    <td className="px-3.5 py-2 text-right whitespace-nowrap">
+                                      <span
+                                        className={`font-bold ${
+                                          vStock > 0
+                                            ? 'text-emerald-700 dark:text-emerald-400'
+                                            : 'text-red-600 dark:text-red-400'
+                                        }`}
+                                      >
+                                        {vStock > 0 ? vStock : '0 (Out)'}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* Customization & Option Sets Editor */}
+              {(selectedMerchant.type !== 'convenience' || itemSets.length > 0) && (
               <div className="pt-3 border-t border-gray-200 dark:border-zinc-800 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
                     <label className="block text-xs font-bold uppercase tracking-wider text-gray-900 dark:text-white">
-                      Customization & Option Sets ({itemSets.length})
+                      {selectedMerchant.type === 'convenience'
+                        ? `Legacy Option Sets (${itemSets.length})`
+                        : `Customization & Option Sets (${itemSets.length})`}
                     </label>
                     <p className="text-[11px] text-gray-400">
-                      Configure choices (e.g. Drink, Side, Flavor). Bulk price adjustments apply to base price only.
+                      {selectedMerchant.type === 'convenience'
+                        ? 'Existing option sets remain preserved. New sets cannot be added to convenience products.'
+                        : 'Configure choices (e.g. Drink, Side, Flavor). Bulk price adjustments apply to base price only.'}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const newSet: MenuSet = {
-                        id: `set_${Date.now().toString(36)}`,
-                        name: '',
-                        customName: '',
-                        subcategoryId: null,
-                        subcategoryName: null,
-                        required: false,
-                        minSelect: 0,
-                        maxSelect: 1,
-                        sortOrder: itemSets.length,
-                        choices: [
-                          { id: `c_${Date.now().toString(36)}_1`, name: '', price: 0, available: true }
-                        ]
-                      };
-                      setItemSets((prev) => [...prev, newSet]);
-                    }}
-                    className="px-2.5 py-1 rounded-xl text-xs font-bold bg-amber-400 hover:bg-amber-500 text-black flex items-center gap-1 shadow-2xs transition-colors"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Add Set</span>
-                  </button>
+                  {selectedMerchant.type !== 'convenience' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newSet: MenuSet = {
+                          id: `set_${Date.now().toString(36)}`,
+                          name: '',
+                          customName: '',
+                          subcategoryId: null,
+                          subcategoryName: null,
+                          required: false,
+                          minSelect: 0,
+                          maxSelect: 1,
+                          sortOrder: itemSets.length,
+                          choices: [
+                            { id: `c_${Date.now().toString(36)}_1`, name: '', price: 0, available: true }
+                          ]
+                        };
+                        setItemSets((prev) => [...prev, newSet]);
+                      }}
+                      className="px-2.5 py-1 rounded-xl text-xs font-bold bg-amber-400 hover:bg-amber-500 text-black flex items-center gap-1 shadow-2xs transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Add Set</span>
+                    </button>
+                  )}
                 </div>
 
                 {itemSets.length === 0 ? (
@@ -8437,6 +8763,7 @@ export const Merchants: React.FC = () => {
                   </div>
                 )}
               </div>
+              )}
 
               <div className="flex justify-end gap-2 pt-3 border-t border-gray-100 dark:border-zinc-800">
                 <button

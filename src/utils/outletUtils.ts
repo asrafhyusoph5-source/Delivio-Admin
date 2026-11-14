@@ -368,9 +368,24 @@ export async function copyMerchantMenu(
       ? doc(db, 'merchants', targetMerchantId, 'items', existingItemId)
       : doc(collection(db, 'merchants', targetMerchantId, 'items'));
 
+    const variantsList = Array.isArray(dt.variants) ? dt.variants : [];
+    const hasVariations = Boolean(dt.variationsEnabled);
+    const derivedPrice =
+      hasVariations && variantsList.length > 0
+        ? Math.min(...variantsList.map((v: any) => Number(v.price) || 0))
+        : Number(dt.price) || 0;
+    const derivedPriceMax =
+      hasVariations && variantsList.length > 0
+        ? Math.max(...variantsList.map((v: any) => Number(v.price) || 0))
+        : (typeof dt.priceMax === 'number' ? dt.priceMax : derivedPrice);
+    const derivedStockCount =
+      hasVariations && variantsList.length > 0
+        ? variantsList.reduce((sum: number, v: any) => sum + Math.max(0, Number(v.stock) || 0), 0)
+        : (typeof dt.stockCount === 'number' ? dt.stockCount : 0);
+
     const itemPayload: Record<string, any> = {
       name: (dt.name || 'Item').trim(),
-      price: Number(dt.price) || 0,
+      price: derivedPrice,
       description: dt.description || '',
       imageUrl: dt.imageUrl || '',
       categoryId: dt.categoryId || null,
@@ -383,6 +398,16 @@ export async function copyMerchantMenu(
       available: true, // Push Menu does NOT copy out-of-stock state
       hasSets: copiedSets.length > 0,
       sets: copiedSets,
+      ...(hasVariations
+        ? {
+            variationsEnabled: true,
+            variations: Array.isArray(dt.variations) ? dt.variations : [],
+            variants: variantsList,
+            priceMax: derivedPriceMax,
+            stockCount: derivedStockCount,
+            inStock: derivedStockCount > 0
+          }
+        : {}),
       updatedAt: now
     };
     if (!existingItemId) {

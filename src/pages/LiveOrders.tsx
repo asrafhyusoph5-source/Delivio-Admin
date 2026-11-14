@@ -276,7 +276,7 @@ export const OrderItemSelectionsView: React.FC<{ item: any }> = ({ item }) => {
   }
 
   const hasBasePrice = typeof item.basePrice === 'number' && item.basePrice > 0;
-  const unitPrice = Number(item.price || 0);
+  const unitPrice = Number(item.unitPrice ?? item.price ?? 0);
 
   if (selections.length === 0 && !hasBasePrice) return null;
 
@@ -653,20 +653,28 @@ export const OrderMerchantEditComparison: React.FC<{ order: Order }> = ({ order 
                 <span className="text-[10px] font-normal text-gray-500">({order.originalItems.length} items)</span>
               </div>
               <div className="divide-y divide-gray-100 dark:divide-zinc-800 text-xs">
-                {order.originalItems.map((item, idx) => (
-                  <div key={idx} className="p-2.5 flex items-start justify-between">
-                    <div>
-                      <div className="font-semibold text-gray-800 dark:text-zinc-200">
-                        {item.qty}x {item.name}
+                {order.originalItems.map((item, idx) => {
+                  const origUnit = Number(item.unitPrice ?? item.price ?? 0);
+                  return (
+                    <div key={idx} className="p-2.5 flex items-start justify-between">
+                      <div>
+                        <div className="font-semibold text-gray-800 dark:text-zinc-200">
+                          {item.qty}x {item.name}
+                        </div>
+                        {item.variantLabel && (
+                          <div className="text-[11px] font-medium text-gray-500 dark:text-zinc-400 mt-0.5">
+                            {item.variantLabel}
+                          </div>
+                        )}
+                        {item.notes && <p className="text-[10px] text-gray-400 italic">Note: {item.notes}</p>}
+                        <OrderItemSelectionsView item={item} />
                       </div>
-                      {item.notes && <p className="text-[10px] text-gray-400 italic">Note: {item.notes}</p>}
-                      <OrderItemSelectionsView item={item} />
+                      <span className="font-bold text-gray-600 dark:text-zinc-400 ml-2 tabular-nums">
+                        ₱{(origUnit * Number(item.qty || 1)).toFixed(2)}
+                      </span>
                     </div>
-                    <span className="font-bold text-gray-600 dark:text-zinc-400 ml-2">
-                      ₱{(Number(item.price || 0) * Number(item.qty || 1)).toFixed(2)}
-                    </span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
@@ -679,9 +687,13 @@ export const OrderMerchantEditComparison: React.FC<{ order: Order }> = ({ order 
               <div className="divide-y divide-gray-100 dark:divide-zinc-800 text-xs">
                 {(order.items || []).map((item, idx) => {
                   const origMatch = order.originalItems?.find(
-                    (oi) => (oi.id && oi.id === item.id) || oi.name.toLowerCase() === item.name.toLowerCase()
+                    (oi) =>
+                      ((oi.id && oi.id === item.id) || oi.name.toLowerCase() === item.name.toLowerCase()) &&
+                      (oi.variantKey || null) === (item.variantKey || null)
                   );
-                  const isModified = !origMatch || origMatch.qty !== item.qty || origMatch.price !== item.price;
+                  const curUnit = Number(item.unitPrice ?? item.price ?? 0);
+                  const origMatchUnit = origMatch ? Number(origMatch.unitPrice ?? origMatch.price ?? 0) : 0;
+                  const isModified = !origMatch || origMatch.qty !== item.qty || origMatchUnit !== curUnit;
 
                   return (
                     <div
@@ -699,11 +711,16 @@ export const OrderMerchantEditComparison: React.FC<{ order: Order }> = ({ order 
                             </span>
                           )}
                         </div>
+                        {item.variantLabel && (
+                          <div className="text-[11px] font-medium text-gray-500 dark:text-zinc-400 mt-0.5">
+                            {item.variantLabel}
+                          </div>
+                        )}
                         {item.notes && <p className="text-[10px] text-gray-400 italic">Note: {item.notes}</p>}
                         <OrderItemSelectionsView item={item} />
                       </div>
-                      <span className="font-bold text-gray-900 dark:text-white ml-2">
-                        ₱{(Number(item.price || 0) * Number(item.qty || 1)).toFixed(2)}
+                      <span className="font-bold text-gray-900 dark:text-white ml-2 tabular-nums">
+                        ₱{(curUnit * Number(item.qty || 1)).toFixed(2)}
                       </span>
                     </div>
                   );
@@ -2873,32 +2890,60 @@ export const LiveOrders: React.FC = () => {
                     Order Items & Goods
                   </label>
                   <div className="border border-gray-200 dark:border-zinc-800 rounded-xl overflow-hidden divide-y divide-gray-100 dark:divide-zinc-800">
-                    {(selectedOrder.items || []).map((it, idx) => (
-                      <div
-                        key={idx}
-                        className="p-3 flex items-start justify-between text-xs bg-white dark:bg-zinc-900"
-                      >
-                        <div className="flex-1 pr-3">
-                          <span className="font-bold text-gray-900 dark:text-white">
-                            {it.qty}x {it.name}
-                          </span>
-                          {it.notes && (
-                            <p className="text-[11px] text-gray-400 italic mt-0.5">Note: {it.notes}</p>
-                          )}
-                          <OrderItemSelectionsView item={it} />
-                        </div>
-                        <div className="text-right shrink-0">
-                          <span className="font-bold text-gray-900 dark:text-white block">
-                            ₱{(Number(it.price || 0) * Number(it.qty || 1)).toFixed(2)}
-                          </span>
-                          {Number(it.qty) > 1 && (
-                            <span className="text-[10px] text-gray-400 block">
-                              @ ₱{Number(it.price || 0).toFixed(2)}
+                    {(selectedOrder.items || []).map((it, idx) => {
+                      const unitPrice = Number(it.unitPrice ?? it.price ?? 0);
+                      const regularUnitPrice = Number(it.regularUnitPrice ?? 0);
+                      const hasVariantDiscount =
+                        Number.isFinite(regularUnitPrice) && regularUnitPrice > unitPrice && unitPrice > 0;
+                      const qty = Number(it.qty || 1);
+
+                      return (
+                        <div
+                          key={idx}
+                          className="p-3 flex items-start justify-between text-xs bg-white dark:bg-zinc-900"
+                        >
+                          <div className="flex items-start gap-2.5 flex-1 pr-3 min-w-0">
+                            {it.variantImageUrl && (
+                              <img
+                                src={it.variantImageUrl}
+                                alt={it.variantLabel || it.name}
+                                referrerPolicy="no-referrer"
+                                className="w-9 h-9 rounded-lg object-cover border border-gray-200 dark:border-zinc-700 shrink-0 mt-0.5"
+                              />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <span className="font-bold text-gray-900 dark:text-white block">
+                                {qty}x {it.name}
+                              </span>
+                              {it.variantLabel && (
+                                <p className="text-[11px] font-medium text-gray-500 dark:text-zinc-400 mt-0.5">
+                                  {it.variantLabel}
+                                </p>
+                              )}
+                              {it.notes && (
+                                <p className="text-[11px] text-gray-400 italic mt-0.5">Note: {it.notes}</p>
+                              )}
+                              <OrderItemSelectionsView item={it} />
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0 tabular-nums">
+                            <span className="font-bold text-gray-900 dark:text-white block">
+                              ₱{(unitPrice * qty).toFixed(2)}
                             </span>
-                          )}
+                            {hasVariantDiscount && (
+                              <span className="text-[10px] text-gray-400 line-through block">
+                                ₱{(regularUnitPrice * qty).toFixed(2)}
+                              </span>
+                            )}
+                            {qty > 1 && (
+                              <span className="text-[10px] text-gray-400 block">
+                                @ ₱{unitPrice.toFixed(2)}
+                              </span>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
 
                     {/* Parcel Details */}
                     {selectedOrder.parcel && (

@@ -80,6 +80,11 @@ export interface OrderItem {
   qty: number;
   price: number;
   basePrice?: number;
+  variantKey?: string | null;
+  variantLabel?: string | null;
+  variantImageUrl?: string | null;
+  unitPrice?: number;
+  regularUnitPrice?: number;
   selections?: any[];
   selectedSets?: any;
   notes?: string;
@@ -425,6 +430,28 @@ export interface ItemAvailability {
   dateTo?: string | null;   // "YYYY-MM-DD"
 }
 
+export interface ItemVariationOption {
+  id: string;
+  name: string;
+  imageUrl?: string;
+}
+
+export interface ItemVariation {
+  id: string;
+  name: string;
+  imageEnabled?: boolean;
+  options: ItemVariationOption[];
+}
+
+export interface ItemVariant {
+  key: string;
+  optionIds: string[];
+  label: string;
+  price: number;
+  stock: number;
+  salePrice?: number | null;
+}
+
 export interface MenuItem {
   id: string;
   categoryId?: string;
@@ -435,10 +462,16 @@ export interface MenuItem {
   availability?: ItemAvailability | null;
   name: string;
   price: number;
+  priceMax?: number;
+  stockCount?: number;
+  inStock?: boolean;
   salePrice?: number | null;
   saleStartsAt?: any;
   saleEndsAt?: any;
   saleActive?: boolean;
+  variationsEnabled?: boolean;
+  variations?: ItemVariation[];
+  variants?: ItemVariant[];
   description?: string;
   imageUrl?: string;
   available: boolean;

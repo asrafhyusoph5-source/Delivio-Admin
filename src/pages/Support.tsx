@@ -2292,7 +2292,12 @@ export const Support: React.FC = () => {
                                 <div className="mt-1 space-y-0.5">
                                   {child.items.map((it: any, i: number) => (
                                     <div key={i} className="text-gray-700 dark:text-zinc-300">
-                                      • {it.qty}x {it.name}
+                                      <div>• {it.qty}x {it.name}</div>
+                                      {it.variantLabel && (
+                                        <div className="pl-2.5 text-[10px] text-gray-500 dark:text-zinc-400">
+                                          {it.variantLabel}
+                                        </div>
+                                      )}
                                     </div>
                                   ))}
                                 </div>
@@ -2449,12 +2454,17 @@ export const Support: React.FC = () => {
                                 className="flex justify-between items-start py-1 border-b border-gray-100/60 dark:border-zinc-800/60 text-[11px]"
                               >
                                 <div>
-                                  <span className="font-bold text-gray-900 dark:text-white">
+                                  <span className="font-bold text-gray-900 dark:text-white block">
                                     {item.qty}x {item.name}
                                   </span>
+                                  {item.variantLabel && (
+                                    <span className="text-[10px] text-gray-500 dark:text-zinc-400 block">
+                                      {item.variantLabel}
+                                    </span>
+                                  )}
                                 </div>
-                                <span className="font-bold font-mono text-gray-700 dark:text-zinc-300">
-                                  ₱{Number(item.price * item.qty).toFixed(2)}
+                                <span className="font-bold font-mono text-gray-700 dark:text-zinc-300 tabular-nums">
+                                  ₱{(Number(item.unitPrice ?? item.price ?? 0) * Number(item.qty || 1)).toFixed(2)}
                                 </span>
                               </div>
                             ))}
