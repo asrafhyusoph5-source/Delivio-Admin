@@ -314,7 +314,8 @@ export interface Merchant {
   logoUrl?: string;
   description?: string;
   commissionRate: number; // e.g. 15 for 15%
-  rating?: number;
+  ratingSum?: number;
+  ratingCount?: number;
   totalOrders?: number;
   walletBalance?: number;
   linkedCustomerUid?: string | null;
@@ -359,6 +360,14 @@ export interface MainCategoryItem {
 export interface MainCategoriesDoc {
   food: MainCategoryItem[];
   convenience: MainCategoryItem[];
+  updatedAt?: any;
+  updatedBy?: string;
+}
+
+export type ConvenienceColumnsCount = 1 | 2 | 3;
+
+export interface AppDesignerSettings {
+  convenienceColumns: ConvenienceColumnsCount;
   updatedAt?: any;
   updatedBy?: string;
 }
@@ -426,6 +435,10 @@ export interface MenuItem {
   availability?: ItemAvailability | null;
   name: string;
   price: number;
+  salePrice?: number | null;
+  saleStartsAt?: any;
+  saleEndsAt?: any;
+  saleActive?: boolean;
   description?: string;
   imageUrl?: string;
   available: boolean;
@@ -922,6 +935,7 @@ export interface DispatchSettings {
   poolMaxDropoffGapKm: number; // default 3
   priorityHeadStartSeconds?: number; // default 10
   priorityMaxBatch?: number; // default 4
+  martBatching?: boolean; // default false
   updatedAt?: any;
   updatedBy?: string;
 }

@@ -85,7 +85,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badge: pendingPromoRequestsCount > 0 ? pendingPromoRequestsCount : undefined,
       badgeColor: 'bg-purple-500'
     },
-    { name: 'Cuisines & Categories', path: '/categories', icon: LayoutGrid },
+    { name: 'App Designer', path: '/categories', icon: LayoutGrid },
     { name: 'Inbox', path: '/inbox', icon: Mail },
     { name: 'Chats', path: '/chats', icon: MessageSquare },
     {

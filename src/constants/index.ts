@@ -258,7 +258,8 @@ export const DEFAULT_DISPATCH_SETTINGS: DispatchSettings = {
   poolMaxPickupGapKm: 1.5,
   poolMaxDropoffGapKm: 3,
   priorityHeadStartSeconds: 10,
-  priorityMaxBatch: 4
+  priorityMaxBatch: 4,
+  martBatching: false
 };
 
 export const DEFAULT_RIDER_PAY: RiderPayConfig = {

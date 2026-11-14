@@ -687,6 +687,42 @@ export function getNextOpeningDate(
   return { isoString: fallbackISO, displayString: fallbackDisplay };
 }
 
+export function getMerchantRealRating(merchant: Pick<Merchant, 'ratingSum' | 'ratingCount'>): {
+  hasRatings: boolean;
+  avg: string;
+  count: number;
+} {
+  const count = Number(merchant.ratingCount) || 0;
+  const sum = Number(merchant.ratingSum) || 0;
+  if (count > 0 && Number.isFinite(sum)) {
+    return {
+      hasRatings: true,
+      avg: (sum / count).toFixed(1),
+      count
+    };
+  }
+  return { hasRatings: false, avg: '0.0', count: 0 };
+}
+
+export function getActivePriceDrop(
+  item: Pick<MenuItem, 'price' | 'salePrice' | 'saleStartsAt' | 'saleEndsAt' | 'saleActive'>,
+  nowMs: number = Date.now()
+): { salePrice: number; discountPercent: number } | null {
+  if (item.saleActive !== true) return null;
+  const regularPrice = Number(item.price);
+  const salePrice = Number(item.salePrice);
+  if (!Number.isFinite(regularPrice) || !Number.isFinite(salePrice)) return null;
+  if (!(salePrice > 0 && salePrice < regularPrice)) return null;
+
+  const startDate = item.saleStartsAt ? parseDate(item.saleStartsAt) : null;
+  const endDate = item.saleEndsAt ? parseDate(item.saleEndsAt) : null;
+  if (startDate && nowMs < startDate.getTime()) return null;
+  if (endDate && nowMs > endDate.getTime()) return null;
+
+  const discountPercent = Math.round(((regularPrice - salePrice) / regularPrice) * 100);
+  return { salePrice, discountPercent };
+}
+
 export const Merchants: React.FC = () => {
   const [searchParams] = useSearchParams();
   const initialSearch = searchParams.get('search') || '';
@@ -975,6 +1011,8 @@ export const Merchants: React.FC = () => {
           logoUrl: dt.logoUrl,
           description: dt.description || '',
           commissionRate: dt.commissionRate ?? 15,
+          ratingSum: Number(dt.ratingSum) || 0,
+          ratingCount: Number(dt.ratingCount) || 0,
           walletBalance: Number(dt.walletBalance || 0),
           linkedCustomerUid: dt.linkedCustomerUid || null,
           linkedCustomerEmail: dt.linkedCustomerEmail || null,
@@ -2101,6 +2139,10 @@ export const Merchants: React.FC = () => {
           menuIds: Array.isArray(dt.menuIds) ? dt.menuIds : [],
           name: dt.name || 'Item',
           price: Number(dt.price) || 0,
+          salePrice: typeof dt.salePrice === 'number' ? dt.salePrice : undefined,
+          saleStartsAt: dt.saleStartsAt ?? null,
+          saleEndsAt: dt.saleEndsAt ?? null,
+          saleActive: typeof dt.saleActive === 'boolean' ? dt.saleActive : undefined,
           description: dt.description || '',
           imageUrl: dt.imageUrl || '',
           available: dt.available !== false,
@@ -4104,7 +4146,7 @@ export const Merchants: React.FC = () => {
 
       {/* Merchants Table */}
       {loading ? (
-        <TableSkeleton rows={8} cols={6} />
+        <TableSkeleton rows={8} cols={7} />
       ) : (
         <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl overflow-hidden shadow-xs">
           <div className="overflow-x-auto">
@@ -4114,6 +4156,7 @@ export const Merchants: React.FC = () => {
                   <th className="px-4 py-3.5">Store / Business</th>
                   <th className="px-4 py-3.5">Owner & Contact</th>
                   <th className="px-4 py-3.5">Type</th>
+                  <th className="px-4 py-3.5">Rating</th>
                   <th className="px-4 py-3.5">Live Status</th>
                   <th className="px-4 py-3.5">Commission</th>
                   <th className="px-4 py-3.5 text-right">Actions</th>
@@ -4122,7 +4165,7 @@ export const Merchants: React.FC = () => {
               <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 font-medium">
                 {groupedDisplayRows.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="text-center py-12 text-gray-400 text-xs">
+                    <td colSpan={7} className="text-center py-12 text-gray-400 text-xs">
                       No matching merchants found.
                     </td>
                   </tr>
@@ -4226,6 +4269,22 @@ export const Merchants: React.FC = () => {
                               </span>
                             </td>
                             <td className="px-4 py-3.5">
+                              {(() => {
+                                const totalCount = row.outlets.reduce((acc, o) => acc + (Number(o.ratingCount) || 0), 0);
+                                const totalSum = row.outlets.reduce((acc, o) => acc + (Number(o.ratingSum) || 0), 0);
+                                if (totalCount > 0) {
+                                  return (
+                                    <span className="inline-flex items-center gap-1 font-bold text-gray-900 dark:text-white tabular-nums whitespace-nowrap">
+                                      <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400 shrink-0" />
+                                      <span>{(totalSum / totalCount).toFixed(1)}</span>
+                                      <span className="text-gray-400 font-medium">({totalCount})</span>
+                                    </span>
+                                  );
+                                }
+                                return <span className="text-[11px] text-gray-400 whitespace-nowrap">No ratings yet</span>;
+                              })()}
+                            </td>
+                            <td className="px-4 py-3.5">
                               <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-bold">
                                 {openCount > 0 && (
                                   <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
@@ -4324,6 +4383,20 @@ export const Merchants: React.FC = () => {
                                   <span className="capitalize px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
                                     {m.type}
                                   </span>
+                                </td>
+                                <td className="px-4 py-3">
+                                  {(() => {
+                                    const r = getMerchantRealRating(m);
+                                    return r.hasRatings ? (
+                                      <span className="inline-flex items-center gap-1 font-bold text-gray-900 dark:text-white tabular-nums whitespace-nowrap">
+                                        <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400 shrink-0" />
+                                        <span>{r.avg}</span>
+                                        <span className="text-gray-400 font-medium">({r.count})</span>
+                                      </span>
+                                    ) : (
+                                      <span className="text-[11px] text-gray-400 whitespace-nowrap">No ratings yet</span>
+                                    );
+                                  })()}
                                 </td>
                                 <td className="px-4 py-3">
                                   {(() => {
@@ -4470,6 +4543,20 @@ export const Merchants: React.FC = () => {
                           <span className="capitalize px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
                             {m.type}
                           </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          {(() => {
+                            const r = getMerchantRealRating(m);
+                            return r.hasRatings ? (
+                              <span className="inline-flex items-center gap-1 font-bold text-gray-900 dark:text-white tabular-nums whitespace-nowrap">
+                                <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400 shrink-0" />
+                                <span>{r.avg}</span>
+                                <span className="text-gray-400 font-medium">({r.count})</span>
+                              </span>
+                            ) : (
+                              <span className="text-[11px] text-gray-400 whitespace-nowrap">No ratings yet</span>
+                            );
+                          })()}
                         </td>
                         <td className="px-4 py-3">
                           {(() => {
@@ -4637,11 +4724,23 @@ export const Merchants: React.FC = () => {
                       );
                     })()}
                   </h3>
-                  <p className="text-xs text-gray-400">
-                    ID: {selectedMerchant.id}
+                  <p className="text-xs text-gray-400 flex items-center gap-2 flex-wrap">
+                    <span>ID: {selectedMerchant.id}</span>
                     {selectedMerchant.chainId && (
-                      <span className="ml-2">• Chain: <code className="font-mono text-amber-600">{selectedMerchant.chainId}</code></span>
+                      <span>• Chain: <code className="font-mono text-amber-600">{selectedMerchant.chainId}</code></span>
                     )}
+                    <span>•</span>
+                    {(() => {
+                      const r = getMerchantRealRating(selectedMerchant);
+                      return r.hasRatings ? (
+                        <span className="inline-flex items-center gap-1 font-bold text-gray-700 dark:text-zinc-200 tabular-nums">
+                          <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
+                          <span>{r.avg} ({r.count})</span>
+                        </span>
+                      ) : (
+                        <span>No ratings yet</span>
+                      );
+                    })()}
                   </p>
                 </div>
               </div>
@@ -6708,11 +6807,42 @@ export const Merchants: React.FC = () => {
                                         }
                                         return null;
                                       })()}
+                                      {/* Price drop chip */}
+                                      {(() => {
+                                        const drop = getActivePriceDrop(item);
+                                        if (!drop) return null;
+                                        return (
+                                          <span
+                                            className="inline-flex items-center gap-1 text-[10px] font-extrabold px-1.5 py-0.5 rounded-md bg-rose-100 text-rose-800 dark:bg-rose-950/80 dark:text-rose-300 border border-rose-200 dark:border-rose-800 tabular-nums"
+                                            title={`Sale active: ₱${drop.salePrice.toFixed(2)} (-${drop.discountPercent}%)`}
+                                          >
+                                            <span>Price drop</span>
+                                            <span>-{drop.discountPercent}%</span>
+                                          </span>
+                                        );
+                                      })()}
                                     </div>
                                   </div>
-                                  <span className="font-extrabold text-amber-600 shrink-0">
-                                    ₱{Number(item.price).toFixed(2)}
-                                  </span>
+                                  {(() => {
+                                    const drop = getActivePriceDrop(item);
+                                    if (drop) {
+                                      return (
+                                        <div className="text-right shrink-0 tabular-nums">
+                                          <span className="block font-extrabold text-rose-600 dark:text-rose-400">
+                                            ₱{drop.salePrice.toFixed(2)}
+                                          </span>
+                                          <span className="block text-[10px] text-gray-400 line-through">
+                                            ₱{Number(item.price).toFixed(2)}
+                                          </span>
+                                        </div>
+                                      );
+                                    }
+                                    return (
+                                      <span className="font-extrabold text-amber-600 shrink-0 tabular-nums">
+                                        ₱{Number(item.price).toFixed(2)}
+                                      </span>
+                                    );
+                                  })()}
                                 </div>
                                 {item.description && (
                                   <p className="text-[11px] text-gray-400 line-clamp-1 mt-1">

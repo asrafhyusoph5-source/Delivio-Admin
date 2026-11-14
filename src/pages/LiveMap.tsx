@@ -225,7 +225,8 @@ export const LiveMap: React.FC = () => {
             lng: Number(dt.lng) || 0,
             logoUrl: dt.logoUrl,
             commissionRate: dt.commissionRate ?? 15,
-            rating: dt.rating || 5
+            ratingSum: Number(dt.ratingSum) || 0,
+            ratingCount: Number(dt.ratingCount) || 0
           });
         });
         setMerchants(list);

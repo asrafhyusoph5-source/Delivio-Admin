@@ -109,6 +109,14 @@ export const Settings: React.FC = () => {
   const [removingBanners, setRemovingBanners] = useState(false);
   const [removeBannersResult, setRemoveBannersResult] = useState<string | null>(null);
 
+  // Rating cleanup & rebuild state
+  const [clearFakeRatingsModalOpen, setClearFakeRatingsModalOpen] = useState(false);
+  const [clearingFakeRatings, setClearingFakeRatings] = useState(false);
+  const [clearFakeRatingsResult, setClearFakeRatingsResult] = useState<string | null>(null);
+  const [rebuildRatingsModalOpen, setRebuildRatingsModalOpen] = useState(false);
+  const [rebuildingRatings, setRebuildingRatings] = useState(false);
+  const [rebuildRatingsResult, setRebuildRatingsResult] = useState<string | null>(null);
+
   // Platform Service Switches
   const [platformServices, setPlatformServices] = useState<Record<OrderServiceType, boolean>>({
     food: true,
@@ -426,7 +434,8 @@ export const Settings: React.FC = () => {
               poolMaxPickupGapKm: Number(dt.poolMaxPickupGapKm ?? 1.5),
               poolMaxDropoffGapKm: Number(dt.poolMaxDropoffGapKm ?? 3),
               priorityHeadStartSeconds: Number(dt.priorityHeadStartSeconds ?? 10),
-              priorityMaxBatch: Math.max(1, Number(dt.priorityMaxBatch ?? 4))
+              priorityMaxBatch: Math.max(1, Number(dt.priorityMaxBatch ?? 4)),
+              martBatching: Boolean(dt.martBatching)
             });
             setDispatchExists(true);
           } else {
@@ -574,6 +583,7 @@ export const Settings: React.FC = () => {
         poolMaxDropoffGapKm: Math.max(0.1, Number(dispatchSettings.poolMaxDropoffGapKm) || 3),
         priorityHeadStartSeconds: Math.max(0, Number(dispatchSettings.priorityHeadStartSeconds ?? 10)),
         priorityMaxBatch: Math.max(1, Number(dispatchSettings.priorityMaxBatch ?? 4)),
+        martBatching: Boolean(dispatchSettings.martBatching),
         updatedAt: Timestamp.now(),
         updatedBy: adminProfile?.uid || 'admin'
       };
@@ -603,7 +613,7 @@ export const Settings: React.FC = () => {
         action: 'UPDATE_DISPATCH_SETTINGS',
         entityType: 'settings',
         entityId: 'dispatch',
-        details: `Updated dispatch settings. Default: ${payload.defaultOption}, Radius: ${payload.searchRadiusKm}km, Wave: ${payload.waveSeconds}s, Scheduled Release Lead: ${leadMinutes}m, Priority Head Start: ${payload.priorityHeadStartSeconds}s, Priority Max Batch: ${payload.priorityMaxBatch}`
+        details: `Updated dispatch settings. Default: ${payload.defaultOption}, Radius: ${payload.searchRadiusKm}km, Wave: ${payload.waveSeconds}s, Scheduled Release Lead: ${leadMinutes}m, Priority Head Start: ${payload.priorityHeadStartSeconds}s, Priority Max Batch: ${payload.priorityMaxBatch}, Mart Batching: ${payload.martBatching ? 'ON' : 'OFF'}`
       });
 
       showSuccess('Dispatch settings and scheduled orders release rules saved successfully.');
@@ -669,6 +679,135 @@ export const Settings: React.FC = () => {
       showError(err);
     } finally {
       setRemovingBanners(false);
+    }
+  };
+
+  // Maintenance: Clear fake ratings on all merchants (sets ratingSum=0, ratingCount=0, deletes legacy rating/reviewCount fields)
+  const handleClearFakeRatings = async () => {
+    try {
+      setClearingFakeRatings(true);
+      const legacyRatingFields = [
+        'rating',
+        'ratingAvg',
+        'avgRating',
+        'averageRating',
+        'reviewCount',
+        'reviewsCount',
+        'totalReviews',
+        'ratingsCount',
+        'ratingTotal',
+        'reviewTotal',
+        'stars'
+      ] as const;
+
+      const merchSnap = await getDocs(collection(db, 'merchants'));
+      const merchantIds: string[] = [];
+      merchSnap.forEach((d) => merchantIds.push(d.id));
+
+      const CHUNK_SIZE = 400;
+      const now = Timestamp.now();
+      for (let i = 0; i < merchantIds.length; i += CHUNK_SIZE) {
+        const slice = merchantIds.slice(i, i + CHUNK_SIZE);
+        const batch = writeBatch(db);
+        slice.forEach((id) => {
+          const payload: Record<string, any> = {
+            ratingSum: 0,
+            ratingCount: 0,
+            updatedAt: now
+          };
+          legacyRatingFields.forEach((field) => {
+            payload[field] = deleteField();
+          });
+          batch.update(doc(db, 'merchants', id), payload);
+        });
+        await batch.commit();
+      }
+
+      const summaryMsg = `Cleared fake ratings on ${merchantIds.length} ${merchantIds.length === 1 ? 'shop' : 'shops'}`;
+      setClearFakeRatingsResult(summaryMsg);
+      setClearFakeRatingsModalOpen(false);
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'CLEAR_FAKE_MERCHANT_RATINGS',
+        entityType: 'merchant',
+        entityId: 'all',
+        details: `${summaryMsg} (set ratingSum=0, ratingCount=0; deleted legacy fields: ${legacyRatingFields.join(', ')})`
+      });
+
+      showSuccess(summaryMsg);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setClearingFakeRatings(false);
+    }
+  };
+
+  // Maintenance: Rebuild ratings from real customer reviews (reviews collection: merchantId + ratingMerchant)
+  const handleRebuildRatingsFromReviews = async () => {
+    try {
+      setRebuildingRatings(true);
+      const [merchSnap, reviewsSnap] = await Promise.all([
+        getDocs(collection(db, 'merchants')),
+        getDocs(collection(db, 'reviews'))
+      ]);
+
+      const totalsMap = new Map<string, { sum: number; count: number }>();
+      let validReviewCount = 0;
+
+      reviewsSnap.forEach((d) => {
+        const dt = d.data() || {};
+        const mId = typeof dt.merchantId === 'string' ? dt.merchantId.trim() : '';
+        const score = Number(dt.ratingMerchant);
+        if (mId && Number.isFinite(score) && score > 0) {
+          const prev = totalsMap.get(mId) || { sum: 0, count: 0 };
+          prev.sum += score;
+          prev.count += 1;
+          totalsMap.set(mId, prev);
+          validReviewCount++;
+        }
+      });
+
+      const merchantIds: string[] = [];
+      merchSnap.forEach((d) => merchantIds.push(d.id));
+
+      const CHUNK_SIZE = 400;
+      const now = Timestamp.now();
+      for (let i = 0; i < merchantIds.length; i += CHUNK_SIZE) {
+        const slice = merchantIds.slice(i, i + CHUNK_SIZE);
+        const batch = writeBatch(db);
+        slice.forEach((id) => {
+          const stats = totalsMap.get(id) || { sum: 0, count: 0 };
+          batch.update(doc(db, 'merchants', id), {
+            ratingSum: Number(stats.sum.toFixed(2)),
+            ratingCount: stats.count,
+            updatedAt: now
+          });
+        });
+        await batch.commit();
+      }
+
+      const summaryMsg = `Rebuilt ratings for ${merchantIds.length} ${merchantIds.length === 1 ? 'shop' : 'shops'} from ${validReviewCount} customer ${validReviewCount === 1 ? 'review' : 'reviews'}`;
+      setRebuildRatingsResult(summaryMsg);
+      setRebuildRatingsModalOpen(false);
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'REBUILD_MERCHANT_RATINGS_FROM_REVIEWS',
+        entityType: 'merchant',
+        entityId: 'all',
+        details: summaryMsg
+      });
+
+      showSuccess(summaryMsg);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setRebuildingRatings(false);
     }
   };
 
@@ -1911,6 +2050,99 @@ export const Settings: React.FC = () => {
           </p>
         </div>
 
+        {/* Delivio Mart (convenience) booking */}
+        <div className="p-4 rounded-3xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h4 className="text-xs font-black uppercase tracking-wider text-gray-900 dark:text-white">
+                Delivio Mart (convenience) booking
+              </h4>
+              <p className="text-[11px] text-gray-500 dark:text-zinc-400 mt-0.5">
+                Controls whether riders can combine convenience store orders into double bookings.
+              </p>
+            </div>
+            <span className="text-[10px] font-mono text-gray-500 dark:text-zinc-400">
+              settings/dispatch.martBatching
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() =>
+                setDispatchSettings((prev) => ({
+                  ...prev,
+                  martBatching: false
+                }))
+              }
+              className={`p-3.5 rounded-2xl border text-left transition-all flex items-start gap-3 ${
+                !dispatchSettings.martBatching
+                  ? 'border-amber-400 bg-amber-50/70 dark:bg-amber-950/30 ring-1 ring-amber-400'
+                  : 'border-gray-200 dark:border-zinc-800 bg-gray-50/60 dark:bg-zinc-950 hover:border-gray-300 dark:hover:border-zinc-700'
+              }`}
+            >
+              <span
+                className={`w-4 h-4 rounded-full border-2 mt-0.5 flex items-center justify-center shrink-0 ${
+                  !dispatchSettings.martBatching
+                    ? 'border-amber-500 bg-amber-500'
+                    : 'border-gray-300 dark:border-zinc-600'
+                }`}
+              >
+                {!dispatchSettings.martBatching && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-white" />
+                )}
+              </span>
+              <div>
+                <span className="text-xs font-extrabold text-gray-900 dark:text-white block">
+                  Single booking only
+                </span>
+                <span className="text-[11px] text-gray-500 dark:text-zinc-400 block mt-0.5">
+                  Default · Riders handle one Mart order at a time
+                </span>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                setDispatchSettings((prev) => ({
+                  ...prev,
+                  martBatching: true
+                }))
+              }
+              className={`p-3.5 rounded-2xl border text-left transition-all flex items-start gap-3 ${
+                dispatchSettings.martBatching
+                  ? 'border-amber-400 bg-amber-50/70 dark:bg-amber-950/30 ring-1 ring-amber-400'
+                  : 'border-gray-200 dark:border-zinc-800 bg-gray-50/60 dark:bg-zinc-950 hover:border-gray-300 dark:hover:border-zinc-700'
+              }`}
+            >
+              <span
+                className={`w-4 h-4 rounded-full border-2 mt-0.5 flex items-center justify-center shrink-0 ${
+                  dispatchSettings.martBatching
+                    ? 'border-amber-500 bg-amber-500'
+                    : 'border-gray-300 dark:border-zinc-600'
+                }`}
+              >
+                {dispatchSettings.martBatching && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-white" />
+                )}
+              </span>
+              <div>
+                <span className="text-xs font-extrabold text-gray-900 dark:text-white block">
+                  Allow double booking (batching)
+                </span>
+                <span className="text-[11px] text-gray-500 dark:text-zinc-400 block mt-0.5">
+                  Mart orders may be batched with nearby bookings
+                </span>
+              </div>
+            </button>
+          </div>
+
+          <p className="text-[11px] text-gray-600 dark:text-zinc-400 leading-relaxed bg-gray-50 dark:bg-zinc-950 p-3 rounded-xl border border-gray-200 dark:border-zinc-800">
+            Single booking means a rider carries only one Delivio Mart order at a time, and Mart orders are never combined with other orders.
+          </p>
+        </div>
+
         {/* Scheduled Orders Release Configuration */}
         <div className="p-4 rounded-3xl bg-purple-50/50 dark:bg-purple-950/20 border border-purple-300 dark:border-purple-800/60 space-y-3">
           <div className="flex items-center justify-between">
@@ -2675,6 +2907,82 @@ export const Settings: React.FC = () => {
         )}
       </div>
 
+      {/* Rating Clean-Up Card */}
+      <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-5">
+        <div className="flex items-start gap-3">
+          <div className="p-2.5 rounded-2xl bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 shrink-0">
+            <Star className="w-5 h-5" />
+          </div>
+          <div>
+            <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+              Merchant Ratings Maintenance
+            </h3>
+            <p className="text-xs text-gray-600 dark:text-zinc-400 mt-0.5 max-w-2xl">
+              Enforce real ratings stored as <code className="font-mono text-amber-700 dark:text-amber-300">ratingSum</code> and <code className="font-mono text-amber-700 dark:text-amber-300">ratingCount</code> on each merchant document.
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-gray-50/70 dark:bg-zinc-950 flex flex-col justify-between gap-3">
+            <div>
+              <h4 className="text-xs font-extrabold text-gray-900 dark:text-white">
+                Clear fake ratings
+              </h4>
+              <p className="text-[11px] text-gray-600 dark:text-zinc-400 mt-1 leading-relaxed">
+                Sets <code className="font-mono">ratingSum = 0</code> and <code className="font-mono">ratingCount = 0</code> on every shop and deletes legacy fields (<code className="font-mono">rating</code>, <code className="font-mono">ratingAvg</code>, <code className="font-mono">reviewCount</code>, <code className="font-mono">reviewsCount</code>, <code className="font-mono">totalReviews</code>).
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setClearFakeRatingsModalOpen(true)}
+              disabled={clearingFakeRatings || rebuildingRatings}
+              className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center justify-center gap-2 self-start disabled:opacity-50"
+            >
+              {clearingFakeRatings ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+              <span>Clear fake ratings</span>
+            </button>
+          </div>
+
+          <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-gray-50/70 dark:bg-zinc-950 flex flex-col justify-between gap-3">
+            <div>
+              <h4 className="text-xs font-extrabold text-gray-900 dark:text-white">
+                Rebuild ratings from reviews
+              </h4>
+              <p className="text-[11px] text-gray-600 dark:text-zinc-400 mt-1 leading-relaxed">
+                Reads the <code className="font-mono">reviews</code> collection (<code className="font-mono">merchantId</code> and <code className="font-mono">ratingMerchant</code>) and recomputes <code className="font-mono">ratingSum</code> and <code className="font-mono">ratingCount</code> for every merchant.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setRebuildRatingsModalOpen(true)}
+              disabled={clearingFakeRatings || rebuildingRatings}
+              className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-extrabold flex items-center justify-center gap-2 self-start disabled:opacity-50"
+            >
+              {rebuildingRatings ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+              <span>Rebuild ratings from reviews</span>
+            </button>
+          </div>
+        </div>
+
+        {(clearFakeRatingsResult || rebuildRatingsResult) && (
+          <div className="space-y-2">
+            {clearFakeRatingsResult && (
+              <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900 text-xs font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>{clearFakeRatingsResult}</span>
+              </div>
+            )}
+            {rebuildRatingsResult && (
+              <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900 text-xs font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>{rebuildRatingsResult}</span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* Migration to Drivers & Taxi Panel */}
       <div className="bg-gradient-to-r from-amber-500/10 via-amber-400/5 to-transparent dark:from-amber-950/20 dark:via-zinc-900 border border-amber-200 dark:border-amber-900/40 rounded-3xl p-6 shadow-xs space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -3028,6 +3336,34 @@ export const Settings: React.FC = () => {
           confirmLabel={removingBanners ? "Removing..." : "Remove Old Store Banners"}
           reasonRequired={false}
           isDestructive={true}
+        />
+      )}
+
+      {/* Confirmation Modal for Clearing Fake Ratings */}
+      {clearFakeRatingsModalOpen && (
+        <ConfirmationModal
+          isOpen={clearFakeRatingsModalOpen}
+          onClose={() => setClearFakeRatingsModalOpen(false)}
+          onConfirm={handleClearFakeRatings}
+          title="Clear fake ratings on all shops?"
+          message="This sets ratingSum = 0 and ratingCount = 0 on every merchant and removes legacy fields (rating, ratingAvg, reviewCount, reviewsCount, totalReviews, etc.). This action will be recorded in auditLogs."
+          confirmLabel={clearingFakeRatings ? "Clearing..." : "Clear Fake Ratings"}
+          reasonRequired={false}
+          isDestructive={true}
+        />
+      )}
+
+      {/* Confirmation Modal for Rebuilding Ratings from Reviews */}
+      {rebuildRatingsModalOpen && (
+        <ConfirmationModal
+          isOpen={rebuildRatingsModalOpen}
+          onClose={() => setRebuildRatingsModalOpen(false)}
+          onConfirm={handleRebuildRatingsFromReviews}
+          title="Rebuild merchant ratings from customer reviews?"
+          message="This scans all customer reviews (merchantId and ratingMerchant) and updates ratingSum and ratingCount for every merchant document. This action will be recorded in auditLogs."
+          confirmLabel={rebuildingRatings ? "Rebuilding..." : "Rebuild Ratings"}
+          reasonRequired={false}
+          isDestructive={false}
         />
       )}
     </div>
