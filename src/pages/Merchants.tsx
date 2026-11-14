@@ -17,7 +17,8 @@ import {
   Timestamp,
   writeBatch,
   runTransaction,
-  deleteField
+  deleteField,
+  onSnapshot
 } from '../firebase';
 import { useCity } from '../context/CityContext';
 import { useAuth } from '../context/AuthContext';
@@ -53,12 +54,17 @@ import type {
   MainCategoryItem,
   City
 } from '../types';
-import { FOOD_CATEGORIES, CONVENIENCE_CATEGORIES } from '../constants';
 import {
+  DEFAULT_FOOD_CATEGORIES,
+  DEFAULT_CONVENIENCE_CATEGORIES,
   getDefaultMainCategoriesDoc,
-  loadOrInitMainCategories,
+  normalizeCategoryList,
   categoryMatchesTag,
-  resolveMerchantActiveCategories
+  resolveMerchantActiveCategories,
+  getActiveMainCategoriesForType,
+  resolveItemMainCategory,
+  normalizeCategoryMatchKey,
+  isOthersCategory
 } from '../utils/mainCategories';
 import { formatOrderNumber } from '../utils/orderNumber';
 import {
@@ -1149,14 +1155,32 @@ export const Merchants: React.FC = () => {
       }
     };
     fetchPlatformSettings();
-    loadOrInitMainCategories(adminProfile?.name || 'Admin', false)
-      .then(({ data }) => setMainCategories(data))
-      .catch((err) => console.warn('Could not load mainCategories:', err));
+    const unsubMainCategories = onSnapshot(
+      doc(db, 'settings', 'mainCategories'),
+      (snap) => {
+        if (snap.exists()) {
+          const raw = snap.data() || {};
+          setMainCategories({
+            food: normalizeCategoryList(raw.food || [], DEFAULT_FOOD_CATEGORIES),
+            convenience: normalizeCategoryList(raw.convenience || [], DEFAULT_CONVENIENCE_CATEGORIES),
+            updatedAt: raw.updatedAt,
+            updatedBy: raw.updatedBy
+          });
+        } else {
+          setMainCategories(getDefaultMainCategoriesDoc());
+        }
+      },
+      (err) => console.warn('Could not subscribe to mainCategories:', err)
+    );
+    return () => {
+      unsubMainCategories();
+    };
   }, []);
 
   // Sync selected merchant fields when selected
   useEffect(() => {
     if (!selectedMerchant) return;
+    setActiveCategoryTab('all');
     setShopName(selectedMerchant.name || '');
     setOwnerName(selectedMerchant.ownerName || '');
     setPhone(selectedMerchant.phone || '');
@@ -2192,6 +2216,7 @@ export const Merchants: React.FC = () => {
         const hasSetsVal = Boolean(dt.hasSets || (dt.sets && dt.sets.length > 0));
         itemsList.push({
           id: d.id,
+          category: dt.category,
           categoryId: dt.categoryId,
           subcategoryId: dt.subcategoryId || null,
           subcategoryName: dt.subcategoryName || null,
@@ -2967,7 +2992,7 @@ export const Merchants: React.FC = () => {
 
       const availableItems = currentItems.filter((i) => i.available !== false);
       const tags = Array.from(
-        new Set(availableItems.map((i) => i.categoryId).filter(Boolean))
+        new Set(availableItems.map((i) => i.category || i.categoryId).filter(Boolean))
       ) as string[];
 
       if (tags.length === 0) return existingTags;
@@ -3023,21 +3048,21 @@ export const Merchants: React.FC = () => {
       );
       setTypeWarningModalOpen(false);
 
-      // Check items outside new type's allowed category list
-      const targetCategoryList =
-        newType === 'food' ? FOOD_CATEGORIES : CONVENIENCE_CATEGORIES;
+      // Check items outside new type's active category list
+      const targetActiveCats = getActiveMainCategoriesForType(mainCategories, newType);
       const invalidItems = menuItems.filter(
-        (item) => !item.categoryId || !(targetCategoryList as readonly string[]).includes(item.categoryId)
+        (item) => !resolveItemMainCategory(item, targetActiveCats).matched
       );
 
       if (invalidItems.length > 0) {
         setItemsToReview(invalidItems);
         const initialMap: Record<string, string> = {};
+        const fallbackCatId = targetActiveCats[0]?.id || 'others';
         invalidItems.forEach((it) => {
-          initialMap[it.id] = targetCategoryList[0];
+          initialMap[it.id] = fallbackCatId;
         });
         setReviewAssignments(initialMap);
-        setReviewBulkCategory(targetCategoryList[0]);
+        setReviewBulkCategory(fallbackCatId);
         setReviewCategoriesModalOpen(true);
       } else {
         await recomputeMerchantCuisineTags(selectedMerchant.id, menuItems);
@@ -3054,16 +3079,23 @@ export const Merchants: React.FC = () => {
     try {
       setSavingCategoryReview(true);
       const batch = writeBatch(db);
+      const activeCats = getActiveMainCategoriesForType(mainCategories, selectedMerchant.type);
 
       const updatedItems = menuItems.map((item) => {
         if (reviewAssignments[item.id]) {
           const itemDoc = doc(db, 'merchants', selectedMerchant.id, 'items', item.id);
-          const newCategory = reviewAssignments[item.id];
+          const assignedVal = reviewAssignments[item.id];
+          const targetCat =
+            activeCats.find((c) => c.id === assignedVal || normalizeCategoryMatchKey(c.name) === normalizeCategoryMatchKey(assignedVal)) ||
+            activeCats[activeCats.length - 1];
+          const newCatId = targetCat ? targetCat.id : assignedVal;
+          const newCatName = targetCat ? targetCat.name : assignedVal;
           batch.update(itemDoc, {
-            categoryId: newCategory,
+            category: newCatName,
+            categoryId: newCatId,
             updatedAt: Timestamp.now()
           });
-          return { ...item, categoryId: newCategory };
+          return { ...item, category: newCatName, categoryId: newCatId };
         }
         return item;
       });
@@ -3088,15 +3120,22 @@ export const Merchants: React.FC = () => {
     try {
       setBulkReassigning(true);
       const batch = writeBatch(db);
+      const activeCats = getActiveMainCategoriesForType(mainCategories, selectedMerchant.type);
+      const targetCat =
+        activeCats.find((c) => c.id === bulkReassignTarget || normalizeCategoryMatchKey(c.name) === normalizeCategoryMatchKey(bulkReassignTarget)) ||
+        activeCats[activeCats.length - 1];
+      const newCatId = targetCat ? targetCat.id : bulkReassignTarget;
+      const newCatName = targetCat ? targetCat.name : bulkReassignTarget;
 
       const updatedItems = menuItems.map((item) => {
         if (selectedNeedingCategoryIds.includes(item.id)) {
           const itemDoc = doc(db, 'merchants', selectedMerchant.id, 'items', item.id);
           batch.update(itemDoc, {
-            categoryId: bulkReassignTarget,
+            category: newCatName,
+            categoryId: newCatId,
             updatedAt: Timestamp.now()
           });
-          return { ...item, categoryId: bulkReassignTarget };
+          return { ...item, category: newCatName, categoryId: newCatId };
         }
         return item;
       });
@@ -3105,7 +3144,7 @@ export const Merchants: React.FC = () => {
       setMenuItems(updatedItems);
       await recomputeMerchantCuisineTags(selectedMerchant.id, updatedItems);
 
-      showSuccess(`Reassigned ${selectedNeedingCategoryIds.length} item(s) to ${bulkReassignTarget}.`);
+      showSuccess(`Reassigned ${selectedNeedingCategoryIds.length} item(s) to ${newCatName}.`);
       setSelectedNeedingCategoryIds([]);
     } catch (err: any) {
       showError(err);
@@ -3617,6 +3656,17 @@ export const Merchants: React.FC = () => {
           }
         : null;
 
+      const shopActiveCats = getActiveMainCategoriesForType(mainCategories, selectedMerchant.type);
+      const selectedCat =
+        shopActiveCats.find((c) => c.id === itemCategory) ||
+        shopActiveCats.find(
+          (c) => normalizeCategoryMatchKey(c.name) === normalizeCategoryMatchKey(itemCategory)
+        ) ||
+        shopActiveCats.find((c) => isOthersCategory(c)) ||
+        shopActiveCats[shopActiveCats.length - 1];
+      const savedCategoryName = selectedCat ? selectedCat.name : 'Others';
+      const savedCategoryId = selectedCat ? selectedCat.id : 'others';
+
       if (editingItem) {
         // Edit - never drop menuIds, sets, subcategoryId, customName, itemSize, availability,
         // variationsEnabled, variations, variants, price, priceMax, stockCount, inStock, or sale fields
@@ -3649,7 +3699,8 @@ export const Merchants: React.FC = () => {
           price: derivedPrice,
           description: itemDesc.trim(),
           imageUrl: itemImageUrl.trim(),
-          categoryId: itemCategory,
+          category: savedCategoryName,
+          categoryId: savedCategoryId,
           subcategoryId: subcategoryIdVal,
           subcategoryName: subcategoryNameVal,
           customName: editingItem.customName ?? null,
@@ -3684,7 +3735,8 @@ export const Merchants: React.FC = () => {
                   : {}),
                 description: itemDesc.trim(),
                 imageUrl: itemImageUrl.trim(),
-                categoryId: itemCategory,
+                category: savedCategoryName,
+                categoryId: savedCategoryId,
                 subcategoryId: subcategoryIdVal,
                 subcategoryName: subcategoryNameVal,
                 customName: editingItem.customName ?? null,
@@ -3705,7 +3757,8 @@ export const Merchants: React.FC = () => {
           price: Number(itemPrice) || 0,
           description: itemDesc.trim(),
           imageUrl: itemImageUrl.trim(),
-          categoryId: itemCategory,
+          category: savedCategoryName,
+          categoryId: savedCategoryId,
           subcategoryId: subcategoryIdVal,
           subcategoryName: subcategoryNameVal,
           customName: null,
@@ -3723,7 +3776,8 @@ export const Merchants: React.FC = () => {
           price: Number(itemPrice) || 0,
           description: itemDesc.trim(),
           imageUrl: itemImageUrl.trim(),
-          categoryId: itemCategory,
+          category: savedCategoryName,
+          categoryId: savedCategoryId,
           subcategoryId: subcategoryIdVal,
           subcategoryName: subcategoryNameVal,
           customName: null,
@@ -6511,30 +6565,48 @@ export const Merchants: React.FC = () => {
 
               {/* TAB 4: MENU */}
               {activeTab === 'menu' && (() => {
-                const merchantAllowedCategories: readonly string[] =
-                  selectedMerchant.type === 'food' ? FOOD_CATEGORIES : CONVENIENCE_CATEGORIES;
+                const activeMenuCategories = getActiveMainCategoriesForType(
+                  mainCategories,
+                  selectedMerchant.type
+                );
+                const resolvedByItemId = new Map<
+                  string,
+                  { matched: boolean; category: MainCategoryItem; rawOldValue: string }
+                >();
+                menuItems.forEach((item) => {
+                  resolvedByItemId.set(
+                    item.id,
+                    resolveItemMainCategory(item, activeMenuCategories)
+                  );
+                });
+
                 const itemsNeedingCategory = menuItems.filter(
-                  (i) => !i.categoryId || !merchantAllowedCategories.includes(i.categoryId)
+                  (i) => !resolvedByItemId.get(i.id)?.matched
                 );
 
-                // Category counts
+                // Category counts (in App Designer order with Others last; unmatched items counted under Others)
                 const countsMap: Record<string, number> = {};
-                merchantAllowedCategories.forEach((c) => {
-                  countsMap[c] = 0;
+                activeMenuCategories.forEach((c) => {
+                  countsMap[c.id] = 0;
                 });
                 menuItems.forEach((i) => {
-                  if (i.categoryId && merchantAllowedCategories.includes(i.categoryId)) {
-                    countsMap[i.categoryId] = (countsMap[i.categoryId] || 0) + 1;
+                  const res = resolvedByItemId.get(i.id);
+                  if (res) {
+                    countsMap[res.category.id] = (countsMap[res.category.id] || 0) + 1;
                   }
                 });
+
+                const effectiveActiveTab =
+                  activeCategoryTab === 'all' ||
+                  activeMenuCategories.some((c) => c.id === activeCategoryTab)
+                    ? activeCategoryTab
+                    : 'all';
 
                 // Display items based on category tab filter
                 const displayedItems = menuItems.filter((item) => {
-                  if (activeCategoryTab === 'all') return true;
-                  if (activeCategoryTab === 'needing_category') {
-                    return !item.categoryId || !merchantAllowedCategories.includes(item.categoryId);
-                  }
-                  return item.categoryId === activeCategoryTab;
+                  if (effectiveActiveTab === 'all') return true;
+                  const res = resolvedByItemId.get(item.id);
+                  return res?.category.id === effectiveActiveTab;
                 });
 
                 return (
@@ -6755,7 +6827,7 @@ export const Merchants: React.FC = () => {
                               setItemPrice(0);
                               setItemDesc('');
                               setItemImageUrl('');
-                              setItemCategory(merchantAllowedCategories[0]);
+                              setItemCategory(activeMenuCategories[0]?.id || 'others');
                               setItemSubcategoryId(subcategories.length > 0 ? subcategories[0].id : '');
                               setItemAvailable(true);
                               setItemSets([]);
@@ -6776,12 +6848,12 @@ export const Merchants: React.FC = () => {
                         </div>
                       </div>
 
-                      {/* Category Chips with Counts */}
+                      {/* Category Chips with Counts (live from settings/mainCategories) */}
                       <div className="flex flex-wrap gap-1.5 p-2 rounded-xl bg-gray-50 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800">
                         <button
                           onClick={() => setActiveCategoryTab('all')}
                           className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
-                            activeCategoryTab === 'all'
+                            effectiveActiveTab === 'all'
                               ? 'bg-amber-400 text-black shadow-xs'
                               : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 hover:text-gray-900'
                           }`}
@@ -6789,57 +6861,43 @@ export const Merchants: React.FC = () => {
                           All ({menuItems.length})
                         </button>
 
-                        {merchantAllowedCategories.map((cat) => (
+                        {activeMenuCategories.map((cat) => (
                           <button
-                            key={cat}
-                            onClick={() => setActiveCategoryTab(cat)}
+                            key={cat.id}
+                            onClick={() => setActiveCategoryTab(cat.id)}
                             className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
-                              activeCategoryTab === cat
+                              effectiveActiveTab === cat.id
                                 ? 'bg-amber-400 text-black shadow-xs'
                                 : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 hover:text-gray-900'
                             }`}
                           >
-                            <span>{cat}</span>
+                            <span>{cat.name}</span>
                             <span
-                              className={`text-[10px] px-1.5 py-0.2 rounded-full ${
-                                activeCategoryTab === cat
+                              className={`text-[10px] px-1.5 py-0.2 rounded-full tabular-nums ${
+                                effectiveActiveTab === cat.id
                                   ? 'bg-black/20 text-black'
                                   : 'bg-gray-100 dark:bg-zinc-700 text-gray-500 dark:text-zinc-300'
                               }`}
                             >
-                              {countsMap[cat] || 0}
+                              {countsMap[cat.id] || 0}
                             </span>
                           </button>
                         ))}
-
-                        {itemsNeedingCategory.length > 0 && (
-                          <button
-                            onClick={() => setActiveCategoryTab('needing_category')}
-                            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
-                              activeCategoryTab === 'needing_category'
-                                ? 'bg-red-500 text-white shadow-xs'
-                                : 'bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800'
-                            }`}
-                          >
-                            <AlertTriangle className="w-3 h-3" />
-                            <span>Needs Category ({itemsNeedingCategory.length})</span>
-                          </button>
-                        )}
                       </div>
                     </div>
 
-                    {/* Items Needing a Category Alert & Bulk Reassign Box */}
+                    {/* Items with Unmatched Categories Alert & Bulk Reassign Box */}
                     {itemsNeedingCategory.length > 0 && (
                       <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 space-y-3">
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                           <div className="flex items-center gap-2">
                             <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
                             <h4 className="font-bold text-xs text-amber-900 dark:text-amber-200">
-                              Items needing a category ({itemsNeedingCategory.length} item{itemsNeedingCategory.length > 1 ? 's' : ''})
+                              Unmatched item categories ({itemsNeedingCategory.length} item{itemsNeedingCategory.length > 1 ? 's' : ''} shown as Others)
                             </h4>
                           </div>
                           <span className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
-                            Items without a valid {selectedMerchant.type} category will not properly group in mobile apps.
+                            Items without a matching active {selectedMerchant.type} category fall back to Others.
                           </span>
                         </div>
 
@@ -6866,10 +6924,10 @@ export const Merchants: React.FC = () => {
                               onChange={(e) => setBulkReassignTarget(e.target.value)}
                               className="w-full px-3 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
                             >
-                              <option value="">-- Choose Category to Reassign --</option>
-                              {merchantAllowedCategories.map((c) => (
-                                <option key={c} value={c}>
-                                  {c}
+                              <option value="">-- Choose Active Category --</option>
+                              {activeMenuCategories.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
                                 </option>
                               ))}
                             </select>
@@ -6893,6 +6951,7 @@ export const Merchants: React.FC = () => {
                         <div className="max-h-48 overflow-y-auto space-y-1 divide-y divide-amber-200/50 dark:divide-amber-900/40 text-xs">
                           {itemsNeedingCategory.map((item) => {
                             const isChecked = selectedNeedingCategoryIds.includes(item.id);
+                            const oldVal = resolvedByItemId.get(item.id)?.rawOldValue || 'None';
                             return (
                               <div
                                 key={item.id}
@@ -6915,8 +6974,8 @@ export const Merchants: React.FC = () => {
                                   <span className="font-semibold text-gray-900 dark:text-white">
                                     {item.name}
                                   </span>
-                                  <span className="text-[11px] text-gray-400">
-                                    (Current: {item.categoryId || 'None'})
+                                  <span className="text-[11px] text-amber-800 dark:text-amber-300">
+                                    (Current: {oldVal})
                                   </span>
                                 </div>
                                 <span className="font-mono font-bold text-amber-700 dark:text-amber-400">
@@ -7011,7 +7070,9 @@ export const Merchants: React.FC = () => {
                               </div>
 
                               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                {group.items.map((item) => (
+                                {group.items.map((item) => {
+                                  const catRes = resolvedByItemId.get(item.id);
+                                  return (
                           <div
                             key={item.id}
                             className="p-3.5 rounded-xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 flex gap-3 text-xs shadow-xs"
@@ -7038,12 +7099,14 @@ export const Merchants: React.FC = () => {
                                     <div className="flex items-center gap-1 flex-wrap mt-0.5">
                                       <span
                                         className={`inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-md ${
-                                          item.categoryId && merchantAllowedCategories.includes(item.categoryId)
+                                          catRes?.matched
                                             ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                                            : 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300'
+                                            : 'bg-amber-100 text-amber-900 border border-amber-300 dark:bg-amber-950/80 dark:text-amber-200 dark:border-amber-700'
                                         }`}
                                       >
-                                        {item.categoryId || 'No Category'}
+                                        {catRes?.matched
+                                          ? catRes.category.name
+                                          : `Others (was: ${catRes?.rawOldValue || 'None'})`}
                                       </span>
                                       {item.subcategoryName && item.subcategoryName !== 'Other' && (
                                         <span className="inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
@@ -7246,7 +7309,12 @@ export const Merchants: React.FC = () => {
                                       setItemPrice(item.price);
                                       setItemDesc(item.description || '');
                                       setItemImageUrl(item.imageUrl || '');
-                                      setItemCategory(item.categoryId || merchantAllowedCategories[0]);
+                                      const resolvedForEdit = resolvedByItemId.get(item.id);
+                                      setItemCategory(
+                                        resolvedForEdit?.category.id ||
+                                          activeMenuCategories[0]?.id ||
+                                          'others'
+                                      );
                                       setItemSubcategoryId(
                                         item.subcategoryId ||
                                           (item.subcategoryName === 'Other' ? 'other' : '')
@@ -7327,7 +7395,8 @@ export const Merchants: React.FC = () => {
                               </div>
                             </div>
                           </div>
-                        ))}
+                                  );
+                                })}
                       </div>
                     </div>
                   ))}
@@ -8096,21 +8165,37 @@ export const Merchants: React.FC = () => {
                   <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
                     Category ({selectedMerchant.type === 'food' ? 'Food & Restaurant' : 'Convenience'}) <span className="text-red-500">*</span>
                   </label>
-                  <select
-                    value={itemCategory}
-                    onChange={(e) => setItemCategory(e.target.value)}
-                    required
-                    className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium"
-                  >
-                    <option value="">-- Select Category --</option>
-                    {(selectedMerchant.type === 'food' ? FOOD_CATEGORIES : CONVENIENCE_CATEGORIES).map(
-                      (cat) => (
-                        <option key={cat} value={cat}>
-                          {cat}
-                        </option>
-                      )
-                    )}
-                  </select>
+                  {(() => {
+                    const modalActiveCategories = getActiveMainCategoriesForType(
+                      mainCategories,
+                      selectedMerchant.type
+                    );
+                    const editingCatResolution = editingItem
+                      ? resolveItemMainCategory(editingItem, modalActiveCategories)
+                      : null;
+                    return (
+                      <>
+                        <select
+                          value={itemCategory}
+                          onChange={(e) => setItemCategory(e.target.value)}
+                          required
+                          className="w-full px-3.5 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white font-medium"
+                        >
+                          <option value="">-- Select Category --</option>
+                          {modalActiveCategories.map((cat) => (
+                            <option key={cat.id} value={cat.id}>
+                              {cat.name}
+                            </option>
+                          ))}
+                        </select>
+                        {editingCatResolution && !editingCatResolution.matched && (
+                          <p className="text-[11px] font-semibold text-amber-700 dark:text-amber-400 mt-1">
+                            Unmatched category &ldquo;{editingCatResolution.rawOldValue || 'None'}&rdquo; is shown as Others. Pick a category above or save as Others.
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -9232,66 +9317,76 @@ export const Merchants: React.FC = () => {
             </div>
 
             {/* Bulk tool bar */}
-            <div className="p-4 bg-gray-50 dark:bg-zinc-850 border-b border-gray-100 dark:border-zinc-800 flex items-center gap-2 text-xs">
-              <span className="font-bold text-gray-600 dark:text-zinc-400">Bulk Assign All:</span>
-              <select
-                value={reviewBulkCategory}
-                onChange={(e) => setReviewBulkCategory(e.target.value)}
-                className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
-              >
-                {(selectedMerchant.type === 'food' ? FOOD_CATEGORIES : CONVENIENCE_CATEGORIES).map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => {
-                  if (!reviewBulkCategory) return;
-                  const updated: Record<string, string> = {};
-                  itemsToReview.forEach((it) => {
-                    updated[it.id] = reviewBulkCategory;
-                  });
-                  setReviewAssignments(updated);
-                }}
-                className="px-3 py-1.5 rounded-lg bg-gray-200 dark:bg-zinc-700 font-bold hover:bg-gray-300 text-gray-800 dark:text-zinc-200"
-              >
-                Apply to All Items
-              </button>
-            </div>
-
-            {/* Item list */}
-            <div className="flex-1 overflow-y-auto p-5 space-y-3">
-              {itemsToReview.map((item) => (
-                <div
-                  key={item.id}
-                  className="p-3 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50/50 dark:bg-zinc-800/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
-                >
-                  <div>
-                    <div className="font-bold text-gray-900 dark:text-white">{item.name}</div>
-                    <div className="text-[11px] text-gray-400">
-                      Current / Previous: <span className="text-red-500 font-medium">{item.categoryId || 'None'}</span>
-                    </div>
-                  </div>
-
-                  <div className="w-full sm:w-64">
-                    <label className="block text-[10px] uppercase font-bold text-gray-400 mb-0.5">
-                      New Category
-                    </label>
+            {(() => {
+              const reviewActiveCategories = getActiveMainCategoriesForType(
+                mainCategories,
+                selectedMerchant.type
+              );
+              return (
+                <>
+                  <div className="p-4 bg-gray-50 dark:bg-zinc-850 border-b border-gray-100 dark:border-zinc-800 flex items-center gap-2 text-xs">
+                    <span className="font-bold text-gray-600 dark:text-zinc-400">Bulk Assign All:</span>
                     <select
-                      value={reviewAssignments[item.id] || ''}
-                      onChange={(e) =>
-                        setReviewAssignments((prev) => ({ ...prev, [item.id]: e.target.value }))
-                      }
-                      className="w-full px-3 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                      value={reviewBulkCategory}
+                      onChange={(e) => setReviewBulkCategory(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
                     >
-                      {(selectedMerchant.type === 'food' ? FOOD_CATEGORIES : CONVENIENCE_CATEGORIES).map((c) => (
-                        <option key={c} value={c}>{c}</option>
+                      {reviewActiveCategories.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
                       ))}
                     </select>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!reviewBulkCategory) return;
+                        const updated: Record<string, string> = {};
+                        itemsToReview.forEach((it) => {
+                          updated[it.id] = reviewBulkCategory;
+                        });
+                        setReviewAssignments(updated);
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-gray-200 dark:bg-zinc-700 font-bold hover:bg-gray-300 text-gray-800 dark:text-zinc-200"
+                    >
+                      Apply to All Items
+                    </button>
                   </div>
-                </div>
-              ))}
-            </div>
+
+                  {/* Item list */}
+                  <div className="flex-1 overflow-y-auto p-5 space-y-3">
+                    {itemsToReview.map((item) => (
+                      <div
+                        key={item.id}
+                        className="p-3 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50/50 dark:bg-zinc-800/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                      >
+                        <div>
+                          <div className="font-bold text-gray-900 dark:text-white">{item.name}</div>
+                          <div className="text-[11px] text-gray-400">
+                            Current / Previous: <span className="text-red-500 font-medium">{item.category || item.categoryId || 'None'}</span>
+                          </div>
+                        </div>
+
+                        <div className="w-full sm:w-64">
+                          <label className="block text-[10px] uppercase font-bold text-gray-400 mb-0.5">
+                            New Category
+                          </label>
+                          <select
+                            value={reviewAssignments[item.id] || ''}
+                            onChange={(e) =>
+                              setReviewAssignments((prev) => ({ ...prev, [item.id]: e.target.value }))
+                            }
+                            className="w-full px-3 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                          >
+                            {reviewActiveCategories.map((c) => (
+                              <option key={c.id} value={c.id}>{c.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              );
+            })()}
 
             {/* Footer */}
             <div className="p-4 border-t border-gray-100 dark:border-zinc-800 flex justify-end gap-2 bg-gray-50 dark:bg-zinc-850">
@@ -10035,87 +10130,115 @@ export const Merchants: React.FC = () => {
                     className="w-full pl-9 pr-3 py-1.5 text-xs rounded-xl border border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
                   />
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const filtered = menuItems
-                        .filter((i) => {
-                          const matchCat = pickerCategoryFilter === 'all' || i.categoryId === pickerCategoryFilter;
-                          const matchQ =
-                            !pickerSearchQuery.trim() ||
-                            i.name.toLowerCase().includes(pickerSearchQuery.toLowerCase());
-                          return matchCat && matchQ;
-                        })
-                        .map((i) => i.id);
-                      setPickerSelectedProductIds(Array.from(new Set([...pickerSelectedProductIds, ...filtered])));
-                    }}
-                    className="px-2.5 py-1.5 text-[11px] font-bold bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 rounded-xl hover:bg-amber-200"
-                  >
-                    Select Filtered
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const filteredIds = new Set(
-                        menuItems
-                          .filter((i) => {
-                            const matchCat = pickerCategoryFilter === 'all' || i.categoryId === pickerCategoryFilter;
-                            const matchQ =
-                              !pickerSearchQuery.trim() ||
-                              i.name.toLowerCase().includes(pickerSearchQuery.toLowerCase());
-                            return matchCat && matchQ;
-                          })
-                          .map((i) => i.id)
-                      );
-                      setPickerSelectedProductIds(pickerSelectedProductIds.filter((id) => !filteredIds.has(id)));
-                    }}
-                    className="px-2.5 py-1.5 text-[11px] font-bold bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300 rounded-xl hover:bg-gray-300"
-                  >
-                    Deselect Filtered
-                  </button>
-                </div>
+                {(() => {
+                  const pickerActiveCats = getActiveMainCategoriesForType(
+                    mainCategories,
+                    selectedMerchant.type
+                  );
+                  const matchItemPickerCat = (item: MenuItem) =>
+                    pickerCategoryFilter === 'all' ||
+                    resolveItemMainCategory(item, pickerActiveCats).category.id === pickerCategoryFilter;
+                  return (
+                    <>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const filtered = menuItems
+                              .filter((i) => {
+                                const matchCat = matchItemPickerCat(i);
+                                const matchQ =
+                                  !pickerSearchQuery.trim() ||
+                                  i.name.toLowerCase().includes(pickerSearchQuery.toLowerCase());
+                                return matchCat && matchQ;
+                              })
+                              .map((i) => i.id);
+                            setPickerSelectedProductIds(Array.from(new Set([...pickerSelectedProductIds, ...filtered])));
+                          }}
+                          className="px-2.5 py-1.5 text-[11px] font-bold bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 rounded-xl hover:bg-amber-200"
+                        >
+                          Select Filtered
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const filteredIds = new Set(
+                              menuItems
+                                .filter((i) => {
+                                  const matchCat = matchItemPickerCat(i);
+                                  const matchQ =
+                                    !pickerSearchQuery.trim() ||
+                                    i.name.toLowerCase().includes(pickerSearchQuery.toLowerCase());
+                                  return matchCat && matchQ;
+                                })
+                                .map((i) => i.id)
+                            );
+                            setPickerSelectedProductIds(pickerSelectedProductIds.filter((id) => !filteredIds.has(id)));
+                          }}
+                          className="px-2.5 py-1.5 text-[11px] font-bold bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-300 rounded-xl hover:bg-gray-300"
+                        >
+                          Deselect Filtered
+                        </button>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
 
               {/* Category Filter Chips */}
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setPickerCategoryFilter('all')}
-                  className={`px-2.5 py-0.5 rounded-lg font-bold text-[11px] transition-colors ${
-                    pickerCategoryFilter === 'all'
-                      ? 'bg-amber-400 text-black'
-                      : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 hover:text-gray-900'
-                  }`}
-                >
-                  All ({menuItems.length})
-                </button>
-                {(selectedMerchant.type === 'food' ? FOOD_CATEGORIES : CONVENIENCE_CATEGORIES).map((cat) => {
-                  const count = menuItems.filter((i) => i.categoryId === cat).length;
-                  if (count === 0) return null;
-                  return (
+              {(() => {
+                const pickerActiveCats = getActiveMainCategoriesForType(
+                  mainCategories,
+                  selectedMerchant.type
+                );
+                return (
+                  <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
                     <button
                       type="button"
-                      key={cat}
-                      onClick={() => setPickerCategoryFilter(cat)}
-                      className={`px-2 py-0.5 rounded-lg font-bold text-[11px] transition-colors whitespace-nowrap ${
-                        pickerCategoryFilter === cat
+                      onClick={() => setPickerCategoryFilter('all')}
+                      className={`px-2.5 py-0.5 rounded-lg font-bold text-[11px] transition-colors ${
+                        pickerCategoryFilter === 'all'
                           ? 'bg-amber-400 text-black'
                           : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 hover:text-gray-900'
                       }`}
                     >
-                      {cat} ({count})
+                      All ({menuItems.length})
                     </button>
-                  );
-                })}
-              </div>
+                    {pickerActiveCats.map((cat) => {
+                      const count = menuItems.filter(
+                        (i) => resolveItemMainCategory(i, pickerActiveCats).category.id === cat.id
+                      ).length;
+                      return (
+                        <button
+                          type="button"
+                          key={cat.id}
+                          onClick={() => setPickerCategoryFilter(cat.id)}
+                          className={`px-2 py-0.5 rounded-lg font-bold text-[11px] transition-colors whitespace-nowrap ${
+                            pickerCategoryFilter === cat.id
+                              ? 'bg-amber-400 text-black'
+                              : 'bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 hover:text-gray-900'
+                          }`}
+                        >
+                          {cat.name} ({count})
+                        </button>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Items List */}
             <div className="p-4 space-y-2 overflow-y-auto flex-1 max-h-[50vh]">
               {(() => {
+                const pickerActiveCats = getActiveMainCategoriesForType(
+                  mainCategories,
+                  selectedMerchant.type
+                );
                 const filtered = menuItems.filter((i) => {
-                  const matchCat = pickerCategoryFilter === 'all' || i.categoryId === pickerCategoryFilter;
+                  const matchCat =
+                    pickerCategoryFilter === 'all' ||
+                    resolveItemMainCategory(i, pickerActiveCats).category.id === pickerCategoryFilter;
                   const matchQ =
                     !pickerSearchQuery.trim() ||
                     i.name.toLowerCase().includes(pickerSearchQuery.toLowerCase());
@@ -10133,6 +10256,7 @@ export const Merchants: React.FC = () => {
                 return filtered.map((item) => {
                   const isChecked = pickerSelectedProductIds.includes(item.id);
                   const otherMenuCount = (item.menuIds || []).filter((id) => id !== targetMenuForPicker.id).length;
+                  const pickerCatRes = resolveItemMainCategory(item, pickerActiveCats);
 
                   return (
                     <label
@@ -10159,11 +10283,17 @@ export const Merchants: React.FC = () => {
                         <div>
                           <div className="font-bold text-gray-900 dark:text-white flex items-center gap-2">
                             <span>{item.name}</span>
-                            {item.categoryId && (
-                              <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400">
-                                {item.categoryId}
-                              </span>
-                            )}
+                            <span
+                              className={`text-[10px] font-semibold px-1.5 py-0.2 rounded ${
+                                pickerCatRes.matched
+                                  ? 'bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400'
+                                  : 'bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300'
+                              }`}
+                            >
+                              {pickerCatRes.matched
+                                ? pickerCatRes.category.name
+                                : `Others (was: ${pickerCatRes.rawOldValue || 'None'})`}
+                            </span>
                           </div>
                           <div className="text-[11px] text-gray-400 flex items-center gap-1.5 mt-0.5">
                             <span>₱{Number(item.price).toFixed(2)}</span>

@@ -454,6 +454,7 @@ export interface ItemVariant {
 
 export interface MenuItem {
   id: string;
+  category?: string;
   categoryId?: string;
   subcategoryId?: string | null;
   subcategoryName?: string | null;

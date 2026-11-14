@@ -1,31 +1,5 @@
 import { OrderServiceType, DispatchSettings, RiderPayConfig, ReceiptDesignConfig, CheckoutSettings } from '../types';
 
-export const FOOD_CATEGORIES = [
-  'Dessert',
-  'Burgers',
-  'Pizza',
-  'Chicken',
-  'Drinks',
-  'Others'
-] as const;
-
-export type FoodCategory = typeof FOOD_CATEGORIES[number];
-
-export const CONVENIENCE_CATEGORIES = [
-  'Snacks & Confectionery',
-  'Beverages',
-  'Dairy & Cold Cuts',
-  'Instant & Canned Goods',
-  'Bakery',
-  'Personal Care & Toiletries',
-  'Household & Cleaning',
-  'Baby & Child Care',
-  'Health & Pharmacy',
-  'Groceries & Pantry'
-] as const;
-
-export type ConvenienceCategory = typeof CONVENIENCE_CATEGORIES[number];
-
 export type VehicleType = 'motorcycle' | 'tricycle' | 'car4' | 'car8';
 
 export interface VehicleTypeConfig {

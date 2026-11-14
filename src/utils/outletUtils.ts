@@ -388,6 +388,7 @@ export async function copyMerchantMenu(
       price: derivedPrice,
       description: dt.description || '',
       imageUrl: dt.imageUrl || '',
+      category: dt.category || null,
       categoryId: dt.categoryId || null,
       subcategoryId: mappedSubId,
       subcategoryName: mappedSubName,

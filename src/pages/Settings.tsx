@@ -16,6 +16,12 @@ import { useToast } from '../context/ToastContext';
 import { useCity } from '../context/CityContext';
 import { logAuditEvent } from '../utils/audit';
 import { findMatchingCity } from '../utils/cityUtils';
+import {
+  loadOrInitMainCategories,
+  getActiveMainCategoriesForType,
+  resolveItemMainCategory,
+  normalizeCategoryMatchKey
+} from '../utils/mainCategories';
 import type {
   PlatformSettings,
   OrderServiceType,
@@ -24,7 +30,9 @@ import type {
   DeliveryOptionType,
   ReceiptDesignConfig,
   CheckoutSettings,
-  City
+  City,
+  MainCategoriesDoc,
+  MainCategoryItem
 } from '../types';
 import {
   VEHICLE_TYPES,
@@ -77,7 +85,8 @@ import {
   Users,
   MessageSquare,
   MapPin,
-  Wrench
+  Wrench,
+  Tag
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
@@ -88,6 +97,18 @@ interface MerchantCityFixRow {
   currentCityId: string;
   proposedCityId: string;
   proposedCityName: string;
+}
+
+interface ItemCategoryFixRow {
+  key: string;
+  merchantType: 'food' | 'convenience';
+  rawValue: string;
+  normKey: string;
+  itemCount: number;
+  merchantIds: string[];
+  itemRefs: { merchantId: string; itemId: string }[];
+  selectedCategoryId: string;
+  rememberAlias: boolean;
 }
 
 interface MigrationPreviewData {
@@ -138,6 +159,15 @@ export const Settings: React.FC = () => {
   const [fixCitiesModalOpen, setFixCitiesModalOpen] = useState(false);
   const [applyingCityFixes, setApplyingCityFixes] = useState(false);
   const [fixCitiesResult, setFixCitiesResult] = useState<string | null>(null);
+
+  // Fix item categories maintenance state
+  const [itemCatFixScanned, setItemCatFixScanned] = useState(false);
+  const [scanningItemCats, setScanningItemCats] = useState(false);
+  const [itemCatFixRows, setItemCatFixRows] = useState<ItemCategoryFixRow[]>([]);
+  const [itemCatMainCatsDoc, setItemCatMainCatsDoc] = useState<MainCategoriesDoc | null>(null);
+  const [fixItemCatsModalOpen, setFixItemCatsModalOpen] = useState(false);
+  const [applyingItemCatFixes, setApplyingItemCatFixes] = useState(false);
+  const [itemCatFixResult, setItemCatFixResult] = useState<string | null>(null);
 
   // Platform Service Switches
   const [platformServices, setPlatformServices] = useState<Record<OrderServiceType, boolean>>({
@@ -953,6 +983,291 @@ export const Settings: React.FC = () => {
       showError(err);
     } finally {
       setApplyingCityFixes(false);
+    }
+  };
+
+  // Maintenance: Scan items across all merchants for unmatched categories
+  const handleScanItemCategories = async () => {
+    try {
+      setScanningItemCats(true);
+      setItemCatFixResult(null);
+
+      const [{ data: mainCatsDoc }, merchSnap] = await Promise.all([
+        loadOrInitMainCategories(adminProfile?.uid || 'admin', false),
+        getDocs(collection(db, 'merchants'))
+      ]);
+
+      const activeByType = {
+        food: getActiveMainCategoriesForType(mainCatsDoc, 'food'),
+        convenience: getActiveMainCategoriesForType(mainCatsDoc, 'convenience')
+      };
+
+      const grouped = new Map<
+        string,
+        {
+          key: string;
+          merchantType: 'food' | 'convenience';
+          rawValue: string;
+          normKey: string;
+          merchantIdSet: Set<string>;
+          itemRefs: { merchantId: string; itemId: string }[];
+        }
+      >();
+
+      const merchantDocs = merchSnap.docs;
+      const BATCH_CONCURRENCY = 15;
+      for (let i = 0; i < merchantDocs.length; i += BATCH_CONCURRENCY) {
+        const chunk = merchantDocs.slice(i, i + BATCH_CONCURRENCY);
+        const itemSnaps = await Promise.all(
+          chunk.map((mDoc) => getDocs(collection(db, 'merchants', mDoc.id, 'items')))
+        );
+
+        chunk.forEach((mDoc, idx) => {
+          const mData = mDoc.data() || {};
+          const merchantType: 'food' | 'convenience' =
+            mData.type === 'convenience' ? 'convenience' : 'food';
+          const activeCats = activeByType[merchantType];
+          const itemsSnap = itemSnaps[idx];
+
+          itemsSnap.forEach((itemDoc) => {
+            const dt = itemDoc.data() || {};
+            const res = resolveItemMainCategory(
+              { category: dt.category, categoryId: dt.categoryId },
+              activeCats
+            );
+            if (!res.matched) {
+              const rawVal = res.rawOldValue.trim();
+              const normKey = normalizeCategoryMatchKey(rawVal);
+              const groupKey = `${merchantType}::${normKey}`;
+              let entry = grouped.get(groupKey);
+              if (!entry) {
+                entry = {
+                  key: groupKey,
+                  merchantType,
+                  rawValue: rawVal,
+                  normKey,
+                  merchantIdSet: new Set<string>(),
+                  itemRefs: []
+                };
+                grouped.set(groupKey, entry);
+              } else if (!entry.rawValue && rawVal) {
+                entry.rawValue = rawVal;
+              }
+              entry.merchantIdSet.add(mDoc.id);
+              entry.itemRefs.push({ merchantId: mDoc.id, itemId: itemDoc.id });
+            }
+          });
+        });
+      }
+
+      const rows: ItemCategoryFixRow[] = Array.from(grouped.values()).map((g) => ({
+        key: g.key,
+        merchantType: g.merchantType,
+        rawValue: g.rawValue,
+        normKey: g.normKey,
+        itemCount: g.itemRefs.length,
+        merchantIds: Array.from(g.merchantIdSet),
+        itemRefs: g.itemRefs,
+        selectedCategoryId: '',
+        rememberAlias: false
+      }));
+
+      rows.sort((a, b) => {
+        if (b.itemCount !== a.itemCount) return b.itemCount - a.itemCount;
+        return a.rawValue.localeCompare(b.rawValue);
+      });
+
+      setItemCatMainCatsDoc(mainCatsDoc);
+      setItemCatFixRows(rows);
+      setItemCatFixScanned(true);
+
+      if (rows.length === 0) {
+        showSuccess('All merchant items match active categories in App Designer.');
+      }
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setScanningItemCats(false);
+    }
+  };
+
+  const handleUpdateItemCatFixSelection = (rowKey: string, categoryId: string) => {
+    setItemCatFixRows((prev) =>
+      prev.map((row) =>
+        row.key === rowKey
+          ? {
+              ...row,
+              selectedCategoryId: categoryId
+            }
+          : row
+      )
+    );
+  };
+
+  const handleToggleRememberAlias = (rowKey: string) => {
+    setItemCatFixRows((prev) =>
+      prev.map((row) =>
+        row.key === rowKey && row.rawValue
+          ? {
+              ...row,
+              rememberAlias: !row.rememberAlias
+            }
+          : row
+      )
+    );
+  };
+
+  const handleApplyItemCategoryFixes = async () => {
+    const fixableRows = itemCatFixRows.filter((r) => Boolean(r.selectedCategoryId));
+    if (fixableRows.length === 0 || !itemCatMainCatsDoc) {
+      setFixItemCatsModalOpen(false);
+      return;
+    }
+
+    try {
+      setApplyingItemCatFixes(true);
+      const now = Timestamp.now();
+
+      // Build list of item updates while preserving all other item fields via batch.update
+      const updates: {
+        merchantId: string;
+        itemId: string;
+        categoryName: string;
+        categoryId: string;
+      }[] = [];
+
+      const aliasesToAdd: {
+        merchantType: 'food' | 'convenience';
+        targetCategoryId: string;
+        aliasText: string;
+      }[] = [];
+
+      const activeByType = {
+        food: getActiveMainCategoriesForType(itemCatMainCatsDoc, 'food'),
+        convenience: getActiveMainCategoriesForType(itemCatMainCatsDoc, 'convenience')
+      };
+
+      const appliedSummaryParts: string[] = [];
+
+      fixableRows.forEach((row) => {
+        const targetCat = activeByType[row.merchantType].find(
+          (c) => c.id === row.selectedCategoryId
+        );
+        if (!targetCat) return;
+
+        row.itemRefs.forEach((ref) => {
+          updates.push({
+            merchantId: ref.merchantId,
+            itemId: ref.itemId,
+            categoryName: targetCat.name,
+            categoryId: targetCat.id
+          });
+        });
+
+        if (row.rememberAlias && row.rawValue.trim()) {
+          aliasesToAdd.push({
+            merchantType: row.merchantType,
+            targetCategoryId: targetCat.id,
+            aliasText: row.rawValue.trim()
+          });
+        }
+
+        appliedSummaryParts.push(
+          `"${row.rawValue || '(empty)'}" -> "${targetCat.name}" (${row.itemCount})`
+        );
+      });
+
+      if (updates.length === 0) {
+        setFixItemCatsModalOpen(false);
+        return;
+      }
+
+      const CHUNK_SIZE = 400;
+      for (let i = 0; i < updates.length; i += CHUNK_SIZE) {
+        const slice = updates.slice(i, i + CHUNK_SIZE);
+        const batch = writeBatch(db);
+        slice.forEach((u) => {
+          batch.update(doc(db, 'merchants', u.merchantId, 'items', u.itemId), {
+            category: u.categoryName,
+            categoryId: u.categoryId,
+            updatedAt: now
+          });
+        });
+        await batch.commit();
+      }
+
+      let addedAliasesCount = 0;
+      let nextMainCatsDoc = itemCatMainCatsDoc;
+
+      if (aliasesToAdd.length > 0) {
+        const { data: latestDoc } = await loadOrInitMainCategories(
+          adminProfile?.uid || 'admin',
+          true
+        );
+
+        const appendAliasToGroup = (
+          list: MainCategoryItem[],
+          groupType: 'food' | 'convenience'
+        ): MainCategoryItem[] =>
+          list.map((cat) => {
+            const matchingAdditions = aliasesToAdd.filter(
+              (a) => a.merchantType === groupType && a.targetCategoryId === cat.id
+            );
+            if (matchingAdditions.length === 0) return cat;
+
+            const existingKeys = new Set<string>([
+              normalizeCategoryMatchKey(cat.id),
+              normalizeCategoryMatchKey(cat.name),
+              ...(cat.aliases || []).map((al) => normalizeCategoryMatchKey(al))
+            ]);
+            const updatedAliases = [...(cat.aliases || [])];
+            matchingAdditions.forEach((add) => {
+              const k = normalizeCategoryMatchKey(add.aliasText);
+              if (k && !existingKeys.has(k)) {
+                existingKeys.add(k);
+                updatedAliases.push(add.aliasText);
+                addedAliasesCount++;
+              }
+            });
+            return {
+              ...cat,
+              aliases: updatedAliases
+            };
+          });
+
+        const updatedMainCatsPayload: MainCategoriesDoc = {
+          food: appendAliasToGroup(latestDoc.food, 'food'),
+          convenience: appendAliasToGroup(latestDoc.convenience, 'convenience'),
+          updatedAt: now,
+          updatedBy: adminProfile?.uid || adminProfile?.name || 'Admin'
+        };
+
+        await setDoc(doc(db, 'settings', 'mainCategories'), updatedMainCatsPayload);
+        nextMainCatsDoc = updatedMainCatsPayload;
+      }
+
+      const appliedKeys = new Set(fixableRows.map((r) => r.key));
+      const summaryMsg = `Updated ${updates.length} ${updates.length === 1 ? 'item' : 'items'} across ${fixableRows.length} category ${fixableRows.length === 1 ? 'value' : 'values'}${addedAliasesCount > 0 ? ` and remembered ${addedAliasesCount} ${addedAliasesCount === 1 ? 'alias' : 'aliases'}` : ''}`;
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'FIX_ITEM_CATEGORIES',
+        entityType: 'menuItem',
+        entityId: 'all',
+        details: `${summaryMsg}. ${appliedSummaryParts.slice(0, 12).join('; ')}${appliedSummaryParts.length > 12 ? ` (+${appliedSummaryParts.length - 12} more)` : ''}`
+      });
+
+      setItemCatMainCatsDoc(nextMainCatsDoc);
+      setItemCatFixRows((prev) => prev.filter((r) => !appliedKeys.has(r.key)));
+      setItemCatFixResult(summaryMsg);
+      setFixItemCatsModalOpen(false);
+      showSuccess(summaryMsg);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setApplyingItemCatFixes(false);
     }
   };
 
@@ -3159,6 +3474,150 @@ export const Settings: React.FC = () => {
         )}
       </div>
 
+      {/* Fix Item Categories Card */}
+      <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="p-2.5 rounded-2xl bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 shrink-0">
+              <Tag className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                Fix item categories
+              </h3>
+              <p className="text-xs text-gray-600 dark:text-zinc-400 mt-0.5 max-w-2xl">
+                Scans items across all merchants against active <code className="font-mono text-amber-700 dark:text-amber-300">settings/mainCategories</code> and lets you map unmatched values or remember old names as aliases.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleScanItemCategories}
+              disabled={scanningItemCats || applyingItemCatFixes}
+              className="px-4 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 hover:bg-gray-50 dark:hover:bg-zinc-700 text-gray-800 dark:text-zinc-200 text-xs font-bold flex items-center justify-center gap-2 shadow-xs disabled:opacity-50 whitespace-nowrap"
+            >
+              {scanningItemCats ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+              <span>{itemCatFixScanned ? 'Re-scan item categories' : 'Scan item categories'}</span>
+            </button>
+
+            {itemCatFixRows.some((r) => Boolean(r.selectedCategoryId)) && (
+              <button
+                type="button"
+                onClick={() => setFixItemCatsModalOpen(true)}
+                disabled={applyingItemCatFixes || scanningItemCats}
+                className="delivio-btn-yellow px-4 py-2.5 rounded-xl text-xs font-extrabold flex items-center justify-center gap-2 shadow-xs disabled:opacity-50 whitespace-nowrap"
+              >
+                {applyingItemCatFixes ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wrench className="w-4 h-4" />}
+                <span>
+                  Apply fixes ({itemCatFixRows.filter((r) => Boolean(r.selectedCategoryId)).reduce((acc, r) => acc + r.itemCount, 0)} items)
+                </span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {itemCatFixScanned && (
+          itemCatFixRows.length === 0 ? (
+            <div className="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900 text-xs font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>All scanned items match active categories in App Designer.</span>
+            </div>
+          ) : (
+            <div className="border border-gray-200 dark:border-zinc-800 rounded-2xl overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-gray-50 dark:bg-zinc-850/60 uppercase font-bold text-gray-500 dark:text-zinc-400 border-b border-gray-200 dark:border-zinc-800">
+                    <tr>
+                      <th className="px-4 py-3">Unmatched value</th>
+                      <th className="px-4 py-3 text-right">Items</th>
+                      <th className="px-4 py-3">Correct active category</th>
+                      <th className="px-4 py-3">Remember as alias</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-zinc-800">
+                    {itemCatFixRows.map((row) => {
+                      const activeOptions = itemCatMainCatsDoc
+                        ? getActiveMainCategoriesForType(itemCatMainCatsDoc, row.merchantType)
+                        : [];
+                      return (
+                        <tr key={row.key} className="hover:bg-gray-50/70 dark:hover:bg-zinc-800/40">
+                          <td className="px-4 py-2.5">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-mono font-bold text-amber-800 dark:text-amber-300">
+                                {row.rawValue || '(empty)'}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-zinc-800 text-[10px] font-bold uppercase text-gray-600 dark:text-zinc-400">
+                                {row.merchantType}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-gray-400 mt-0.5">
+                              Used by {row.merchantIds.length} {row.merchantIds.length === 1 ? 'shop' : 'shops'}
+                            </div>
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-mono font-extrabold text-gray-900 dark:text-white tabular-nums">
+                            {row.itemCount}
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <select
+                              value={row.selectedCategoryId}
+                              onChange={(e) => handleUpdateItemCatFixSelection(row.key, e.target.value)}
+                              className="w-full min-w-[200px] px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-semibold text-gray-900 dark:text-white"
+                            >
+                              <option value="">-- Choose active category --</option>
+                              {activeOptions.map((cat) => (
+                                <option key={cat.id} value={cat.id}>
+                                  {cat.name}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={row.rememberAlias}
+                              disabled={!row.rawValue}
+                              onClick={() => handleToggleRememberAlias(row.key)}
+                              className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-[11px] font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                                row.rememberAlias
+                                  ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300'
+                                  : 'bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400'
+                              }`}
+                            >
+                              <span
+                                className={`w-7 h-4 rounded-full relative transition-colors ${
+                                  row.rememberAlias ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-zinc-600'
+                                }`}
+                              >
+                                <span
+                                  className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${
+                                    row.rememberAlias ? 'left-3.5' : 'left-0.5'
+                                  }`}
+                                />
+                              </span>
+                              <span>Remember as alias</span>
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )
+        )}
+
+        {itemCatFixResult && (
+          <div className="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900 text-xs font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>{itemCatFixResult}</span>
+          </div>
+        )}
+      </div>
+
       {/* Rating Clean-Up Card */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-5">
         <div className="flex items-start gap-3">
@@ -3628,6 +4087,20 @@ export const Settings: React.FC = () => {
           title="Apply merchant cityId fixes?"
           message={`This will update cityId to the proposed city document ID on ${cityFixRows.filter((r) => Boolean(r.proposedCityId)).length} merchant document(s) and write an auditLogs entry.`}
           confirmLabel={applyingCityFixes ? "Applying..." : "Apply Fixes"}
+          reasonRequired={false}
+          isDestructive={false}
+        />
+      )}
+
+      {/* Confirmation Modal for Fixing Item Categories */}
+      {fixItemCatsModalOpen && (
+        <ConfirmationModal
+          isOpen={fixItemCatsModalOpen}
+          onClose={() => setFixItemCatsModalOpen(false)}
+          onConfirm={handleApplyItemCategoryFixes}
+          title="Apply item category fixes?"
+          message={`This will write category and categoryId on ${itemCatFixRows.filter((r) => Boolean(r.selectedCategoryId)).reduce((acc, r) => acc + r.itemCount, 0)} item(s) across ${itemCatFixRows.filter((r) => Boolean(r.selectedCategoryId)).length} unmatched value(s)${itemCatFixRows.some((r) => Boolean(r.selectedCategoryId) && r.rememberAlias && r.rawValue) ? ' and add remembered aliases to settings/mainCategories' : ''}, then log an auditLogs entry.`}
+          confirmLabel={applyingItemCatFixes ? "Applying..." : "Apply Category Fixes"}
           reasonRequired={false}
           isDestructive={false}
         />

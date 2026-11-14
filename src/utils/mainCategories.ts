@@ -267,15 +267,25 @@ export async function loadOrInitMainCategories(
 }
 
 /**
- * Checks if a merchant's cuisineTags matches a given category (by name, id, or aliases).
+ * Normalizes a category name, id, or alias for comparison: lowercase, trim, collapse spaces.
+ */
+export function normalizeCategoryMatchKey(value: unknown): string {
+  return String(value ?? '')
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+/**
+ * Checks if a tag or value matches a given category (by id, name, or aliases).
  */
 export function categoryMatchesTag(cat: MainCategoryItem, tag: string): boolean {
-  const cleanTag = String(tag || '').trim().toLowerCase();
+  const cleanTag = normalizeCategoryMatchKey(tag);
   if (!cleanTag) return false;
-  if (cat.id.toLowerCase() === cleanTag) return true;
-  if (cat.name.trim().toLowerCase() === cleanTag) return true;
+  if (normalizeCategoryMatchKey(cat.id) === cleanTag) return true;
+  if (normalizeCategoryMatchKey(cat.name) === cleanTag) return true;
   if (Array.isArray(cat.aliases)) {
-    return cat.aliases.some((al) => String(al || '').trim().toLowerCase() === cleanTag);
+    return cat.aliases.some((al) => normalizeCategoryMatchKey(al) === cleanTag);
   }
   return false;
 }
@@ -316,3 +326,68 @@ export function resolveMerchantActiveCategories(
 
   return { matchedNames: Array.from(matched), isFallbackOthers: false };
 }
+
+/**
+ * Returns active categories for a shop's type in App Designer sortOrder with "Others" last.
+ */
+export function getActiveMainCategoriesForType(
+  categoriesDoc: MainCategoriesDoc,
+  type: 'food' | 'convenience'
+): MainCategoryItem[] {
+  const fallbackDefaults =
+    type === 'convenience' ? DEFAULT_CONVENIENCE_CATEGORIES : DEFAULT_FOOD_CATEGORIES;
+  const rawList =
+    type === 'convenience' ? categoriesDoc.convenience : categoriesDoc.food;
+  const normalized = normalizeCategoryList(rawList, fallbackDefaults);
+  return normalized.filter((c) => c.active !== false);
+}
+
+/**
+ * Finds an active category matching rawValue by normalized id, name, or aliases.
+ */
+export function findMatchingActiveCategory(
+  rawValue: unknown,
+  activeCategories: MainCategoryItem[]
+): MainCategoryItem | null {
+  const key = normalizeCategoryMatchKey(rawValue);
+  if (!key) return null;
+  return activeCategories.find((cat) => categoryMatchesTag(cat, key)) || null;
+}
+
+/**
+ * Resolves an item's category / categoryId against active categories of the shop's type.
+ * Unmatched items fall back to "Others" while preserving the old value for display.
+ */
+export function resolveItemMainCategory(
+  item: { category?: unknown; categoryId?: unknown },
+  activeCategories: MainCategoryItem[]
+): {
+  matched: boolean;
+  category: MainCategoryItem;
+  rawOldValue: string;
+} {
+  const rawCategory = typeof item.category === 'string' ? item.category.trim() : '';
+  const rawCategoryId = typeof item.categoryId === 'string' ? item.categoryId.trim() : '';
+  const rawOldValue = rawCategory || rawCategoryId;
+
+  const matchedCat =
+    findMatchingActiveCategory(rawCategoryId, activeCategories) ||
+    findMatchingActiveCategory(rawCategory, activeCategories);
+
+  const othersCategory =
+    activeCategories.find((c) => isOthersCategory(c)) || {
+      id: 'others',
+      name: 'Others',
+      imageUrl: `${ASSET_BASE}/cat_others.png`,
+      sortOrder: activeCategories.length,
+      active: true,
+      aliases: []
+    };
+
+  return {
+    matched: Boolean(matchedCat),
+    category: matchedCat || othersCategory,
+    rawOldValue
+  };
+}
+
