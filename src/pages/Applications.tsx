@@ -14,9 +14,11 @@ import {
 } from '../firebase';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import { useCity } from '../context/CityContext';
 import { logAuditEvent } from '../utils/audit';
+import { findMatchingCity } from '../utils/cityUtils';
 import { formatTimestamp, formatRelativeTime } from '../utils/date';
-import type { MerchantApplication, RiderApplication } from '../types';
+import type { City, MerchantApplication, RiderApplication } from '../types';
 import {
   VEHICLE_TYPES,
   VEHICLE_LABELS,
@@ -51,6 +53,7 @@ export const Applications: React.FC = () => {
   const navigate = useNavigate();
   const { adminProfile } = useAuth();
   const { showSuccess, showError } = useToast();
+  const { cities } = useCity();
 
   const [activeTab, setActiveTab] = useState<'merchants' | 'riders'>('merchants');
   const [statusFilter, setStatusFilter] = useState<string>('Pending');
@@ -61,6 +64,7 @@ export const Applications: React.FC = () => {
 
   // Selected for review detail modal
   const [selectedMerchantApp, setSelectedMerchantApp] = useState<MerchantApplication | null>(null);
+  const [approvalCityId, setApprovalCityId] = useState<string>('');
   const [selectedRiderApp, setSelectedRiderApp] = useState<RiderApplication | null>(null);
 
   // Document preview lightbox
@@ -93,7 +97,7 @@ export const Applications: React.FC = () => {
           email: dt.email || '',
           phone: dt.phone || '',
           businessType: dt.businessType || 'food',
-          cityId: dt.cityId || '',
+          cityId: dt.cityId || dt.city || dt.cityName || '',
           address: dt.address || '',
           lat: Number(dt.lat) || 0,
           lng: Number(dt.lng) || 0,
@@ -199,6 +203,15 @@ export const Applications: React.FC = () => {
     };
   }, [selectedMerchantApp]);
 
+  useEffect(() => {
+    if (!selectedMerchantApp) {
+      setApprovalCityId('');
+      return;
+    }
+    const matched = findMatchingCity(selectedMerchantApp.cityId, cities);
+    setApprovalCityId(matched ? matched.id : '');
+  }, [selectedMerchantApp, cities]);
+
   // Merchant Approve (One Batch)
   const handleApproveMerchant = async (app: MerchantApplication) => {
     if (app.status === 'Approved') {
@@ -206,6 +219,29 @@ export const Applications: React.FC = () => {
       return;
     }
     try {
+      let cityList: City[] = cities;
+      if (cityList.length === 0) {
+        const cSnap = await getDocs(collection(db, 'cities'));
+        cityList = cSnap.docs.map((d) => ({
+          id: d.id,
+          name: d.data().name || d.id,
+          province: d.data().province || '',
+          status: d.data().status || 'active',
+          center: d.data().center || { lat: 9.7392, lng: 118.7353 },
+          radiusKm: Number(d.data().radiusKm) || 15
+        }));
+      }
+
+      const candidateCity = approvalCityId.trim() || app.cityId;
+      const matchedCity = findMatchingCity(candidateCity, cityList);
+      if (!matchedCity) {
+        showError(
+          `Cannot approve: "${candidateCity || 'empty'}" does not match any existing city. Please select a valid city.`
+        );
+        return;
+      }
+      const resolvedCityId = matchedCity.id;
+
       const batch = writeBatch(db);
       // The applicant's own UID is the same as the application document ID
       const applicantUid = app.id;
@@ -236,7 +272,7 @@ export const Applications: React.FC = () => {
         phone: app.phone,
         type: app.businessType || 'food',
         typeLocked: true,
-        cityId: app.cityId,
+        cityId: resolvedCityId,
         status: 'active',
         isOpen: false,
         ownerUid: applicantUid,
@@ -748,6 +784,31 @@ export const Applications: React.FC = () => {
                   <span className="font-semibold text-gray-900 dark:text-white">
                     {selectedMerchantApp.email}
                   </span>
+                </div>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span className="text-gray-500">
+                    City ({selectedMerchantApp.cityId ? `submitted: "${selectedMerchantApp.cityId}"` : 'none'}):
+                  </span>
+                  {selectedMerchantApp.status === 'Approved' ? (
+                    <span className="font-bold text-gray-900 dark:text-white">
+                      {cities.find((c) => c.id === selectedMerchantApp.cityId)?.name ||
+                        selectedMerchantApp.cityId ||
+                        '—'}
+                    </span>
+                  ) : (
+                    <select
+                      value={approvalCityId}
+                      onChange={(e) => setApprovalCityId(e.target.value)}
+                      className="px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                    >
+                      <option value="">Select City ID...</option>
+                      {cities.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name} ({c.id})
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500">Address:</span>

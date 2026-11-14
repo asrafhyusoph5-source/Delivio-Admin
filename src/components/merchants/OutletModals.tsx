@@ -18,6 +18,7 @@ import {
   isValidBranchName,
   normalizeBranchCode
 } from '../../utils/outletUtils';
+import { formatGeocoderAddress } from '../../utils/geocoder';
 import type {
   City,
   Merchant,
@@ -149,7 +150,7 @@ export const AddOutletModal: React.FC<AddOutletModalProps> = ({
     try {
       setSearchingAddr(true);
       const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&countrycodes=ph&q=${encodeURIComponent(
+        `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&countrycodes=ph&q=${encodeURIComponent(
           addrSearch.trim()
         )}`
       );
@@ -167,7 +168,7 @@ export const AddOutletModal: React.FC<AddOutletModalProps> = ({
     const newLng = parseFloat(res.lon);
     setLat(newLat);
     setLng(newLng);
-    setAddress(res.display_name || '');
+    setAddress(formatGeocoderAddress(res));
     setAddrResults([]);
     if (mapInstanceRef.current && markerRef.current) {
       mapInstanceRef.current.flyTo([newLat, newLng], 16);
@@ -626,7 +627,7 @@ export const AddOutletModal: React.FC<AddOutletModalProps> = ({
                     onClick={() => handleSelectAddress(r)}
                     className="w-full text-left px-3 py-2 hover:bg-amber-50 dark:hover:bg-zinc-800 text-[11px]"
                   >
-                    {r.display_name}
+                    {formatGeocoderAddress(r) || r.display_name}
                   </button>
                 ))}
               </div>

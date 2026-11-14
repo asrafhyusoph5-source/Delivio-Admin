@@ -12,6 +12,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
+import { formatTimestamp } from '../utils/date';
 import type {
   MainCategoryItem,
   MainCategoriesDoc,
@@ -211,6 +212,7 @@ export const CuisinesCategories: React.FC = () => {
   // App layout state (settings/appDesigner)
   const [convenienceColumns, setConvenienceColumns] = useState<ConvenienceColumnsCount>(2);
   const [persistedColumns, setPersistedColumns] = useState<ConvenienceColumnsCount>(2);
+  const [layoutUpdatedAt, setLayoutUpdatedAt] = useState<any>(null);
 
   // Merchants for category shop count chips & delete migration
   const [merchants, setMerchants] = useState<Merchant[]>([]);
@@ -271,18 +273,24 @@ export const CuisinesCategories: React.FC = () => {
         setPersistedDoc(data);
 
         let initialCols: ConvenienceColumnsCount = 2;
+        let initialLayoutUpdatedAt: any = null;
         if (designerSnap.exists()) {
-          initialCols = parseConvenienceColumns(designerSnap.data().convenienceColumns);
+          const dData = designerSnap.data();
+          initialCols = parseConvenienceColumns(dData.convenienceColumns);
+          initialLayoutUpdatedAt = dData.updatedAt || null;
         } else {
+          const nowTs = Timestamp.now();
           const initialDesigner: AppDesignerSettings = {
             convenienceColumns: 2,
-            updatedAt: Timestamp.now(),
+            updatedAt: nowTs,
             updatedBy: actor
           };
           await setDoc(doc(db, 'settings', 'appDesigner'), initialDesigner);
+          initialLayoutUpdatedAt = nowTs;
         }
         setConvenienceColumns(initialCols);
         setPersistedColumns(initialCols);
+        setLayoutUpdatedAt(initialLayoutUpdatedAt);
 
         const mList: Merchant[] = [];
         mSnap.forEach((d) => {
@@ -773,8 +781,9 @@ export const CuisinesCategories: React.FC = () => {
       }
 
       if (hasLayoutChanges) {
+        const numericColumns = parseConvenienceColumns(convenienceColumns);
         const layoutPayload: AppDesignerSettings = {
-          convenienceColumns,
+          convenienceColumns: numericColumns,
           updatedAt: now,
           updatedBy
         };
@@ -786,9 +795,11 @@ export const CuisinesCategories: React.FC = () => {
           action: 'UPDATE_APP_DESIGNER_LAYOUT',
           entityType: 'settings',
           entityId: 'appDesigner',
-          details: `Updated Delivio Mart product grid to ${convenienceColumns} column(s)`
+          details: `Updated Delivio Mart product grid to ${numericColumns} column(s)`
         });
-        setPersistedColumns(convenienceColumns);
+        setConvenienceColumns(numericColumns);
+        setPersistedColumns(numericColumns);
+        setLayoutUpdatedAt(now);
       }
 
       setSavedBanner(true);
@@ -879,12 +890,12 @@ export const CuisinesCategories: React.FC = () => {
   );
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5 min-w-0 max-w-full overflow-x-clip">
       {/* Sticky Header Toolbar */}
-      <div className="sticky top-0 z-20 -mx-4 px-4 sm:-mx-6 sm:px-6 py-3.5 bg-gray-50/95 dark:bg-zinc-950/95 backdrop-blur-md border-b border-gray-200 dark:border-zinc-800">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+      <div className="sticky top-0 z-20 -mx-4 px-4 md:-mx-6 md:px-6 lg:-mx-8 lg:px-8 py-3.5 bg-gray-50/95 dark:bg-zinc-950/95 backdrop-blur-md border-b border-gray-200 dark:border-zinc-800">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 min-w-0">
           <div className="flex items-center gap-3 min-w-0">
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-2.5 flex-wrap">
                 <h1 className="text-xl sm:text-2xl font-extrabold text-gray-900 dark:text-white tracking-tight">
                   App Designer
@@ -907,7 +918,7 @@ export const CuisinesCategories: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 max-w-full">
             <button
               type="button"
               onClick={() => setResetModalOpen(true)}
@@ -940,12 +951,12 @@ export const CuisinesCategories: React.FC = () => {
           </div>
         </div>
 
-        {/* Two Primary Tabs: Categories & Shop layout */}
-        <div className="flex items-center gap-2 mt-3 pt-2.5 border-t border-gray-200/70 dark:border-zinc-800/80">
+        {/* Two Primary Tabs: Categories & Shop layout (scrollable inside row on phones) */}
+        <div className="flex items-center gap-2 mt-3 pt-2.5 border-t border-gray-200/70 dark:border-zinc-800/80 overflow-x-auto max-w-full">
           <button
             type="button"
             onClick={() => setActiveTab('categories')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap transition-colors ${
+            className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors ${
               activeTab === 'categories'
                 ? 'bg-gray-900 text-white dark:bg-amber-400 dark:text-black shadow-xs'
                 : 'text-gray-600 dark:text-zinc-400 hover:bg-gray-200/60 dark:hover:bg-zinc-800'
@@ -958,7 +969,7 @@ export const CuisinesCategories: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('layout')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap transition-colors ${
+            className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors ${
               activeTab === 'layout'
                 ? 'bg-gray-900 text-white dark:bg-amber-400 dark:text-black shadow-xs'
                 : 'text-gray-600 dark:text-zinc-400 hover:bg-gray-200/60 dark:hover:bg-zinc-800'
@@ -967,7 +978,7 @@ export const CuisinesCategories: React.FC = () => {
             <LayoutGrid className="w-3.5 h-3.5" />
             <span>Shop layout</span>
             <span className="text-[11px] font-mono tabular-nums opacity-75">
-              {convenienceColumns} col
+              {persistedColumns} col
             </span>
           </button>
         </div>
@@ -982,10 +993,10 @@ export const CuisinesCategories: React.FC = () => {
         </div>
       ) : activeTab === 'categories' ? (
         /* ======================== CATEGORIES TAB ======================== */
-        <div className="space-y-4">
+        <div className="space-y-4 min-w-0">
           {/* Switch (Food / Convenience), Search box, + Add category */}
-          <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
-            <div className="flex items-center gap-2 p-1 bg-gray-100 dark:bg-zinc-800 rounded-xl border border-gray-200 dark:border-zinc-700 w-fit">
+          <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-3.5 sm:p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 min-w-0">
+            <div className="flex items-center gap-1.5 sm:gap-2 p-1 bg-gray-100 dark:bg-zinc-800 rounded-xl border border-gray-200 dark:border-zinc-700 w-full md:w-fit min-w-0">
               <button
                 type="button"
                 onClick={() => {
@@ -993,13 +1004,13 @@ export const CuisinesCategories: React.FC = () => {
                   setEditingImageId(null);
                   setOpenMenuId(null);
                 }}
-                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 whitespace-nowrap transition-colors ${
+                className={`flex-1 md:flex-initial justify-center px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 whitespace-nowrap min-w-0 transition-colors ${
                   activeGroup === 'food'
                     ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-white shadow-xs'
                     : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white'
                 }`}
               >
-                <Utensils className="w-3.5 h-3.5 text-amber-500" />
+                <Utensils className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                 <span>Food</span>
                 <span className="text-[11px] font-mono tabular-nums text-gray-500 dark:text-zinc-400">
                   {foodCategories.length}/{MAX_CATEGORIES_PER_GROUP}
@@ -1013,13 +1024,13 @@ export const CuisinesCategories: React.FC = () => {
                   setEditingImageId(null);
                   setOpenMenuId(null);
                 }}
-                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 whitespace-nowrap transition-colors ${
+                className={`flex-1 md:flex-initial justify-center px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 whitespace-nowrap min-w-0 transition-colors ${
                   activeGroup === 'convenience'
                     ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-white shadow-xs'
                     : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white'
                 }`}
               >
-                <ShoppingBag className="w-3.5 h-3.5 text-amber-500" />
+                <ShoppingBag className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                 <span>Convenience</span>
                 <span className="text-[11px] font-mono tabular-nums text-gray-500 dark:text-zinc-400">
                   {convenienceCategories.length}/{MAX_CATEGORIES_PER_GROUP}
@@ -1027,8 +1038,8 @@ export const CuisinesCategories: React.FC = () => {
               </button>
             </div>
 
-            <div className="flex flex-1 md:max-w-md items-center gap-2">
-              <div className="relative flex-1">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full md:flex-1 md:max-w-md min-w-0">
+              <div className="relative w-full flex-1 min-w-0">
                 <Search className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="text"
@@ -1053,7 +1064,7 @@ export const CuisinesCategories: React.FC = () => {
                 type="button"
                 onClick={handleOpenAddModal}
                 disabled={currentList.length >= MAX_CATEGORIES_PER_GROUP}
-                className="delivio-btn-yellow px-3.5 py-2 rounded-xl text-xs font-extrabold flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
+                className="delivio-btn-yellow w-full sm:w-auto justify-center px-3.5 py-2 rounded-xl text-xs font-extrabold flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
               >
                 <Plus className="w-4 h-4" />
                 <span>Add category</span>
@@ -1068,14 +1079,14 @@ export const CuisinesCategories: React.FC = () => {
               onClick={() => setMobilePreviewOpen((prev) => !prev)}
               className="w-full px-4 py-3 flex items-center justify-between text-xs font-extrabold text-gray-900 dark:text-white"
             >
-              <span className="flex items-center gap-2">
-                <Smartphone className="w-4 h-4 text-amber-500" />
-                <span>Preview ({activeGroup === 'food' ? 'Delivio Food' : 'Delivio Mart'})</span>
+              <span className="flex items-center gap-2 min-w-0">
+                <Smartphone className="w-4 h-4 text-amber-500 shrink-0" />
+                <span className="truncate">Preview ({activeGroup === 'food' ? 'Delivio Food' : 'Delivio Mart'})</span>
               </span>
               {mobilePreviewOpen ? (
-                <ChevronUp className="w-4 h-4 text-gray-400" />
+                <ChevronUp className="w-4 h-4 text-gray-400 shrink-0" />
               ) : (
-                <ChevronDown className="w-4 h-4 text-gray-400" />
+                <ChevronDown className="w-4 h-4 text-gray-400 shrink-0" />
               )}
             </button>
             {mobilePreviewOpen && (
@@ -1086,10 +1097,10 @@ export const CuisinesCategories: React.FC = () => {
           </div>
 
           {/* Split Content: Compact List (Left) + Sticky Phone Preview (Right) */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start min-w-0">
             {/* Compact Reorderable List */}
-            <div className="lg:col-span-8 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl overflow-visible">
-              <div className="px-4 py-2.5 border-b border-gray-100 dark:border-zinc-800 flex items-center justify-between text-[11px] font-semibold text-gray-500 dark:text-zinc-400">
+            <div className="lg:col-span-8 min-w-0 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl overflow-visible">
+              <div className="px-3.5 sm:px-4 py-2.5 border-b border-gray-100 dark:border-zinc-800 flex flex-wrap items-center justify-between gap-1.5 text-[11px] font-semibold text-gray-500 dark:text-zinc-400">
                 <span>
                   {filteredList.length} {filteredList.length === 1 ? 'category' : 'categories'}
                   {categorySearch.trim() ? ' matching filter' : ''}
@@ -1136,177 +1147,186 @@ export const CuisinesCategories: React.FC = () => {
                             : 'hover:bg-gray-50/60 dark:hover:bg-zinc-800/40'
                         } ${draggedId === cat.id ? 'opacity-50' : ''}`}
                       >
-                        {/* Single-Line Category Row */}
-                        <div className="px-3.5 py-2.5 flex items-center gap-2.5 sm:gap-3">
-                          {/* Drag Handle (+ Up/Down arrows on small screens) */}
-                          <div className="flex items-center gap-1 shrink-0">
-                            <div
-                              className={`p-1 rounded-md ${
-                                pinnedLast
-                                  ? 'text-gray-300 dark:text-zinc-700 cursor-not-allowed'
-                                  : 'text-gray-400 hover:text-gray-700 dark:hover:text-zinc-200 cursor-grab active:cursor-grabbing'
-                              }`}
-                              title={pinnedLast ? 'Others stays pinned last' : 'Drag to reorder'}
-                            >
-                              {pinnedLast ? (
-                                <Lock className="w-4 h-4" />
-                              ) : (
-                                <GripVertical className="w-4 h-4" />
+                        {/* Category Row: two lines on small screens (image, name, count on top; Active switch + "..." below), single line on sm+ */}
+                        <div className="px-3 sm:px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 min-w-0">
+                          <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
+                            {/* Drag Handle (+ Up/Down arrows on small screens) */}
+                            <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
+                              <div
+                                className={`p-1 rounded-md ${
+                                  pinnedLast
+                                    ? 'text-gray-300 dark:text-zinc-700 cursor-not-allowed'
+                                    : 'text-gray-400 hover:text-gray-700 dark:hover:text-zinc-200 cursor-grab active:cursor-grabbing'
+                                }`}
+                                title={pinnedLast ? 'Others stays pinned last' : 'Drag to reorder'}
+                              >
+                                {pinnedLast ? (
+                                  <Lock className="w-4 h-4" />
+                                ) : (
+                                  <GripVertical className="w-4 h-4" />
+                                )}
+                              </div>
+
+                              {!pinnedLast && (
+                                <div className="flex flex-col md:hidden">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleMoveStep(cat.id, -1)}
+                                    disabled={realIndex <= 0}
+                                    className="p-0.5 text-gray-400 hover:text-gray-700 dark:hover:text-zinc-200 disabled:opacity-25"
+                                    title="Move up"
+                                  >
+                                    <ArrowUp className="w-3 h-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleMoveStep(cat.id, 1)}
+                                    disabled={realIndex >= currentList.length - 2}
+                                    className="p-0.5 text-gray-400 hover:text-gray-700 dark:hover:text-zinc-200 disabled:opacity-25"
+                                    title="Move down"
+                                  >
+                                    <ArrowDown className="w-3 h-3" />
+                                  </button>
+                                </div>
                               )}
                             </div>
 
-                            {!pinnedLast && (
-                              <div className="flex flex-col md:hidden">
-                                <button
-                                  type="button"
-                                  onClick={() => handleMoveStep(cat.id, -1)}
-                                  disabled={realIndex <= 0}
-                                  className="p-0.5 text-gray-400 hover:text-gray-700 dark:hover:text-zinc-200 disabled:opacity-25"
-                                  title="Move up"
-                                >
-                                  <ArrowUp className="w-3 h-3" />
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleMoveStep(cat.id, 1)}
-                                  disabled={realIndex >= currentList.length - 2}
-                                  className="p-0.5 text-gray-400 hover:text-gray-700 dark:hover:text-zinc-200 disabled:opacity-25"
-                                  title="Move down"
-                                >
-                                  <ArrowDown className="w-3 h-3" />
-                                </button>
-                              </div>
-                            )}
-                          </div>
-
-                          {/* 48 px Round Image */}
-                          <button
-                            type="button"
-                            onClick={() => setEditingImageId(isEditingUrl ? null : cat.id)}
-                            title="Edit image URL"
-                            className="w-12 h-12 rounded-full bg-gray-100 dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 flex items-center justify-center overflow-hidden shrink-0 p-1 hover:ring-2 hover:ring-amber-400 transition-all"
-                          >
-                            {cat.imageUrl.trim() ? (
-                              <img
-                                key={imgKey}
-                                src={cat.imageUrl.trim()}
-                                alt={cat.name}
-                                referrerPolicy="no-referrer"
-                                onLoad={() =>
-                                  setImageStatuses((prev) => ({ ...prev, [imgKey]: 'ok' }))
-                                }
-                                onError={() =>
-                                  setImageStatuses((prev) => ({ ...prev, [imgKey]: 'error' }))
-                                }
-                                className={`w-full h-full object-contain rounded-full ${
-                                  imgStatus === 'error' ? 'hidden' : 'block'
-                                }`}
-                              />
-                            ) : null}
-                            {(!cat.imageUrl.trim() || imgStatus === 'error') && (
-                              <ImageIcon className="w-5 h-5 text-gray-400" />
-                            )}
-                          </button>
-
-                          {/* Inline Category Name */}
-                          <div className="flex-1 min-w-0">
-                            <input
-                              type="text"
-                              value={cat.name}
-                              disabled={pinnedLast}
-                              onFocus={() => handleNameFocus(cat)}
-                              onBlur={() => handleNameBlur(cat)}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setCurrentList((prev) =>
-                                  prev.map((item) =>
-                                    item.id === cat.id ? { ...item, name: val } : item
-                                  )
-                                );
-                              }}
-                              aria-label={`Category name for ${cat.id}`}
-                              className="w-full px-2.5 py-1.5 rounded-lg border border-transparent hover:border-gray-300 focus:border-amber-400 focus:bg-white dark:hover:border-zinc-700 dark:focus:bg-zinc-800 bg-transparent text-xs font-bold text-gray-900 dark:text-white disabled:opacity-75 disabled:hover:border-transparent transition-colors truncate"
-                            />
-                          </div>
-
-                          {/* "N shops" Chip */}
-                          <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold tabular-nums bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-300 whitespace-nowrap shrink-0">
-                            {shopsUsingCount} {shopsUsingCount === 1 ? 'shop' : 'shops'}
-                          </span>
-
-                          {/* Active Switch */}
-                          <label
-                            className="inline-flex items-center cursor-pointer select-none shrink-0"
-                            title={
-                              pinnedLast
-                                ? 'Others stays active'
-                                : cat.active !== false
-                                ? 'Active (visible in customer app)'
-                                : 'Hidden in customer app'
-                            }
-                          >
-                            <input
-                              type="checkbox"
-                              checked={pinnedLast ? true : cat.active !== false}
-                              disabled={pinnedLast}
-                              onChange={(e) => {
-                                const checked = e.target.checked;
-                                setCurrentList((prev) =>
-                                  prev.map((item) =>
-                                    item.id === cat.id ? { ...item, active: checked } : item
-                                  )
-                                );
-                              }}
-                              className="sr-only peer"
-                            />
-                            <div className="w-9 h-5 bg-gray-300 dark:bg-zinc-700 rounded-full peer peer-checked:bg-emerald-500 peer-disabled:opacity-60 relative transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4" />
-                          </label>
-
-                          {/* "..." Actions Menu */}
-                          <div className="relative shrink-0">
+                            {/* 48 px Round Image */}
                             <button
                               type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setOpenMenuId(isMenuOpen ? null : cat.id);
-                              }}
-                              aria-label={`Actions for ${cat.name}`}
-                              className="p-1.5 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800 transition-colors"
+                              onClick={() => setEditingImageId(isEditingUrl ? null : cat.id)}
+                              title="Edit image URL"
+                              className="w-12 h-12 rounded-full bg-gray-100 dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 flex items-center justify-center overflow-hidden shrink-0 p-1 hover:ring-2 hover:ring-amber-400 transition-all"
                             >
-                              <MoreHorizontal className="w-4 h-4" />
+                              {cat.imageUrl.trim() ? (
+                                <img
+                                  key={imgKey}
+                                  src={cat.imageUrl.trim()}
+                                  alt={cat.name}
+                                  referrerPolicy="no-referrer"
+                                  onLoad={() =>
+                                    setImageStatuses((prev) => ({ ...prev, [imgKey]: 'ok' }))
+                                  }
+                                  onError={() =>
+                                    setImageStatuses((prev) => ({ ...prev, [imgKey]: 'error' }))
+                                  }
+                                  className={`w-full h-full object-contain rounded-full ${
+                                    imgStatus === 'error' ? 'hidden' : 'block'
+                                  }`}
+                                />
+                              ) : null}
+                              {(!cat.imageUrl.trim() || imgStatus === 'error') && (
+                                <ImageIcon className="w-5 h-5 text-gray-400" />
+                              )}
                             </button>
 
-                            {isMenuOpen && (
-                              <div
-                                onClick={(e) => e.stopPropagation()}
-                                className="absolute right-0 mt-1.5 w-44 rounded-xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-700 shadow-lg py-1 z-30"
-                              >
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditingImageId(isEditingUrl ? null : cat.id);
-                                    setOpenMenuId(null);
-                                  }}
-                                  className="w-full px-3 py-2 text-left text-xs font-semibold text-gray-700 dark:text-zinc-200 hover:bg-gray-50 dark:hover:bg-zinc-800 flex items-center gap-2"
-                                >
-                                  <Pencil className="w-3.5 h-3.5 text-amber-500" />
-                                  <span>{isEditingUrl ? 'Close image editor' : 'Edit image URL'}</span>
-                                </button>
+                            {/* Inline Category Name */}
+                            <div className="flex-1 min-w-0">
+                              <input
+                                type="text"
+                                value={cat.name}
+                                disabled={pinnedLast}
+                                onFocus={() => handleNameFocus(cat)}
+                                onBlur={() => handleNameBlur(cat)}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setCurrentList((prev) =>
+                                    prev.map((item) =>
+                                      item.id === cat.id ? { ...item, name: val } : item
+                                    )
+                                  );
+                                }}
+                                aria-label={`Category name for ${cat.id}`}
+                                className="w-full min-w-0 px-2 py-1.5 rounded-lg border border-transparent hover:border-gray-300 focus:border-amber-400 focus:bg-white dark:hover:border-zinc-700 dark:focus:bg-zinc-800 bg-transparent text-xs font-bold text-gray-900 dark:text-white disabled:opacity-75 disabled:hover:border-transparent transition-colors truncate"
+                              />
+                            </div>
 
-                                <button
-                                  type="button"
-                                  disabled={pinnedLast}
-                                  onClick={() => {
-                                    setOpenMenuId(null);
-                                    handleRequestDelete(cat);
-                                  }}
-                                  className="w-full px-3 py-2 text-left text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-40 disabled:pointer-events-none flex items-center gap-2"
+                            {/* "N shops" Chip */}
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold tabular-nums bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-300 whitespace-nowrap shrink-0">
+                              {shopsUsingCount} {shopsUsingCount === 1 ? 'shop' : 'shops'}
+                            </span>
+                          </div>
+
+                          {/* Second Line on Phones: Active Switch + "..." Menu */}
+                          <div className="flex items-center justify-end sm:justify-start gap-2.5 shrink-0">
+                            <span className="sm:hidden text-[11px] font-medium text-gray-500 dark:text-zinc-400">
+                              {pinnedLast || cat.active !== false ? 'Active' : 'Hidden'}
+                            </span>
+
+                            {/* Active Switch */}
+                            <label
+                              className="inline-flex items-center cursor-pointer select-none shrink-0"
+                              title={
+                                pinnedLast
+                                  ? 'Others stays active'
+                                  : cat.active !== false
+                                  ? 'Active (visible in customer app)'
+                                  : 'Hidden in customer app'
+                              }
+                            >
+                              <input
+                                type="checkbox"
+                                checked={pinnedLast ? true : cat.active !== false}
+                                disabled={pinnedLast}
+                                onChange={(e) => {
+                                  const checked = e.target.checked;
+                                  setCurrentList((prev) =>
+                                    prev.map((item) =>
+                                      item.id === cat.id ? { ...item, active: checked } : item
+                                    )
+                                  );
+                                }}
+                                className="sr-only peer"
+                              />
+                              <div className="w-9 h-5 bg-gray-300 dark:bg-zinc-700 rounded-full peer peer-checked:bg-emerald-500 peer-disabled:opacity-60 relative transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4" />
+                            </label>
+
+                            {/* "..." Actions Menu */}
+                            <div className="relative shrink-0">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenMenuId(isMenuOpen ? null : cat.id);
+                                }}
+                                aria-label={`Actions for ${cat.name}`}
+                                className="p-1.5 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800 transition-colors"
+                              >
+                                <MoreHorizontal className="w-4 h-4" />
+                              </button>
+
+                              {isMenuOpen && (
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="absolute right-0 mt-1.5 w-44 max-w-[calc(100vw-2.5rem)] rounded-xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-700 shadow-lg py-1 z-30"
                                 >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                  <span>{pinnedLast ? 'Pinned (locked)' : 'Delete'}</span>
-                                </button>
-                              </div>
-                            )}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingImageId(isEditingUrl ? null : cat.id);
+                                      setOpenMenuId(null);
+                                    }}
+                                    className="w-full px-3 py-2 text-left text-xs font-semibold text-gray-700 dark:text-zinc-200 hover:bg-gray-50 dark:hover:bg-zinc-800 flex items-center gap-2"
+                                  >
+                                    <Pencil className="w-3.5 h-3.5 text-amber-500" />
+                                    <span>{isEditingUrl ? 'Close image editor' : 'Edit image URL'}</span>
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    disabled={pinnedLast}
+                                    onClick={() => {
+                                      setOpenMenuId(null);
+                                      handleRequestDelete(cat);
+                                    }}
+                                    className="w-full px-3 py-2 text-left text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-40 disabled:pointer-events-none flex items-center gap-2"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>{pinnedLast ? 'Pinned (locked)' : 'Delete'}</span>
+                                  </button>
+                                </div>
+                              )}
+                            </div>
                           </div>
                         </div>
 
@@ -1444,10 +1464,10 @@ export const CuisinesCategories: React.FC = () => {
         </div>
       ) : (
         /* ======================== SHOP LAYOUT TAB ======================== */
-        <div className="space-y-6">
-          <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-6 space-y-5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div>
+        <div className="space-y-6 min-w-0">
+          <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-4 sm:p-6 space-y-5 min-w-0">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 min-w-0">
+              <div className="min-w-0">
                 <h2 className="text-base font-extrabold text-gray-900 dark:text-white">
                   Convenience shop product grid
                 </h2>
@@ -1455,9 +1475,14 @@ export const CuisinesCategories: React.FC = () => {
                   Applies to Delivio Mart (convenience) shop pages only.
                 </p>
               </div>
-              <span className="text-[11px] font-mono text-gray-400">
-                settings/appDesigner.convenienceColumns
-              </span>
+              <div className="flex flex-col sm:items-end gap-0.5 min-w-0">
+                <span className="text-[11px] font-mono text-gray-400 break-all">
+                  settings/appDesigner.convenienceColumns ({persistedColumns})
+                </span>
+                <span className="text-[11px] text-gray-500 dark:text-zinc-400 tabular-nums">
+                  Last saved {layoutUpdatedAt ? formatTimestamp(layoutUpdatedAt) : '—'}
+                </span>
+              </div>
             </div>
 
             {/* 3 Option Cards */}
@@ -1524,10 +1549,10 @@ export const CuisinesCategories: React.FC = () => {
           </div>
 
           {/* Live Product Grid Preview */}
-          <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-6 space-y-4">
+          <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-4 sm:p-6 space-y-4 min-w-0">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <Smartphone className="w-4 h-4 text-amber-500" />
+                <Smartphone className="w-4 h-4 text-amber-500 shrink-0" />
                 <h3 className="text-sm font-extrabold text-gray-900 dark:text-white">
                   Live Storefront Preview ({convenienceColumns}{' '}
                   {convenienceColumns === 1 ? 'column' : 'columns'})
@@ -1538,7 +1563,7 @@ export const CuisinesCategories: React.FC = () => {
               </span>
             </div>
 
-            <div className="mx-auto max-w-md rounded-3xl border-4 border-gray-900 dark:border-zinc-700 bg-gray-50 dark:bg-zinc-950 p-4 shadow-lg">
+            <div className="mx-auto w-full max-w-md rounded-3xl border-4 border-gray-900 dark:border-zinc-700 bg-gray-50 dark:bg-zinc-950 p-3 sm:p-4 shadow-lg overflow-hidden">
               {/* Mock Store Header */}
               <div className="flex items-center justify-between pb-3 mb-3 border-b border-gray-200 dark:border-zinc-800">
                 <div>

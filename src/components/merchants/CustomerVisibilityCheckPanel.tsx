@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import L from 'leaflet';
 import type { City, Merchant } from '../../types';
 import { effectiveOpen } from '../../pages/Merchants';
+import { findMatchingCity } from '../../utils/cityUtils';
 import {
   Eye,
   EyeOff,
@@ -10,7 +11,9 @@ import {
   MapPin,
   Clock,
   Navigation,
-  Map as MapIcon
+  Map as MapIcon,
+  Wrench,
+  Loader2
 } from 'lucide-react';
 
 interface CustomerVisibilityCheckPanelProps {
@@ -19,6 +22,8 @@ interface CustomerVisibilityCheckPanelProps {
   platformServices: Record<string, boolean>;
   platformTimezone: string;
   globalDispatchRadiusKm: number;
+  onFixCity?: (matchedCity: City) => Promise<void> | void;
+  fixingCity?: boolean;
 }
 
 export function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -40,11 +45,18 @@ export const CustomerVisibilityCheckPanel: React.FC<CustomerVisibilityCheckPanel
   cities,
   platformServices,
   platformTimezone,
-  globalDispatchRadiusKm
+  globalDispatchRadiusKm,
+  onFixCity,
+  fixingCity = false
 }) => {
   const cityObj = useMemo(
     () => cities.find((c) => c.id === merchant.cityId),
     [cities, merchant.cityId]
+  );
+  const isCitySavedAsText = Boolean(merchant.cityId && cities.length > 0 && !cityObj);
+  const matchedFixCity = useMemo(
+    () => (isCitySavedAsText ? findMatchingCity(merchant.cityId, cities) : null),
+    [isCitySavedAsText, merchant.cityId, cities]
   );
 
   const defaultTestCoords = useMemo(() => {
@@ -435,15 +447,37 @@ export const CustomerVisibilityCheckPanel: React.FC<CustomerVisibilityCheckPanel
               </div>
             </div>
 
-            <span
-              className={`text-[11px] font-extrabold shrink-0 ${
-                rule.pass
-                  ? 'text-emerald-700 dark:text-emerald-400'
-                  : 'text-red-600 dark:text-red-400'
-              }`}
-            >
-              {rule.pass ? 'PASS' : 'FAIL'}
-            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              {rule.key === 'city' && !rule.pass && isCitySavedAsText && onFixCity && (
+                <button
+                  type="button"
+                  disabled={fixingCity || !matchedFixCity}
+                  onClick={() => matchedFixCity && onFixCity(matchedFixCity)}
+                  title={
+                    matchedFixCity
+                      ? `Fix cityId to "${matchedFixCity.id}" (${matchedFixCity.name})`
+                      : 'No matching city found in cities collection'
+                  }
+                  className="px-2.5 py-1 rounded-lg bg-amber-400 hover:bg-amber-500 text-black text-[11px] font-extrabold flex items-center gap-1 shadow-2xs disabled:opacity-50"
+                >
+                  {fixingCity ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Wrench className="w-3 h-3" />
+                  )}
+                  <span>Fix</span>
+                </button>
+              )}
+              <span
+                className={`text-[11px] font-extrabold ${
+                  rule.pass
+                    ? 'text-emerald-700 dark:text-emerald-400'
+                    : 'text-red-600 dark:text-red-400'
+                }`}
+              >
+                {rule.pass ? 'PASS' : 'FAIL'}
+              </span>
+            </div>
           </div>
         ))}
 

@@ -50,7 +50,8 @@ import type {
   MerchantMenu,
   MerchantMenuSchedule,
   MainCategoriesDoc,
-  MainCategoryItem
+  MainCategoryItem,
+  City
 } from '../types';
 import { FOOD_CATEGORIES, CONVENIENCE_CATEGORIES } from '../constants';
 import {
@@ -108,7 +109,8 @@ import {
   ChevronDown,
   ChevronRight,
   KeyRound,
-  Info
+  Info,
+  Wrench
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { TableSkeleton } from '../components/common/SkeletonLoader';
@@ -116,6 +118,8 @@ import { PromoCodesTab } from '../components/promos/PromoCodesTab';
 import { AddOutletModal, EditOutletModal } from '../components/merchants/OutletModals';
 import { CustomerVisibilityCheckPanel } from '../components/merchants/CustomerVisibilityCheckPanel';
 import { formatShopDisplayName, getChainOptions, type ChainOption } from '../utils/outletUtils';
+import { findMatchingCity, isExistingCityId } from '../utils/cityUtils';
+import { formatGeocoderAddress, reverseGeocodePin } from '../utils/geocoder';
 
 export const DEFAULT_WEEKLY_HOURS: MerchantWeeklyHours = {
   monday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
@@ -926,6 +930,8 @@ export const Merchants: React.FC = () => {
   const [email, setEmail] = useState('');
   const [description, setDescription] = useState('');
   const [logoUrl, setLogoUrl] = useState('');
+  const [editCityId, setEditCityId] = useState('');
+  const [fixingCity, setFixingCity] = useState(false);
   const [commissionRate, setCommissionRate] = useState<number>(15);
   const [mainCategories, setMainCategories] = useState<MainCategoriesDoc>(() =>
     getDefaultMainCategoriesDoc()
@@ -1039,6 +1045,9 @@ export const Merchants: React.FC = () => {
   const [searchingNominatim, setSearchingNominatim] = useState(false);
   const [nominatimResults, setNominatimResults] = useState<any[]>([]);
   const [savingLocation, setSavingLocation] = useState(false);
+  const [rebuildingAddress, setRebuildingAddress] = useState(false);
+  const [pinAddressDirty, setPinAddressDirty] = useState(false);
+  const [addressManuallyEdited, setAddressManuallyEdited] = useState(false);
   const [resettingLocationCooldown, setResettingLocationCooldown] = useState(false);
 
   // 1. Fetch Merchants
@@ -1154,10 +1163,13 @@ export const Merchants: React.FC = () => {
     setEmail(selectedMerchant.email || '');
     setDescription(selectedMerchant.description || '');
     setLogoUrl(selectedMerchant.logoUrl || '');
+    setEditCityId(selectedMerchant.cityId || '');
     setCommissionRate(selectedMerchant.commissionRate ?? 15);
     setLocLat(selectedMerchant.lat || 9.7392);
     setLocLng(selectedMerchant.lng || 118.7353);
     setLocAddress(selectedMerchant.address || '');
+    setPinAddressDirty(false);
+    setAddressManuallyEdited(false);
 
     // Initialize Hours & AutoSchedule
     setMerchantHours(selectedMerchant.hours || DEFAULT_WEEKLY_HOURS);
@@ -2339,6 +2351,7 @@ export const Merchants: React.FC = () => {
       const pos = marker.getLatLng();
       setLocLat(pos.lat);
       setLocLng(pos.lng);
+      setPinAddressDirty(true);
     });
 
     markerRef.current = marker;
@@ -2352,14 +2365,14 @@ export const Merchants: React.FC = () => {
     };
   }, [activeTab, selectedMerchant]);
 
-  // Nominatim Search (countrycodes=ph)
+  // Nominatim Search (countrycodes=ph, addressdetails=1)
   const handleNominatimSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!nominatimSearch.trim()) return;
     try {
       setSearchingNominatim(true);
       const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&countrycodes=ph&q=${encodeURIComponent(
+        `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&countrycodes=ph&q=${encodeURIComponent(
           nominatimSearch.trim()
         )}`
       );
@@ -2375,9 +2388,12 @@ export const Merchants: React.FC = () => {
   const selectNominatimResult = (res: any) => {
     const lat = parseFloat(res.lat);
     const lng = parseFloat(res.lon);
+    const formattedAddress = formatGeocoderAddress(res);
     setLocLat(lat);
     setLocLng(lng);
-    setLocAddress(res.display_name);
+    setLocAddress(formattedAddress);
+    setPinAddressDirty(false);
+    setAddressManuallyEdited(false);
     setNominatimResults([]);
 
     if (mapInstanceRef.current && markerRef.current) {
@@ -2386,14 +2402,50 @@ export const Merchants: React.FC = () => {
     }
   };
 
+  const handleRebuildAddressFromPin = async () => {
+    if (!Number.isFinite(locLat) || !Number.isFinite(locLng)) {
+      showError('Invalid pin coordinates.');
+      return;
+    }
+    try {
+      setRebuildingAddress(true);
+      const formatted = await reverseGeocodePin(locLat, locLng);
+      if (!formatted) {
+        showError('No address details found for these coordinates.');
+        return;
+      }
+      setLocAddress(formatted);
+      setPinAddressDirty(false);
+      setAddressManuallyEdited(false);
+      showSuccess('Address rebuilt from pin coordinates.');
+    } catch (err: any) {
+      showError(err?.message || 'Failed to rebuild address from pin.');
+    } finally {
+      setRebuildingAddress(false);
+    }
+  };
+
   // Save Location
   const handleSaveLocation = async () => {
     if (!selectedMerchant) return;
     try {
       setSavingLocation(true);
+      let finalAddress = locAddress.trim();
+      if (!finalAddress || (pinAddressDirty && !addressManuallyEdited)) {
+        try {
+          const reversed = await reverseGeocodePin(locLat, locLng);
+          if (reversed) {
+            finalAddress = reversed;
+            setLocAddress(reversed);
+          }
+        } catch (geoErr) {
+          console.warn('Reverse geocode fallback during Save Store Pin failed:', geoErr);
+        }
+      }
+
       const mRef = doc(db, 'merchants', selectedMerchant.id);
       await updateDoc(mRef, {
-        address: locAddress,
+        address: finalAddress,
         lat: locLat,
         lng: locLng,
         updatedAt: Timestamp.now()
@@ -2405,12 +2457,21 @@ export const Merchants: React.FC = () => {
         action: 'UPDATE_MERCHANT_LOCATION',
         entityType: 'merchant',
         entityId: selectedMerchant.id,
-        details: `Updated coordinates to [${locLat}, ${locLng}], Address: ${locAddress}`
+        details: `Updated coordinates to [${locLat}, ${locLng}], Address: ${finalAddress}`
       });
 
       showSuccess('Store location updated.');
+      setPinAddressDirty(false);
+      setAddressManuallyEdited(false);
       setSelectedMerchant((prev) =>
-        prev ? { ...prev, address: locAddress, lat: locLat, lng: locLng } : null
+        prev ? { ...prev, address: finalAddress, lat: locLat, lng: locLng } : null
+      );
+      setMerchants((prev) =>
+        prev.map((m) =>
+          m.id === selectedMerchant.id
+            ? { ...m, address: finalAddress, lat: locLat, lng: locLng }
+            : m
+        )
       );
     } catch (err: any) {
       showError(err);
@@ -2448,6 +2509,58 @@ export const Merchants: React.FC = () => {
     }
   };
 
+  // Fix text-saved merchant cityId to matching city document id
+  const handleFixMerchantCity = async (targetCity?: City | null) => {
+    if (!selectedMerchant) return;
+    const matched = targetCity || findMatchingCity(selectedMerchant.cityId, cities);
+    if (!matched) {
+      showError(
+        `No matching city found for "${selectedMerchant.cityId || ''}". Please pick a city from the dropdown and save.`
+      );
+      return;
+    }
+
+    try {
+      setFixingCity(true);
+      const now = Timestamp.now();
+      await updateDoc(doc(db, 'merchants', selectedMerchant.id), {
+        cityId: matched.id,
+        updatedAt: now
+      });
+
+      await logEditHistory({
+        entityType: 'merchant',
+        entityId: selectedMerchant.id,
+        field: 'cityId',
+        oldValue: selectedMerchant.cityId || '',
+        newValue: matched.id,
+        editedBy: adminProfile?.uid || 'admin',
+        editedByName: adminProfile?.name || 'Administrator'
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'FIX_MERCHANT_CITY',
+        entityType: 'merchant',
+        entityId: selectedMerchant.id,
+        details: `Fixed merchant cityId from "${selectedMerchant.cityId || ''}" to "${matched.id}" (${matched.name})`
+      });
+
+      setEditCityId(matched.id);
+      setSelectedMerchant((prev) => (prev ? { ...prev, cityId: matched.id } : null));
+      setMerchants((prev) =>
+        prev.map((m) => (m.id === selectedMerchant.id ? { ...m, cityId: matched.id } : m))
+      );
+      showSuccess(`City fixed to ${matched.name} (${matched.id}).`);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setFixingCity(false);
+    }
+  };
+
   // Save Details
   const handleSaveDetails = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2471,6 +2584,7 @@ export const Merchants: React.FC = () => {
         ownerName: ownerName.trim(),
         phone: phone.trim(),
         email: email.trim(),
+        cityId: editCityId.trim(),
         description: description.trim(),
         logoUrl: logoUrl.trim(),
         cuisineTags: cleanedCuisineTags,
@@ -2482,7 +2596,7 @@ export const Merchants: React.FC = () => {
 
       // Track edit history
       const old = selectedMerchant;
-      for (const key of ['name', 'ownerName', 'phone', 'email', 'commissionRate'] as const) {
+      for (const key of ['name', 'ownerName', 'phone', 'email', 'cityId', 'commissionRate'] as const) {
         if ((old[key] as any) !== (updates[key] as any)) {
           await logEditHistory({
             entityType: 'merchant',
@@ -4936,6 +5050,8 @@ export const Merchants: React.FC = () => {
                     platformServices={platformServices}
                     platformTimezone={platformTimezone}
                     globalDispatchRadiusKm={globalDispatchRadiusKm}
+                    onFixCity={(matched) => handleFixMerchantCity(matched)}
+                    fixingCity={fixingCity}
                   />
 
                   {/* Best Sellers Card */}
@@ -5060,6 +5176,62 @@ export const Merchants: React.FC = () => {
                         className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white font-bold text-amber-600"
                       />
                     </div>
+                  </div>
+
+                  {/* City Dropdown + Text City Fix */}
+                  <div>
+                    <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                      City
+                    </label>
+                    <select
+                      value={editCityId}
+                      onChange={(e) => setEditCityId(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-semibold text-gray-900 dark:text-white"
+                    >
+                      <option value="">Select City</option>
+                      {editCityId && cities.length > 0 && !isExistingCityId(editCityId, cities) && (
+                        <option value={editCityId}>
+                          {editCityId} (unmatched text)
+                        </option>
+                      )}
+                      {cities.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+
+                    {selectedMerchant.cityId &&
+                      cities.length > 0 &&
+                      !isExistingCityId(selectedMerchant.cityId, cities) && (() => {
+                        const proposedCity = findMatchingCity(selectedMerchant.cityId, cities);
+                        return (
+                          <div className="mt-2 p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+                            <span className="inline-flex items-center gap-1.5 font-bold text-amber-900 dark:text-amber-200">
+                              <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                              <span>City saved as text: {selectedMerchant.cityId}</span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleFixMerchantCity(proposedCity)}
+                              disabled={fixingCity}
+                              title={
+                                proposedCity
+                                  ? `Match to ${proposedCity.name} (${proposedCity.id})`
+                                  : 'Try auto-matching city'
+                              }
+                              className="px-3 py-1 rounded-lg bg-amber-400 hover:bg-amber-500 text-black text-[11px] font-extrabold flex items-center gap-1 shadow-2xs disabled:opacity-50"
+                            >
+                              {fixingCity ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Wrench className="w-3 h-3" />
+                              )}
+                              <span>Fix</span>
+                            </button>
+                          </div>
+                        );
+                      })()}
                   </div>
 
                   <div>
@@ -6065,7 +6237,7 @@ export const Merchants: React.FC = () => {
                           onClick={() => selectNominatimResult(r)}
                           className="p-2.5 hover:bg-amber-50 dark:hover:bg-zinc-800 cursor-pointer text-gray-800 dark:text-zinc-200"
                         >
-                          {r.display_name}
+                          {formatGeocoderAddress(r) || r.display_name}
                         </div>
                       ))}
                     </div>
@@ -6078,13 +6250,31 @@ export const Merchants: React.FC = () => {
                   />
 
                   <div>
-                    <label className="block text-xs font-semibold uppercase text-gray-500 mb-1">
-                      Store Address String
-                    </label>
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                      <label className="block text-xs font-semibold uppercase text-gray-500">
+                        Store Address String
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleRebuildAddressFromPin}
+                        disabled={rebuildingAddress}
+                        className="px-2.5 py-1 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 hover:bg-gray-50 dark:hover:bg-zinc-700 text-[11px] font-bold text-gray-700 dark:text-zinc-200 flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        {rebuildingAddress ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <RotateCw className="w-3 h-3 text-amber-500" />
+                        )}
+                        <span>Rebuild address from pin</span>
+                      </button>
+                    </div>
                     <input
                       type="text"
                       value={locAddress}
-                      onChange={(e) => setLocAddress(e.target.value)}
+                      onChange={(e) => {
+                        setLocAddress(e.target.value);
+                        setAddressManuallyEdited(true);
+                      }}
                       className="w-full px-3.5 py-2 text-xs rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
                     />
                   </div>

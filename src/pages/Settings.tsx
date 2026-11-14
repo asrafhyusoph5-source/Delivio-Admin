@@ -15,6 +15,7 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { useCity } from '../context/CityContext';
 import { logAuditEvent } from '../utils/audit';
+import { findMatchingCity } from '../utils/cityUtils';
 import type {
   PlatformSettings,
   OrderServiceType,
@@ -22,7 +23,8 @@ import type {
   DispatchSettings,
   DeliveryOptionType,
   ReceiptDesignConfig,
-  CheckoutSettings
+  CheckoutSettings,
+  City
 } from '../types';
 import {
   VEHICLE_TYPES,
@@ -73,9 +75,20 @@ import {
   Printer,
   Star,
   Users,
-  MessageSquare
+  MessageSquare,
+  MapPin,
+  Wrench
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
+
+interface MerchantCityFixRow {
+  merchantId: string;
+  shopName: string;
+  branchName?: string;
+  currentCityId: string;
+  proposedCityId: string;
+  proposedCityName: string;
+}
 
 interface MigrationPreviewData {
   totalRiders: number;
@@ -116,6 +129,15 @@ export const Settings: React.FC = () => {
   const [rebuildRatingsModalOpen, setRebuildRatingsModalOpen] = useState(false);
   const [rebuildingRatings, setRebuildingRatings] = useState(false);
   const [rebuildRatingsResult, setRebuildRatingsResult] = useState<string | null>(null);
+
+  // Fix merchant cities maintenance state
+  const [cityFixScanned, setCityFixScanned] = useState(false);
+  const [scanningCityFix, setScanningCityFix] = useState(false);
+  const [cityFixRows, setCityFixRows] = useState<MerchantCityFixRow[]>([]);
+  const [cityFixCitiesList, setCityFixCitiesList] = useState<City[]>([]);
+  const [fixCitiesModalOpen, setFixCitiesModalOpen] = useState(false);
+  const [applyingCityFixes, setApplyingCityFixes] = useState(false);
+  const [fixCitiesResult, setFixCitiesResult] = useState<string | null>(null);
 
   // Platform Service Switches
   const [platformServices, setPlatformServices] = useState<Record<OrderServiceType, boolean>>({
@@ -808,6 +830,129 @@ export const Settings: React.FC = () => {
       showError(err);
     } finally {
       setRebuildingRatings(false);
+    }
+  };
+
+  // Maintenance: Scan every merchant whose cityId is not a city document id
+  const handleScanMerchantCities = async () => {
+    try {
+      setScanningCityFix(true);
+      setFixCitiesResult(null);
+      const [citiesSnap, merchSnap] = await Promise.all([
+        getDocs(collection(db, 'cities')),
+        getDocs(collection(db, 'merchants'))
+      ]);
+
+      const cityList: City[] = citiesSnap.docs.map((d) => ({
+        id: d.id,
+        name: d.data().name || d.id,
+        province: d.data().province || '',
+        status: d.data().status || 'active',
+        center: d.data().center || { lat: 9.7392, lng: 118.7353 },
+        radiusKm: Number(d.data().radiusKm) || 15
+      }));
+      cityList.sort((a, b) => a.name.localeCompare(b.name));
+      const cityIdSet = new Set(cityList.map((c) => c.id));
+
+      const rows: MerchantCityFixRow[] = [];
+      merchSnap.forEach((d) => {
+        const dt = d.data() || {};
+        const rawCityId = typeof dt.cityId === 'string' ? dt.cityId.trim() : '';
+        if (!rawCityId || !cityIdSet.has(rawCityId)) {
+          const matched = findMatchingCity(rawCityId, cityList);
+          rows.push({
+            merchantId: d.id,
+            shopName: dt.name || 'Store',
+            branchName: dt.branchName || '',
+            currentCityId: rawCityId,
+            proposedCityId: matched ? matched.id : '',
+            proposedCityName: matched ? matched.name : ''
+          });
+        }
+      });
+
+      rows.sort((a, b) => a.shopName.localeCompare(b.shopName));
+      setCityFixCitiesList(cityList);
+      setCityFixRows(rows);
+      setCityFixScanned(true);
+
+      if (rows.length === 0) {
+        showSuccess('All merchants already have valid city document IDs.');
+      }
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setScanningCityFix(false);
+    }
+  };
+
+  const handleUpdateProposedCity = (merchantId: string, nextCityId: string) => {
+    const cityObj = cityFixCitiesList.find((c) => c.id === nextCityId);
+    setCityFixRows((prev) =>
+      prev.map((row) =>
+        row.merchantId === merchantId
+          ? {
+              ...row,
+              proposedCityId: nextCityId,
+              proposedCityName: cityObj ? cityObj.name : ''
+            }
+          : row
+      )
+    );
+  };
+
+  const handleApplyMerchantCityFixes = async () => {
+    const fixableRows = cityFixRows.filter((r) => Boolean(r.proposedCityId));
+    if (fixableRows.length === 0) {
+      setFixCitiesModalOpen(false);
+      return;
+    }
+
+    try {
+      setApplyingCityFixes(true);
+      const CHUNK_SIZE = 400;
+      const now = Timestamp.now();
+
+      for (let i = 0; i < fixableRows.length; i += CHUNK_SIZE) {
+        const slice = fixableRows.slice(i, i + CHUNK_SIZE);
+        const batch = writeBatch(db);
+        slice.forEach((row) => {
+          batch.update(doc(db, 'merchants', row.merchantId), {
+            cityId: row.proposedCityId,
+            updatedAt: now
+          });
+        });
+        await batch.commit();
+      }
+
+      const sampleChanges = fixableRows
+        .slice(0, 10)
+        .map(
+          (r) =>
+            `${r.shopName}${r.branchName ? ` - ${r.branchName}` : ''}: "${r.currentCityId || '(empty)'}" -> "${r.proposedCityId}"`
+        )
+        .join('; ');
+      const summaryMsg = `Updated cityId on ${fixableRows.length} ${fixableRows.length === 1 ? 'shop' : 'shops'}`;
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'FIX_MERCHANT_CITIES',
+        entityType: 'merchant',
+        entityId: 'all',
+        details: `${summaryMsg}. ${sampleChanges}${fixableRows.length > 10 ? ` (+${fixableRows.length - 10} more)` : ''}`
+      });
+
+      setFixCitiesResult(summaryMsg);
+      setFixCitiesModalOpen(false);
+      setCityFixRows((prev) => prev.filter((r) => !r.proposedCityId));
+      await refreshCities();
+      showSuccess(summaryMsg);
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setApplyingCityFixes(false);
     }
   };
 
@@ -2907,6 +3052,113 @@ export const Settings: React.FC = () => {
         )}
       </div>
 
+      {/* Fix Merchant Cities Card */}
+      <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="p-2.5 rounded-2xl bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 shrink-0">
+              <MapPin className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                Fix merchant cities
+              </h3>
+              <p className="text-xs text-gray-600 dark:text-zinc-400 mt-0.5 max-w-2xl">
+                Scans every document in <code className="font-mono text-amber-700 dark:text-amber-300">merchants</code> whose <code className="font-mono text-amber-700 dark:text-amber-300">cityId</code> is not a valid <code className="font-mono text-amber-700 dark:text-amber-300">cities</code> document ID and proposes the matching city ID.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleScanMerchantCities}
+              disabled={scanningCityFix || applyingCityFixes}
+              className="px-4 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 hover:bg-gray-50 dark:hover:bg-zinc-700 text-gray-800 dark:text-zinc-200 text-xs font-bold flex items-center justify-center gap-2 shadow-xs disabled:opacity-50 whitespace-nowrap"
+            >
+              {scanningCityFix ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+              <span>{cityFixScanned ? 'Re-scan merchant cities' : 'Scan merchant cities'}</span>
+            </button>
+
+            {cityFixRows.some((r) => Boolean(r.proposedCityId)) && (
+              <button
+                type="button"
+                onClick={() => setFixCitiesModalOpen(true)}
+                disabled={applyingCityFixes || scanningCityFix}
+                className="delivio-btn-yellow px-4 py-2.5 rounded-xl text-xs font-extrabold flex items-center justify-center gap-2 shadow-xs disabled:opacity-50 whitespace-nowrap"
+              >
+                {applyingCityFixes ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wrench className="w-4 h-4" />}
+                <span>
+                  Apply fixes ({cityFixRows.filter((r) => Boolean(r.proposedCityId)).length})
+                </span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {cityFixScanned && (
+          cityFixRows.length === 0 ? (
+            <div className="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900 text-xs font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>All scanned merchants have valid city document IDs.</span>
+            </div>
+          ) : (
+            <div className="border border-gray-200 dark:border-zinc-800 rounded-2xl overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-gray-50 dark:bg-zinc-850/60 uppercase font-bold text-gray-500 dark:text-zinc-400 border-b border-gray-200 dark:border-zinc-800">
+                    <tr>
+                      <th className="px-4 py-3">Shop</th>
+                      <th className="px-4 py-3">Current value</th>
+                      <th className="px-4 py-3">Proposed city id</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-zinc-800">
+                    {cityFixRows.map((row) => (
+                      <tr key={row.merchantId} className="hover:bg-gray-50/70 dark:hover:bg-zinc-800/40">
+                        <td className="px-4 py-2.5">
+                          <div className="font-bold text-gray-900 dark:text-white">
+                            {row.shopName}
+                            {row.branchName ? ` - ${row.branchName}` : ''}
+                          </div>
+                          <div className="text-[10px] font-mono text-gray-400">{row.merchantId}</div>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <span className="font-mono text-amber-700 dark:text-amber-300 font-semibold">
+                            {row.currentCityId || '(empty)'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <select
+                            value={row.proposedCityId}
+                            onChange={(e) => handleUpdateProposedCity(row.merchantId, e.target.value)}
+                            className="px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-mono font-bold text-gray-900 dark:text-white"
+                          >
+                            <option value="">No match — select city id...</option>
+                            {cityFixCitiesList.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.id} ({c.name})
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )
+        )}
+
+        {fixCitiesResult && (
+          <div className="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900 text-xs font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>{fixCitiesResult}</span>
+          </div>
+        )}
+      </div>
+
       {/* Rating Clean-Up Card */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-5">
         <div className="flex items-start gap-3">
@@ -3362,6 +3614,20 @@ export const Settings: React.FC = () => {
           title="Rebuild merchant ratings from customer reviews?"
           message="This scans all customer reviews (merchantId and ratingMerchant) and updates ratingSum and ratingCount for every merchant document. This action will be recorded in auditLogs."
           confirmLabel={rebuildingRatings ? "Rebuilding..." : "Rebuild Ratings"}
+          reasonRequired={false}
+          isDestructive={false}
+        />
+      )}
+
+      {/* Confirmation Modal for Fixing Merchant Cities */}
+      {fixCitiesModalOpen && (
+        <ConfirmationModal
+          isOpen={fixCitiesModalOpen}
+          onClose={() => setFixCitiesModalOpen(false)}
+          onConfirm={handleApplyMerchantCityFixes}
+          title="Apply merchant cityId fixes?"
+          message={`This will update cityId to the proposed city document ID on ${cityFixRows.filter((r) => Boolean(r.proposedCityId)).length} merchant document(s) and write an auditLogs entry.`}
+          confirmLabel={applyingCityFixes ? "Applying..." : "Apply Fixes"}
           reasonRequired={false}
           isDestructive={false}
         />
