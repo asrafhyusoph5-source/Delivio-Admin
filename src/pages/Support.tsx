@@ -153,7 +153,11 @@ export const Support: React.FC = () => {
         const list: SupportTicket[] = [];
         snapshot.forEach((d) => {
           const dt = d.data();
-          const isDriver = dt.reporterType === 'rider' || Boolean(dt.riderId && !dt.customerId);
+          const isDriver =
+            dt.reporterType === 'rider' ||
+            dt.reporterType === 'driver' ||
+            (dt.reason || '').toLowerCase() === 'split_delivery' ||
+            Boolean(dt.riderId && !dt.customerId);
           list.push({
             id: d.id,
             reporterType: isDriver ? 'rider' : 'customer',
@@ -234,10 +238,12 @@ export const Support: React.FC = () => {
             type: dt.type || 'food',
             status: dt.status || 'active',
             isOpen: Boolean(dt.isOpen),
+            cityId: dt.cityId,
             address: dt.address || '',
             lat: Number(dt.lat) || 0,
             lng: Number(dt.lng) || 0,
             commissionRate: dt.commissionRate ?? 15,
+            specialRadius: dt.specialRadius,
             chainId: dt.chainId,
             chainName: dt.chainName,
             isBranch: dt.isBranch,
@@ -251,7 +257,10 @@ export const Support: React.FC = () => {
         oSnap.forEach((d) => {
           const ord = { id: d.id, ...d.data() } as Order;
           oMap[d.id] = ord;
-          if (ord.orderNumber) oMap[ord.orderNumber] = ord;
+          if (ord.orderNumber) {
+            oMap[ord.orderNumber] = ord;
+            oMap[String(ord.orderNumber).replace(/^#/, '')] = ord;
+          }
         });
         setOrdersLookupByKey(oMap);
       } catch (err) {
@@ -265,7 +274,11 @@ export const Support: React.FC = () => {
 
   const resolveTicketOrder = (t: SupportTicket): Partial<Order> | null => {
     if (t.orderId && ordersLookupByKey[t.orderId]) return ordersLookupByKey[t.orderId];
-    if (t.orderNumber && ordersLookupByKey[t.orderNumber]) return ordersLookupByKey[t.orderNumber];
+    if (t.orderNumber) {
+      const cleanNum = String(t.orderNumber).replace(/^#/, '');
+      if (ordersLookupByKey[t.orderNumber]) return ordersLookupByKey[t.orderNumber];
+      if (ordersLookupByKey[cleanNum]) return ordersLookupByKey[cleanNum];
+    }
     if (t.merchantId || t.merchantName || t.branchName || t.branchCode || t.chainId) {
       return {
         merchantId: t.merchantId || undefined,
@@ -379,13 +392,19 @@ export const Support: React.FC = () => {
         }
         // Fallback by orderNumber
         if (selectedTicket.orderNumber) {
-          const qOrder = query(collection(db, 'orders'), limit(1));
+          const rawNum = String(selectedTicket.orderNumber).trim();
+          const cleanNum = rawNum.replace(/^#/, '');
+          const candidates = Array.from(new Set([rawNum, cleanNum, `#${cleanNum}`].filter(Boolean)));
+          const qOrder = query(
+            collection(db, 'orders'),
+            where('orderNumber', 'in', candidates),
+            limit(5)
+          );
           const snaps = await getDocs(qOrder);
           let found: Order | null = null;
           snaps.forEach((d) => {
-            const dt = d.data();
-            if (dt.orderNumber === selectedTicket.orderNumber) {
-              found = { id: d.id, ...dt } as Order;
+            if (!found) {
+              found = { id: d.id, ...d.data() } as Order;
             }
           });
           setRelatedOrder(found);
@@ -496,7 +515,8 @@ export const Support: React.FC = () => {
 
       // Service filter
       if (serviceFilter !== 'all') {
-        const srv = (t.serviceType || relatedOrder?.serviceType || '').toLowerCase();
+        const ord = resolveTicketOrder(t);
+        const srv = (t.serviceType || ord?.serviceType || '').toLowerCase();
         if (srv !== serviceFilter.toLowerCase()) return false;
       }
 
@@ -608,18 +628,31 @@ export const Support: React.FC = () => {
     return ticket.reason;
   };
 
+  const isSplitDeliveryRequestTicket = (ticket: SupportTicket | null | undefined) => {
+    if (!ticket) return false;
+    const r = (ticket.reason || '').trim().toLowerCase();
+    const rLabel = (ticket.reasonLabel || '').trim().toLowerCase();
+    return r === 'split_delivery' || rLabel === 'split request';
+  };
+
   // Determine if Split Delivery button is available
   const canSplitDelivery = useMemo(() => {
     if (!selectedTicket) return false;
     // food and convenience only
-    const srv = (selectedTicket.serviceType || relatedOrder?.serviceType || '').toLowerCase();
+    const fallbackOrder = resolveTicketOrder(selectedTicket);
+    const srv = (
+      selectedTicket.serviceType ||
+      relatedOrder?.serviceType ||
+      fallbackOrder?.serviceType ||
+      ''
+    ).toLowerCase();
     if (srv !== 'food' && srv !== 'convenience') return false;
-    // only on an accepted ticket
-    if (selectedTicket.status !== 'accepted' && selectedTicket.status !== 'in_progress') return false;
-    // tickets with reason cant_fit_bag or too_big
+
     const r = (selectedTicket.reason || '').toLowerCase();
     const rLabel = (selectedTicket.reasonLabel || '').toLowerCase();
+    const isSplitRequest = r === 'split_delivery' || r.includes('split') || rLabel.includes('split');
     const isSplitReason =
+      isSplitRequest ||
       r === 'cant_fit_bag' ||
       r === 'too_big' ||
       r.includes('bag') ||
@@ -628,6 +661,14 @@ export const Support: React.FC = () => {
       rLabel.includes('bag') ||
       rLabel.includes('heavy');
     if (!isSplitReason) return false;
+
+    // split_delivery works while open/accepted/in_progress (not resolved); legacy reasons require accepted/in_progress
+    if (isSplitRequest) {
+      if (selectedTicket.status === 'resolved') return false;
+    } else if (selectedTicket.status !== 'accepted' && selectedTicket.status !== 'in_progress') {
+      return false;
+    }
+
     // not already split
     const splitOut = relatedOrder?.splitOut as any;
     if (
@@ -639,7 +680,7 @@ export const Support: React.FC = () => {
       return false;
     }
     return true;
-  }, [selectedTicket, relatedOrder]);
+  }, [selectedTicket, relatedOrder, ordersLookupByKey]);
 
   // Candidate items available to split
   const candidateItems = useMemo(() => {
@@ -718,6 +759,88 @@ export const Support: React.FC = () => {
       const adminId = adminProfile?.uid || 'admin';
       const parentNum = relatedOrder.orderNumber || selectedTicket.orderNumber || relatedOrder.id.slice(0, 6);
 
+      // Resolve merchant + dispatch radius so Rider 2+ offers have valid coords, cityId & searchRadiusKm
+      const sourceMerchantId = relatedOrder.merchantId || relatedOrder.sourceMerchantId || null;
+      let merchantData: Partial<Merchant> | undefined = sourceMerchantId
+        ? merchantsById[sourceMerchantId]
+        : undefined;
+      if (sourceMerchantId && (!merchantData || !merchantData.lat || !merchantData.lng)) {
+        try {
+          const mSnap = await getDoc(doc(db, 'merchants', sourceMerchantId));
+          if (mSnap.exists()) {
+            const md = mSnap.data();
+            merchantData = {
+              id: mSnap.id,
+              name: md.name,
+              address: md.address,
+              lat: Number(md.lat) || 0,
+              lng: Number(md.lng) || 0,
+              cityId: md.cityId,
+              specialRadius: md.specialRadius,
+              branchName: md.branchName,
+              branchCode: md.branchCode,
+              chainId: md.chainId,
+              phone: md.phone
+            };
+          }
+        } catch (err) {
+          console.warn('Failed to fetch merchant for split child order:', err);
+        }
+      }
+
+      let globalRadiusKm = 5;
+      try {
+        const dispatchSnap = await getDoc(doc(db, 'settings', 'dispatch'));
+        if (dispatchSnap.exists() && Number(dispatchSnap.data().searchRadiusKm) > 0) {
+          globalRadiusKm = Number(dispatchSnap.data().searchRadiusKm);
+        }
+      } catch (err) {
+        console.warn('Failed to load dispatch radius for split:', err);
+      }
+
+      const effectiveRadiusKm =
+        merchantData?.specialRadius?.enabled && Number(merchantData.specialRadius.radiusKm) > 0
+          ? Number(merchantData.specialRadius.radiusKm)
+          : Number(relatedOrder.searchRadiusKm || relatedOrder.dispatch?.searchRadiusKm) ||
+            globalRadiusKm ||
+            5;
+
+      const resolvedCityId =
+        relatedOrder.cityId ||
+        merchantData?.cityId ||
+        (selectedCityId && selectedCityId !== 'all' ? selectedCityId : '') ||
+        '';
+
+      const pickupLat = Number(relatedOrder.pickup?.lat) || Number(merchantData?.lat) || 0;
+      const pickupLng = Number(relatedOrder.pickup?.lng) || Number(merchantData?.lng) || 0;
+      const pickupAddress =
+        relatedOrder.pickup?.address || relatedOrder.merchantAddress || merchantData?.address || '';
+      const pickupLabel =
+        relatedOrder.pickup?.label || relatedOrder.merchantName || merchantData?.name || 'Merchant';
+      const resolvedPickup =
+        pickupAddress || (pickupLat !== 0 && pickupLng !== 0)
+          ? {
+              ...(relatedOrder.pickup || {}),
+              label: pickupLabel,
+              address: pickupAddress,
+              lat: pickupLat,
+              lng: pickupLng
+            }
+          : null;
+
+      const excludedRiderIds = Array.from(
+        new Set(
+          [relatedOrder.riderId, selectedTicket.riderId].filter((id): id is string => Boolean(id))
+        )
+      );
+
+      const resolvedServiceType = (
+        relatedOrder.serviceType ||
+        selectedTicket.serviceType ||
+        'food'
+      ).toLowerCase();
+      const fixedFeeNum = Number(splitRiderFee) || 45;
+
       const batch = writeBatch(db);
       const childSummaryList: any[] = [];
       const childOrderIds: string[] = [];
@@ -731,49 +854,57 @@ export const Support: React.FC = () => {
 
         const childOrderData = {
           orderNumber: childOrderNum,
-          merchantName: relatedOrder.merchantName || '',
-          branchName: relatedOrder.branchName || null,
-          branchCode: relatedOrder.branchCode || null,
-          chainId: relatedOrder.chainId || null,
+          merchantName: relatedOrder.merchantName || merchantData?.name || '',
+          merchantAddress: relatedOrder.merchantAddress || merchantData?.address || '',
+          merchantPhone: relatedOrder.merchantPhone || merchantData?.phone || '',
+          branchName: relatedOrder.branchName ?? merchantData?.branchName ?? null,
+          branchCode: relatedOrder.branchCode ?? merchantData?.branchCode ?? null,
+          chainId: relatedOrder.chainId ?? merchantData?.chainId ?? null,
           customerName: relatedOrder.customerName || selectedTicket.customerName || 'Customer',
           customerPhone: relatedOrder.customerPhone || selectedTicket.customerPhone || '',
-          cityId: relatedOrder.cityId || selectedCityId || '',
-          serviceType: relatedOrder.serviceType || selectedTicket.serviceType || 'food',
-          pickup: relatedOrder.pickup || (relatedOrder.merchantAddress ? { address: relatedOrder.merchantAddress } : null),
+          cityId: resolvedCityId,
+          serviceType: resolvedServiceType,
+          vehicleType: relatedOrder.vehicleType || 'motorcycle',
+          pickup: resolvedPickup,
           dropoff: relatedOrder.dropoff || null,
           fulfillment: 'delivery',
           fulfillmentType: 'delivery',
+          isPickup: false,
           items: assignedItems,
-          status: relatedOrder.status || 'Merchant accepted',
+          // Dispatchable status so Riders 2+ immediately receive the split offer regardless of Rider 1's stage
+          status: 'Ready',
+          isReady: true,
           statusHistory: [
             {
-              status: relatedOrder.status || 'Merchant accepted',
+              status: 'Ready',
               at: now,
               note: `Split child order for Rider ${seq} of ${ridersNeeded} created from #${parentNum} by Support (${adminName})`
             }
           ],
           customerId: null,
           merchantId: null,
-          sourceCustomerId: relatedOrder.customerId || selectedTicket.customerId || null,
-          sourceMerchantId: relatedOrder.merchantId || null,
+          sourceCustomerId:
+            relatedOrder.customerId || relatedOrder.sourceCustomerId || selectedTicket.customerId || null,
+          sourceMerchantId: sourceMerchantId,
           riderId: null,
           riderName: null,
           riderPhone: null,
+          batchId: null,
+          bookingRank: null,
+          holdUntil: null,
+          holdMinutes: 0,
           isSplitChild: true,
           seq: seq,
           splitOf: relatedOrder.id,
-          excludeRiderIds: relatedOrder.riderId
-            ? [relatedOrder.riderId]
-            : selectedTicket.riderId
-            ? [selectedTicket.riderId]
-            : [],
+          excludeRiderIds: excludedRiderIds,
           deliveryOption: 'priority',
+          searchRadiusKm: effectiveRadiusKm,
           dispatch: {
             option: 'priority',
             holdMinutes: 0,
             maxBatch: 1,
             poolable: false,
-            searchRadiusKm: relatedOrder.searchRadiusKm || 5
+            searchRadiusKm: effectiveRadiusKm
           },
           fees: {
             subtotal: 0,
@@ -786,7 +917,13 @@ export const Support: React.FC = () => {
           paymentStatus: 'paid',
           noCash: true,
           cashToCollect: 0,
-          riderFeeFixed: Number(splitRiderFee) || 45,
+          riderFeeFixed: fixedFeeNum,
+          riderFeeEstimate: {
+            pickupFee: 0,
+            bookingFee: fixedFeeNum,
+            specialRadiusExtra: 0,
+            total: fixedFeeNum
+          },
           createdAt: now,
           updatedAt: now
         };
@@ -823,7 +960,7 @@ export const Support: React.FC = () => {
       });
 
       // 4. Create inbox notice for customer stating how many riders are delivering
-      const customerTargetId = relatedOrder.customerId || selectedTicket.customerId;
+      const customerTargetId = relatedOrder.customerId || relatedOrder.sourceCustomerId || selectedTicket.customerId;
       if (customerTargetId) {
         const inboxRef = doc(collection(db, 'inbox'));
         batch.set(inboxRef, {
@@ -839,18 +976,37 @@ export const Support: React.FC = () => {
         });
       }
 
-      // 5. Link child orders on supportTickets/{id}
+      // 5. Link child orders on supportTickets/{id} (auto-accept if ticket was still open)
       const ticketRef = doc(db, 'supportTickets', selectedTicket.id);
-      batch.update(ticketRef, {
+      const ticketUpdate: Record<string, any> = {
         splitChildOrderIds: childOrderIds,
         splitChildOrderId: childOrderIds[0],
         lastMessageAt: now,
         lastMessagePreview: `Split delivery: ${ridersNeeded} riders dispatched`,
         updatedAt: now
-      });
+      };
+      if (selectedTicket.status === 'open') {
+        ticketUpdate.status = 'accepted';
+        ticketUpdate.acceptedAt = now;
+        ticketUpdate.acceptedBy = adminName;
+      }
+      batch.update(ticketRef, ticketUpdate);
 
       await batch.commit();
 
+      setRelatedOrder((prev) =>
+        prev
+          ? {
+              ...prev,
+              splitOut: {
+                count: ridersNeeded,
+                children: childSummaryList,
+                at: now,
+                by: adminName
+              }
+            }
+          : prev
+      );
       setSplitModalOpen(false);
       showSuccess(`Split delivery initiated! ${ridersNeeded - 1} child order(s) dispatched for extra riders.`);
     } catch (err: any) {
@@ -883,15 +1039,21 @@ export const Support: React.FC = () => {
         updatedAt: now
       });
 
-      // 2. Update parent order splitOut children list
+      // 2. Update parent order splitOut children list + ticket split links
       if (relatedOrder?.id) {
         const parentRef = doc(db, 'orders', relatedOrder.id);
         const existingSplit = relatedOrder.splitOut as any;
         if (existingSplit && Array.isArray(existingSplit.children)) {
           const remaining = existingSplit.children.filter((c: any) => c.orderId !== childOrder.id);
+          const ticketRef = doc(db, 'supportTickets', selectedTicket.id);
           if (remaining.length === 0) {
             batch.update(parentRef, {
               splitOut: null,
+              updatedAt: now
+            });
+            batch.update(ticketRef, {
+              splitChildOrderIds: [],
+              splitChildOrderId: null,
               updatedAt: now
             });
           } else {
@@ -902,6 +1064,11 @@ export const Support: React.FC = () => {
                 children: remaining,
                 updatedAt: now
               },
+              updatedAt: now
+            });
+            batch.update(ticketRef, {
+              splitChildOrderIds: remaining.map((c: any) => c.orderId),
+              splitChildOrderId: remaining[0]?.orderId || null,
               updatedAt: now
             });
           }
@@ -919,6 +1086,21 @@ export const Support: React.FC = () => {
       });
 
       await batch.commit();
+      if (relatedOrder?.id) {
+        setRelatedOrder((prev) => {
+          if (!prev) return prev;
+          const existingSplit = prev.splitOut as any;
+          if (!existingSplit || !Array.isArray(existingSplit.children)) return prev;
+          const remaining = existingSplit.children.filter((c: any) => c.orderId !== childOrder.id);
+          return {
+            ...prev,
+            splitOut:
+              remaining.length === 0
+                ? null
+                : { ...existingSplit, count: remaining.length + 1, children: remaining }
+          };
+        });
+      }
       showSuccess(`Split delivery for Rider ${childOrder.seq || 2} cancelled.`);
     } catch (err: any) {
       showError(err);
@@ -1320,7 +1502,6 @@ export const Support: React.FC = () => {
         const sampleBatchId = `B-${Math.floor(1000 + Math.random() * 9000)}`;
 
         // Also create a sample parent order so split delivery works immediately!
-        const orderRef = doc(collection(db, 'orders'));
         await addDoc(collection(db, 'orders'), {
           orderNumber: sampleOrderNum,
           serviceType: 'food',
@@ -1333,10 +1514,22 @@ export const Support: React.FC = () => {
           merchantId: 'merchant_sample_88',
           merchantName: 'Shakey’s Pizza Parlor',
           merchantAddress: 'Session Road, Baguio City',
+          pickup: {
+            label: 'Shakey’s Pizza Parlor',
+            address: 'Session Road, Baguio City',
+            lat: 16.4122,
+            lng: 120.596
+          },
+          dropoff: {
+            label: 'Maria Santos',
+            address: 'Burnham Park, Baguio City',
+            lat: 16.4126,
+            lng: 120.593
+          },
           riderId: sampleDriverId,
           riderName: sampleRiderName,
           riderPhone: '+63 918 888 1234',
-          cityId: selectedCityId || 'baguio',
+          cityId: selectedCityId && selectedCityId !== 'all' ? selectedCityId : 'baguio',
           deliveryOption: 'standard',
           fees: {
             subtotal: 1450,
@@ -1745,9 +1938,16 @@ export const Support: React.FC = () => {
                       </div>
 
                       <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                        <span className="px-2 py-0.5 rounded-md font-bold bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300 text-[10px]">
-                          {getTicketReasonDisplay(ticket)}
-                        </span>
+                        {isSplitDeliveryRequestTicket(ticket) ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-extrabold bg-indigo-100 text-indigo-900 dark:bg-indigo-950/70 dark:text-indigo-200 border border-indigo-300 dark:border-indigo-700 text-[10px]">
+                            <Split className="w-2.5 h-2.5 shrink-0" />
+                            <span>Split request</span>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-md font-bold bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300 text-[10px]">
+                            {getTicketReasonDisplay(ticket)}
+                          </span>
+                        )}
 
                         {ticket.status === 'open' && (
                           <span className="px-1.5 py-0.5 rounded text-[10px] font-extrabold bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300">
@@ -1851,6 +2051,12 @@ export const Support: React.FC = () => {
                     <h2 className="font-extrabold text-base text-gray-900 dark:text-white truncate">
                       {selectedTicket.title}
                     </h2>
+                    {isSplitDeliveryRequestTicket(selectedTicket) && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-extrabold bg-indigo-100 text-indigo-900 dark:bg-indigo-950/70 dark:text-indigo-200 border border-indigo-300 dark:border-indigo-700">
+                        <Split className="w-3 h-3 shrink-0" />
+                        <span>Split request</span>
+                      </span>
+                    )}
                     <span
                       className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
                         selectedTicket.status === 'open'
@@ -1894,15 +2100,15 @@ export const Support: React.FC = () => {
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {/* Split Delivery Button: food and convenience only, only on accepted ticket with cant_fit_bag or too_big */}
+                  {/* Split Delivery Button: food and convenience only */}
                   {canSplitDelivery && (
                     <button
                       onClick={handleOpenSplitModal}
                       className="px-3.5 py-1.5 rounded-xl border border-amber-400 bg-amber-400 text-black hover:bg-amber-300 text-xs font-black flex items-center gap-1.5 shadow-xs transition-colors"
-                      title="Split this bulky order across two riders"
+                      title="Split this order across extra riders"
                     >
                       <Split className="w-3.5 h-3.5" />
-                      <span>Split Delivery</span>
+                      <span>Split delivery</span>
                     </button>
                   )}
 
@@ -2657,9 +2863,14 @@ export const Support: React.FC = () => {
                           <div className="text-xs font-bold text-gray-900 dark:text-white truncate">
                             {item.qty || 1}x {item.name}
                           </div>
-                          {item.price && (
-                            <div className="font-mono text-[11px] text-gray-500">
-                              ₱{Number(item.price * (item.qty || 1)).toFixed(2)}
+                          {item.variantLabel && (
+                            <div className="text-[10px] font-medium text-gray-500 dark:text-zinc-400 truncate">
+                              {item.variantLabel}
+                            </div>
+                          )}
+                          {Number(item.unitPrice ?? item.price ?? 0) > 0 && (
+                            <div className="font-mono text-[11px] text-gray-500 tabular-nums">
+                              ₱{(Number(item.unitPrice ?? item.price ?? 0) * Number(item.qty || 1)).toFixed(2)}
                             </div>
                           )}
                         </div>

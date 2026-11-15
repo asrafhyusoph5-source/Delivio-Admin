@@ -72,7 +72,8 @@ export function resolveOrderMerchantDisplay(
   merchantsById?: Record<string, Merchant>,
   includeCode: boolean = true
 ): string {
-  const merchant = order.merchantId && merchantsById ? merchantsById[order.merchantId] : undefined;
+  const mId = order.merchantId || order.sourceMerchantId;
+  const merchant = mId && merchantsById ? merchantsById[mId] : undefined;
   const name = order.merchantName || merchant?.name || '';
   const branchName = order.branchName ?? merchant?.branchName ?? '';
   const branchCode = order.branchCode ?? merchant?.branchCode ?? '';

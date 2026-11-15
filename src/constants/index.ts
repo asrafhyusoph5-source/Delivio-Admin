@@ -172,6 +172,7 @@ export const SUPPORT_CANNED_REPLIES = [
 ];
 
 export const DRIVER_SUPPORT_REASONS = [
+  { id: 'split_delivery', label: 'Split request' },
   { id: 'cant_fit_bag', label: "Can't fit on my bag" },
   { id: 'too_big', label: 'Order is too big or heavy' },
   { id: 'accident', label: 'Accident' },

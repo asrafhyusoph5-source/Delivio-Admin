@@ -66,10 +66,12 @@ import {
   Route,
   MessageSquare,
   ShoppingBag,
-  Building2
+  Building2,
+  HelpCircle
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { OrderChatsViewer } from '../components/chat/OrderChatsViewer';
+import { WhyNoRiderModal } from '../components/orders/WhyNoRiderModal';
 
 export const FulfillmentChip: React.FC<{ order: Order }> = ({ order }) => {
   const isScheduled = Boolean(
@@ -139,6 +141,30 @@ export const ServiceChips: React.FC<{ order: Order }> = ({ order }) => {
   }
 
   const label = SERVICE_LABELS[order.serviceType] || order.serviceType.replace('_', ' ');
+  const isInstant = order.serviceType === 'request_rider';
+  const reqStatus = order.riderRequest?.status;
+
+  if (isInstant) {
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-extrabold bg-amber-100 text-amber-950 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700">
+          <Zap className="w-3 h-3 text-amber-600 shrink-0" />
+          <span>{label}</span>
+        </span>
+        {reqStatus && (
+          <span
+            className={`inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-bold border ${
+              reqStatus.toLowerCase() === 'searching'
+                ? 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/50 dark:text-red-300 dark:border-red-800'
+                : 'bg-gray-100 text-gray-700 border-gray-200 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-700'
+            }`}
+          >
+            {reqStatus}
+          </span>
+        )}
+      </div>
+    );
+  }
 
   return (
     <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
@@ -441,6 +467,21 @@ export const SplitLinksView: React.FC<{
   onSelectOrderById?: (orderId: string) => void;
 }> = ({ order, onSelectOrderById }) => {
   if (!order.splitOf && !order.splitOut) return null;
+
+  const splitOutObj = typeof order.splitOut === 'object' && order.splitOut !== null ? order.splitOut : null;
+  const childEntries: Array<{ orderId: string; seq?: number }> = [];
+  if (typeof order.splitOut === 'string') {
+    childEntries.push({ orderId: order.splitOut });
+  } else if (splitOutObj) {
+    if (Array.isArray(splitOutObj.children) && splitOutObj.children.length > 0) {
+      splitOutObj.children.forEach((c: any) => {
+        if (c?.orderId) childEntries.push({ orderId: c.orderId, seq: c.seq });
+      });
+    } else if (splitOutObj.childOrderId) {
+      childEntries.push({ orderId: splitOutObj.childOrderId });
+    }
+  }
+
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
       {order.splitOf && (
@@ -456,29 +497,26 @@ export const SplitLinksView: React.FC<{
           title={`Split from parent order #${order.splitOf}`}
         >
           <Split className="w-3 h-3 text-orange-600 shrink-0" />
-          <span>Split of: #{order.splitOf.slice(-6)}</span>
+          <span>Split of{order.seq ? ` (R${order.seq})` : ''}: #{order.splitOf.slice(-6)}</span>
         </button>
       )}
-      {order.splitOut && (() => {
-        const childId = typeof order.splitOut === 'string' ? order.splitOut : order.splitOut?.childOrderId;
-        if (!childId) return null;
-        return (
-          <button
-            type="button"
-            onClick={(e) => {
-              if (onSelectOrderById) {
-                e.stopPropagation();
-                onSelectOrderById(childId);
-              }
-            }}
-            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-mono font-bold bg-teal-100 dark:bg-teal-950/70 text-teal-900 dark:text-teal-200 border border-teal-300 dark:border-teal-800 hover:bg-teal-200 transition-colors cursor-pointer"
-            title={`Split out into order #${childId}`}
-          >
-            <Split className="w-3 h-3 text-teal-600 shrink-0" />
-            <span>Split out: #{childId.slice(-6)}</span>
-          </button>
-        );
-      })()}
+      {childEntries.map((child) => (
+        <button
+          key={child.orderId}
+          type="button"
+          onClick={(e) => {
+            if (onSelectOrderById) {
+              e.stopPropagation();
+              onSelectOrderById(child.orderId);
+            }
+          }}
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-mono font-bold bg-teal-100 dark:bg-teal-950/70 text-teal-900 dark:text-teal-200 border border-teal-300 dark:border-teal-800 hover:bg-teal-200 transition-colors cursor-pointer"
+          title={`Split out into order #${child.orderId}`}
+        >
+          <Split className="w-3 h-3 text-teal-600 shrink-0" />
+          <span>Split out{child.seq ? ` R${child.seq}` : ''}: #{child.orderId.slice(-6)}</span>
+        </button>
+      ))}
     </div>
   );
 };
@@ -794,6 +832,11 @@ export const LiveOrders: React.FC = () => {
   const [reassignReason, setReassignReason] = useState('');
   const [reassigning, setReassigning] = useState(false);
 
+  // "Why no rider?" Diagnostic Modal State
+  const [whyNoRiderOrder, setWhyNoRiderOrder] = useState<Order | null>(null);
+  const isSearchingRiderRequest = (ord: Order) =>
+    (ord.riderRequest?.status || '').trim().toLowerCase() === 'searching';
+
   // Mini map reference for order detail modal
   const miniMapContainerRef = useRef<HTMLDivElement>(null);
   const miniMapInstanceRef = useRef<L.Map | null>(null);
@@ -884,6 +927,14 @@ export const LiveOrders: React.FC = () => {
             batchTotalBookings: data.batchTotalBookings,
             splitOf: data.splitOf,
             splitOut: data.splitOut,
+            isSplitChild: Boolean(data.isSplitChild),
+            seq: data.seq,
+            sourceCustomerId: data.sourceCustomerId,
+            sourceMerchantId: data.sourceMerchantId,
+            excludeRiderIds: data.excludeRiderIds,
+            searchRadiusKm: data.searchRadiusKm ?? data.dispatch?.searchRadiusKm,
+            riderFeeFixed: data.riderFeeFixed,
+            noCash: Boolean(data.noCash),
             riderFeeEstimate: data.riderFeeEstimate,
             createdAt: data.createdAt,
             updatedAt: data.updatedAt,
@@ -934,10 +985,12 @@ export const LiveOrders: React.FC = () => {
             type: dt.type || 'food',
             status: dt.status || 'active',
             isOpen: Boolean(dt.isOpen),
+            cityId: dt.cityId,
             address: dt.address || '',
             lat: Number(dt.lat) || 0,
             lng: Number(dt.lng) || 0,
             commissionRate: dt.commissionRate ?? 15,
+            specialRadius: dt.specialRadius,
             chainId: dt.chainId,
             chainName: dt.chainName,
             isBranch: dt.isBranch,
@@ -2162,6 +2215,20 @@ export const LiveOrders: React.FC = () => {
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-1.5">
+                          {isSearchingRiderRequest(order) && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setWhyNoRiderOrder(order);
+                              }}
+                              className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700 hover:bg-amber-200 dark:hover:bg-amber-900/70 transition-colors inline-flex items-center gap-1 whitespace-nowrap"
+                              title="Inspect why no rider has accepted this Delivio Instant request"
+                            >
+                              <HelpCircle className="w-3.5 h-3.5 shrink-0" />
+                              <span>Why no rider?</span>
+                            </button>
+                          )}
                           {order.status !== 'Cancelled' && (
                             <button
                               type="button"
@@ -2216,6 +2283,15 @@ export const LiveOrders: React.FC = () => {
                     o.status === 'On another delivery' ||
                     o.status.startsWith('Rider is on the way') ||
                     o.status.startsWith('Arrived')
+                  );
+                }
+                if (colStatus === 'Placed Order') {
+                  const st = String(o.status || '');
+                  return (
+                    st === 'Placed Order' ||
+                    st === 'Searching' ||
+                    st === 'Merchant accepted' ||
+                    st === 'Waiting for rider'
                   );
                 }
                 return o.status === colStatus;
@@ -2304,27 +2380,42 @@ export const LiveOrders: React.FC = () => {
                                 : ord.riderName || 'Unassigned'}
                             </span>
                           </div>
-                          <div className="pt-1.5 flex items-center justify-between text-[10px] border-t border-gray-100 dark:border-zinc-800">
-                            {ord.status !== 'Cancelled' ? (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setSelectedOrder(ord);
-                                  const isWalletPaid =
-                                    (ord.paymentMethod || ord.payment?.method || '').toLowerCase() ===
-                                    'wallet';
-                                  setRefundToWallet(isWalletPaid);
-                                  setCancelModalOpen(true);
-                                }}
-                                className="text-red-600 dark:text-red-400 font-bold hover:underline"
-                              >
-                                Cancel Order
-                              </button>
-                            ) : (
-                              <span className="text-gray-400 font-semibold">Cancelled</span>
-                            )}
-                            <span className="text-gray-400">{formatRelativeTime(ord.createdAt)}</span>
+                          <div className="pt-1.5 flex items-center justify-between gap-2 text-[10px] border-t border-gray-100 dark:border-zinc-800">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              {isSearchingRiderRequest(ord) && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setWhyNoRiderOrder(ord);
+                                  }}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-bold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700 hover:bg-amber-200"
+                                >
+                                  <HelpCircle className="w-3 h-3" />
+                                  <span>Why no rider?</span>
+                                </button>
+                              )}
+                              {ord.status !== 'Cancelled' ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedOrder(ord);
+                                    const isWalletPaid =
+                                      (ord.paymentMethod || ord.payment?.method || '').toLowerCase() ===
+                                      'wallet';
+                                    setRefundToWallet(isWalletPaid);
+                                    setCancelModalOpen(true);
+                                  }}
+                                  className="text-red-600 dark:text-red-400 font-bold hover:underline"
+                                >
+                                  Cancel Order
+                                </button>
+                              ) : (
+                                <span className="text-gray-400 font-semibold">Cancelled</span>
+                              )}
+                            </div>
+                            <span className="text-gray-400 shrink-0">{formatRelativeTime(ord.createdAt)}</span>
                           </div>
                         </div>
                       </div>
@@ -2646,6 +2737,16 @@ export const LiveOrders: React.FC = () => {
 
                 {/* Dispatch Actions buttons */}
                 <div className="flex items-center gap-2 flex-wrap">
+                  {isSearchingRiderRequest(selectedOrder) && (
+                    <button
+                      type="button"
+                      onClick={() => setWhyNoRiderOrder(selectedOrder)}
+                      className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-black text-xs font-extrabold shadow-xs transition-colors"
+                    >
+                      <HelpCircle className="w-3.5 h-3.5" />
+                      <span>Why no rider?</span>
+                    </button>
+                  )}
                   {selectedOrder.status !== 'Delivered' &&
                     selectedOrder.status !== 'Completed' &&
                     selectedOrder.status !== 'Cancelled' &&
@@ -2800,7 +2901,19 @@ export const LiveOrders: React.FC = () => {
                           <Phone className="w-3 h-3" /> {selectedOrder.riderPhone}
                         </a>
                       ) : (
-                        <div className="text-amber-600 text-[11px]">Searching for driver...</div>
+                        <div className="space-y-1">
+                          <div className="text-amber-600 text-[11px]">Searching for driver...</div>
+                          {isSearchingRiderRequest(selectedOrder) && (
+                            <button
+                              type="button"
+                              onClick={() => setWhyNoRiderOrder(selectedOrder)}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700 hover:bg-amber-200"
+                            >
+                              <HelpCircle className="w-3 h-3" />
+                              <span>Why no rider?</span>
+                            </button>
+                          )}
+                        </div>
                       )}
                       {(selectedOrder.riderVehicle || selectedOrder.vehicleType) && (
                         <div className="text-[10px] text-gray-500 dark:text-zinc-400 pt-0.5">
@@ -3280,6 +3393,17 @@ export const LiveOrders: React.FC = () => {
           description="Filter orders by placement date or leave blank to export all matching records."
           totalRecords={filteredOrders.length}
           onExport={handleExportCsvWithDateFilter}
+        />
+      )}
+
+      {/* Why No Rider Diagnostic Modal */}
+      {whyNoRiderOrder && (
+        <WhyNoRiderModal
+          isOpen={Boolean(whyNoRiderOrder)}
+          onClose={() => setWhyNoRiderOrder(null)}
+          order={whyNoRiderOrder}
+          merchantsById={merchantsById}
+          cities={cities}
         />
       )}
     </div>
