@@ -1,4 +1,5 @@
-import { db, collection, addDoc, Timestamp } from '../firebase';
+import { db, collection, addDoc } from '../firebase';
+import { nowTs } from './date';
 
 export async function logAuditEvent(params: {
   adminId: string;
@@ -16,7 +17,7 @@ export async function logAuditEvent(params: {
     const colRef = collection(db, 'auditLogs');
     await addDoc(colRef, {
       ...params,
-      timestamp: Timestamp.now()
+      timestamp: nowTs()
     });
   } catch (err) {
     console.error('Failed to write audit log:', err);
@@ -36,7 +37,7 @@ export async function logEditHistory(params: {
     const colRef = collection(db, 'editHistory');
     await addDoc(colRef, {
       ...params,
-      at: Timestamp.now()
+      at: nowTs()
     });
   } catch (err) {
     console.error('Failed to write edit history:', err);

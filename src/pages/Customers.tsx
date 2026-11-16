@@ -24,7 +24,7 @@ import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { ExportDateModal } from '../components/common/ExportDateModal';
-import { formatTimestamp, formatRelativeTime } from '../utils/date';
+import { formatTimestamp, formatRelativeTime, nowTs, arrayNowTs } from '../utils/date';
 import { formatOrderNumber } from '../utils/orderNumber';
 import { formatShopDisplayName } from '../utils/outletUtils';
 import type { UserProfile, UserAddress, Order, EditHistoryEntry, WalletTransaction, Rider, WalletTransfer } from '../types';
@@ -540,7 +540,8 @@ export const Customers: React.FC = () => {
     try {
       setSubmittingCashIn(true);
       const userRef = doc(db, 'users', selectedCustomer.uid);
-      const now = Timestamp.now();
+      const now = nowTs();
+      const localNow = Timestamp.now();
       const noteClean = addCashNote.trim() || 'Admin cash deposit';
       const txnRef = doc(collection(db, 'walletTransactions'));
 
@@ -649,7 +650,7 @@ export const Customers: React.FC = () => {
           adminId: adminProfile?.uid || 'admin',
           adminName: adminProfile?.name || 'Administrator',
           balanceAfter: finalBal,
-          createdAt: now
+          createdAt: localNow
         },
         ...prev
       ]);
@@ -683,7 +684,8 @@ export const Customers: React.FC = () => {
     try {
       setSubmittingAdjust(true);
       const userRef = doc(db, 'users', selectedCustomer.uid);
-      const now = Timestamp.now();
+      const now = nowTs();
+      const localNow = Timestamp.now();
       const txnRef = doc(collection(db, 'walletTransactions'));
 
       let finalBal = 0;
@@ -783,7 +785,7 @@ export const Customers: React.FC = () => {
           adminId: adminProfile?.uid || 'admin',
           adminName: adminProfile?.name || 'Administrator',
           balanceAfter: finalBal,
-          createdAt: now
+          createdAt: localNow
         },
         ...prev
       ]);
@@ -814,7 +816,7 @@ export const Customers: React.FC = () => {
         linkedCustomerEmail: null,
         linkedCustomerName: null,
         linkedAt: null,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       await logAuditEvent({
@@ -911,7 +913,7 @@ export const Customers: React.FC = () => {
       await updateDoc(userRef, {
         status: newStatus,
         statusReason: reason,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       // Write Audit log
@@ -965,7 +967,7 @@ export const Customers: React.FC = () => {
         phone: editPhone.trim(),
         email: editEmail.trim(),
         adminNote: editAdminNote.trim(),
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       };
 
       await updateDoc(userRef, updates);
@@ -1001,13 +1003,14 @@ export const Customers: React.FC = () => {
         entityId: selectedCustomer.uid,
         details: `Edited customer profile for ${selectedCustomer.name}`,
         oldValue: { name: old.name, phone: old.phone, email: old.email, adminNote: old.adminNote },
-        newValue: updates
+        newValue: { name: updates.name, phone: updates.phone, email: updates.email, adminNote: updates.adminNote }
       });
 
+      const localUpdates = { ...updates, updatedAt: Timestamp.now() };
       showSuccess('Customer profile updated.');
-      setSelectedCustomer((prev) => (prev ? { ...prev, ...updates } : null));
+      setSelectedCustomer((prev) => (prev ? { ...prev, ...localUpdates } : null));
       setCustomers((prev) =>
-        prev.map((c) => (c.uid === selectedCustomer.uid ? { ...c, ...updates } : c))
+        prev.map((c) => (c.uid === selectedCustomer.uid ? { ...c, ...localUpdates } : c))
       );
       setEditModalOpen(false);
     } catch (err: any) {
@@ -1021,15 +1024,16 @@ export const Customers: React.FC = () => {
   const handleCancelOrderForCustomer = async (orderId: string, orderNumber: string) => {
     try {
       const orderRef = doc(db, 'orders', orderId);
-      const now = Timestamp.now();
+      const now = nowTs();
       await updateDoc(orderRef, {
         status: 'Cancelled',
         cancelReason: 'Cancelled via customer admin profile',
         cancelFault: 'customer',
         cancelledBy: 'admin',
+        cancelledAt: now,
         statusHistory: arrayUnion({
           status: 'Cancelled',
-          at: now,
+          at: arrayNowTs(),
           note: `Cancelled by Admin from Customer Profile (${adminProfile?.name})`
         }),
         updatedAt: now

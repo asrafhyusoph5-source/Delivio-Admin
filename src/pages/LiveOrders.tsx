@@ -22,7 +22,7 @@ import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { ExportDateModal } from '../components/common/ExportDateModal';
-import { formatTimestamp, formatRelativeTime } from '../utils/date';
+import { formatTimestamp, formatRelativeTime, nowTs, arrayNowTs } from '../utils/date';
 import { formatOrderNumber, matchesOrderSearch } from '../utils/orderNumber';
 import { getChainOptions, resolveOrderChainId, resolveOrderMerchantDisplay } from '../utils/outletUtils';
 import type { Order, OrderStatus, OrderServiceType, Merchant } from '../types';
@@ -834,8 +834,11 @@ export const LiveOrders: React.FC = () => {
 
   // "Why no rider?" Diagnostic Modal State
   const [whyNoRiderOrder, setWhyNoRiderOrder] = useState<Order | null>(null);
-  const isSearchingRiderRequest = (ord: Order) =>
-    (ord.riderRequest?.status || '').trim().toLowerCase() === 'searching';
+  const canDiagnoseNoRider = (ord: Order) => {
+    if (ord.isPickup || ord.fulfillmentType === 'pickup') return false;
+    if (['Delivered', 'Completed', 'Cancelled', 'Rejected'].includes(ord.status)) return false;
+    return !ord.riderId || (ord.riderRequest?.status || '').trim().toLowerCase() === 'searching';
+  };
 
   // Mini map reference for order detail modal
   const miniMapContainerRef = useRef<HTMLDivElement>(null);
@@ -1382,7 +1385,8 @@ export const LiveOrders: React.FC = () => {
       const orderRef = doc(db, 'orders', selectedOrder.id);
       const customerId = selectedOrder.customerId;
       const userRef = doc(db, 'users', customerId);
-      const now = Timestamp.now();
+      const now = nowTs();
+      const histAt = arrayNowTs();
 
       await runTransaction(db, async (transaction) => {
         const orderSnap = await transaction.get(orderRef);
@@ -1402,11 +1406,14 @@ export const LiveOrders: React.FC = () => {
             cancelReason: fullReason,
             cancelFault: cancelFault,
             cancelledBy: 'admin',
+            cancelledAt: now,
             walletRefunded: true,
             paymentStatus: 'Refunded',
+            refundedAt: now,
+            walletRefundedAt: now,
             statusHistory: arrayUnion({
               status: 'Cancelled',
-              at: now,
+              at: histAt,
               note: `Cancelled by Admin (${adminProfile?.name || 'Operations'}): ${fullReason} (Fault: ${cancelFault}). Refunded ₱${refundAmount.toFixed(2)} to customer wallet.`
             }),
             updatedAt: now
@@ -1440,6 +1447,7 @@ export const LiveOrders: React.FC = () => {
             adminId: adminProfile?.uid || 'admin',
             adminName: adminProfile?.name || 'Administrator',
             balanceAfter: newBal,
+            refundedAt: now,
             createdAt: now
           });
         } else {
@@ -1448,9 +1456,10 @@ export const LiveOrders: React.FC = () => {
             cancelReason: fullReason,
             cancelFault: cancelFault,
             cancelledBy: 'admin',
+            cancelledAt: now,
             statusHistory: arrayUnion({
               status: 'Cancelled',
-              at: now,
+              at: histAt,
               note: `Cancelled by Admin (${adminProfile?.name || 'Operations'}): ${fullReason} (Fault: ${cancelFault})`
             }),
             updatedAt: now
@@ -1506,7 +1515,7 @@ export const LiveOrders: React.FC = () => {
     try {
       setReassigning(true);
       const orderRef = doc(db, 'orders', selectedOrder.id);
-      const now = Timestamp.now();
+      const now = nowTs();
 
       const updatePayload: Record<string, any> = {
         riderId: null,
@@ -1518,7 +1527,7 @@ export const LiveOrders: React.FC = () => {
         status: 'Placed Order',
         statusHistory: arrayUnion({
           status: 'Placed Order',
-          at: now,
+          at: arrayNowTs(),
           note: `Driver unassigned & order reset to Placed Order by Admin (${adminProfile?.name || 'Operations'}): ${reassignReason || 'Manual dispatch unassignment'}`
         }),
         updatedAt: now
@@ -1556,16 +1565,18 @@ export const LiveOrders: React.FC = () => {
     if (!selectedOrder) return;
     try {
       const orderRef = doc(db, 'orders', selectedOrder.id);
-      const now = Timestamp.now();
+      const now = nowTs();
+      const localNow = Timestamp.now();
       await updateDoc(orderRef, {
         status: 'Completed',
         statusHistory: arrayUnion({
           status: 'Completed',
-          at: now,
+          at: arrayNowTs(),
           note: `Marked as Completed by Admin (${adminProfile?.name || 'Operations'})`
         }),
         updatedAt: now,
-        deliveredAt: now
+        deliveredAt: now,
+        completedAt: now
       });
 
       await logAuditEvent({
@@ -1581,7 +1592,7 @@ export const LiveOrders: React.FC = () => {
       });
 
       showSuccess(`Order #${selectedOrder.orderNumber} marked as Completed.`);
-      setSelectedOrder((prev) => (prev ? { ...prev, status: 'Completed', deliveredAt: now } : null));
+      setSelectedOrder((prev) => (prev ? { ...prev, status: 'Completed', deliveredAt: localNow } : null));
     } catch (err: any) {
       showError(err);
     }
@@ -1592,12 +1603,12 @@ export const LiveOrders: React.FC = () => {
     if (!selectedOrder) return;
     try {
       const orderRef = doc(db, 'orders', selectedOrder.id);
-      const now = Timestamp.now();
+      const now = nowTs();
       await updateDoc(orderRef, {
         status: 'On another delivery',
         statusHistory: arrayUnion({
           status: 'On another delivery',
-          at: now,
+          at: arrayNowTs(),
           note: `Marked as On another delivery by Admin (${adminProfile?.name || 'Operations'})`
         }),
         updatedAt: now
@@ -2215,7 +2226,7 @@ export const LiveOrders: React.FC = () => {
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-1.5">
-                          {isSearchingRiderRequest(order) && (
+                          {canDiagnoseNoRider(order) && (
                             <button
                               type="button"
                               onClick={(e) => {
@@ -2223,7 +2234,7 @@ export const LiveOrders: React.FC = () => {
                                 setWhyNoRiderOrder(order);
                               }}
                               className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700 hover:bg-amber-200 dark:hover:bg-amber-900/70 transition-colors inline-flex items-center gap-1 whitespace-nowrap"
-                              title="Inspect why no rider has accepted this Delivio Instant request"
+                              title="Inspect driver dispatch checks for this unassigned order"
                             >
                               <HelpCircle className="w-3.5 h-3.5 shrink-0" />
                               <span>Why no rider?</span>
@@ -2382,7 +2393,7 @@ export const LiveOrders: React.FC = () => {
                           </div>
                           <div className="pt-1.5 flex items-center justify-between gap-2 text-[10px] border-t border-gray-100 dark:border-zinc-800">
                             <div className="flex items-center gap-2 flex-wrap">
-                              {isSearchingRiderRequest(ord) && (
+                              {canDiagnoseNoRider(ord) && (
                                 <button
                                   type="button"
                                   onClick={(e) => {
@@ -2737,7 +2748,7 @@ export const LiveOrders: React.FC = () => {
 
                 {/* Dispatch Actions buttons */}
                 <div className="flex items-center gap-2 flex-wrap">
-                  {isSearchingRiderRequest(selectedOrder) && (
+                  {canDiagnoseNoRider(selectedOrder) && (
                     <button
                       type="button"
                       onClick={() => setWhyNoRiderOrder(selectedOrder)}
@@ -2903,7 +2914,7 @@ export const LiveOrders: React.FC = () => {
                       ) : (
                         <div className="space-y-1">
                           <div className="text-amber-600 text-[11px]">Searching for driver...</div>
-                          {isSearchingRiderRequest(selectedOrder) && (
+                          {canDiagnoseNoRider(selectedOrder) && (
                             <button
                               type="button"
                               onClick={() => setWhyNoRiderOrder(selectedOrder)}

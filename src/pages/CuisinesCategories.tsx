@@ -12,7 +12,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
-import { formatTimestamp } from '../utils/date';
+import { formatTimestamp, nowTs as getServerTs } from '../utils/date';
 import type {
   MainCategoryItem,
   MainCategoriesDoc,
@@ -279,14 +279,14 @@ export const CuisinesCategories: React.FC = () => {
           initialCols = parseConvenienceColumns(dData.convenienceColumns);
           initialLayoutUpdatedAt = dData.updatedAt || null;
         } else {
-          const nowTs = Timestamp.now();
+          const localNow = Timestamp.now();
           const initialDesigner: AppDesignerSettings = {
             convenienceColumns: 2,
-            updatedAt: nowTs,
+            updatedAt: getServerTs(),
             updatedBy: actor
           };
           await setDoc(doc(db, 'settings', 'appDesigner'), initialDesigner);
-          initialLayoutUpdatedAt = nowTs;
+          initialLayoutUpdatedAt = localNow;
         }
         setConvenienceColumns(initialCols);
         setPersistedColumns(initialCols);
@@ -637,7 +637,8 @@ export const CuisinesCategories: React.FC = () => {
 
     try {
       setSaving(true);
-      const now = Timestamp.now();
+      const now = getServerTs();
+      const localNow = Timestamp.now();
       const updatedBy =
         adminProfile?.name || adminProfile?.email || adminProfile?.uid || 'Administrator';
 
@@ -777,7 +778,10 @@ export const CuisinesCategories: React.FC = () => {
 
         setFoodCategories(finalFood);
         setConvenienceCategories(finalConvenience);
-        setPersistedDoc(payload);
+        setPersistedDoc({
+          ...payload,
+          updatedAt: localNow
+        });
       }
 
       if (hasLayoutChanges) {
@@ -799,7 +803,7 @@ export const CuisinesCategories: React.FC = () => {
         });
         setConvenienceColumns(numericColumns);
         setPersistedColumns(numericColumns);
-        setLayoutUpdatedAt(now);
+        setLayoutUpdatedAt(localNow);
       }
 
       setSavedBanner(true);

@@ -14,6 +14,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { logAuditEvent } from '../../utils/audit';
+import { nowTs, dateToTs } from '../../utils/date';
 import type { PromoCode, PromoRedemption, OrderServiceType } from '../../types';
 import { SERVICE_NAMES } from '../../constants';
 import { formatShopDisplayName } from '../../utils/outletUtils';
@@ -278,7 +279,7 @@ export const PromoCodesTab: React.FC<PromoCodesTabProps> = ({
       setSaving(true);
       let expiresTimestamp: Timestamp | null = null;
       if (hasExpiry && expiryDate) {
-        expiresTimestamp = Timestamp.fromDate(new Date(`${expiryDate}T23:59:59`));
+        expiresTimestamp = dateToTs(new Date(`${expiryDate}T23:59:59`));
       }
 
       const targetMerchantName = isMerchant
@@ -295,7 +296,7 @@ export const PromoCodesTab: React.FC<PromoCodesTabProps> = ({
         perUserLimit: Math.max(1, Number(perUserLimit) || 1),
         services: selectedServices,
         source: isMerchant ? 'merchant' : 'platform',
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       };
 
       if (isMerchant) {
@@ -316,7 +317,7 @@ export const PromoCodesTab: React.FC<PromoCodesTabProps> = ({
           uses: 0,
           usedCount: 0,
           totalDiscount: 0,
-          createdAt: Timestamp.now(),
+          createdAt: nowTs(),
           createdBy: adminProfile?.email || 'admin'
         });
 
@@ -361,7 +362,7 @@ export const PromoCodesTab: React.FC<PromoCodesTabProps> = ({
       const newActive = !p.active;
       await updateDoc(doc(db, 'promoCodes', p.code), {
         active: newActive,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
       showSuccess(
         `${p.source === 'merchant' ? 'Merchant voucher' : 'Promo code'} "${p.code}" ${

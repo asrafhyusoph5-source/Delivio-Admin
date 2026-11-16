@@ -17,6 +17,7 @@ import { useAuth } from '../context/AuthContext';
 import { useCity } from '../context/CityContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
+import { nowTs, dateToTs } from '../utils/date';
 import type {
   Quest,
   QuestGoal,
@@ -427,17 +428,26 @@ export const Quests: React.FC = () => {
       }
 
       const claimRef = doc(db, 'questClaims', claim.id);
-      const updates: any = {
+      const localNow = Timestamp.now();
+      await updateDoc(claimRef, {
         verifiedValues: verified,
-        verifiedAt: Timestamp.now(),
+        verifiedAt: nowTs(),
         verifiedBy: adminProfile?.name || adminProfile?.email || 'Admin',
-        updatedAt: Timestamp.now()
-      };
-
-      await updateDoc(claimRef, updates);
+        updatedAt: nowTs()
+      });
 
       setClaims((prev) =>
-        prev.map((c) => (c.id === claim.id ? { ...c, ...updates } : c))
+        prev.map((c) =>
+          c.id === claim.id
+            ? {
+                ...c,
+                verifiedValues: verified,
+                verifiedAt: localNow,
+                verifiedBy: adminProfile?.name || adminProfile?.email || 'Admin',
+                updatedAt: localNow
+              }
+            : c
+        )
       );
 
       showSuccess(
@@ -466,7 +476,8 @@ export const Quests: React.FC = () => {
 
     try {
       setCreditingClaim(true);
-      const now = Timestamp.now();
+      const now = nowTs();
+      const localNow = Timestamp.now();
       const adminName = adminProfile?.name || adminProfile?.email || 'Admin';
 
       const rRef = doc(db, 'riders', claim.riderId);
@@ -562,7 +573,7 @@ export const Quests: React.FC = () => {
             ? {
                 ...c,
                 status: 'Credited',
-                creditedAt: now,
+                creditedAt: localNow,
                 creditedBy: adminName
               }
             : c
@@ -590,7 +601,8 @@ export const Quests: React.FC = () => {
     noteText: string
   ) => {
     try {
-      const now = Timestamp.now();
+      const now = nowTs();
+      const localNow = Timestamp.now();
       const adminName = adminProfile?.name || adminProfile?.email || 'Admin';
 
       await updateDoc(doc(db, 'questClaims', claim.id), {
@@ -618,7 +630,7 @@ export const Quests: React.FC = () => {
       setClaims((prev) =>
         prev.map((c) =>
           c.id === claim.id
-            ? { ...c, status: newStatus, note: noteText, verifiedAt: now, verifiedBy: adminName }
+            ? { ...c, status: newStatus, note: noteText, verifiedAt: localNow, verifiedBy: adminName }
             : c
         )
       );
@@ -654,7 +666,7 @@ export const Quests: React.FC = () => {
           const rData = rSnap.exists() ? rSnap.data() : null;
           const linkedCustomerUid = rData?.linkedCustomerUid;
           const rewardToCredit = verified.computedReward;
-          const now = Timestamp.now();
+          const now = nowTs();
           const adminName = 'System Auto-Settle';
 
           const claimRef = doc(db, 'questClaims', claim.id);
@@ -790,10 +802,10 @@ export const Quests: React.FC = () => {
               achievedValue: quest.metric === 'deliveries' ? verified.deliveries : verified.earnings,
               status: 'Pending',
               verifiedValues: verified,
-              verifiedAt: Timestamp.now(),
+              verifiedAt: nowTs(),
               verifiedBy: 'System Scan',
-              createdAt: Timestamp.now(),
-              updatedAt: Timestamp.now()
+              createdAt: nowTs(),
+              updatedAt: nowTs()
             });
             createdClaimsCount += 1;
           }
@@ -943,7 +955,7 @@ export const Quests: React.FC = () => {
 
     try {
       setIsSubmittingQuest(true);
-      const now = Timestamp.now();
+      const now = nowTs();
       const adminName = adminProfile?.name || adminProfile?.email || 'Admin';
 
       if (isMultiDay && !editingQuestId) {
@@ -977,8 +989,8 @@ export const Quests: React.FC = () => {
             title: `${formTitle.trim()} (${dStr})`,
             description: formDescription.trim(),
             status: formStatus,
-            startAt: Timestamp.fromDate(questStart),
-            endAt: Timestamp.fromDate(questEnd),
+            startAt: dateToTs(questStart),
+            endAt: dateToTs(questEnd),
             metric: formMetric,
             hourFrom: formHourFrom.trim() || undefined,
             hourTo: formHourTo.trim() || undefined,
@@ -1019,8 +1031,8 @@ export const Quests: React.FC = () => {
           title: formTitle.trim(),
           description: formDescription.trim(),
           status: formStatus,
-          startAt: Timestamp.fromDate(questStart),
-          endAt: Timestamp.fromDate(questEnd),
+          startAt: dateToTs(questStart),
+          endAt: dateToTs(questEnd),
           metric: formMetric,
           hourFrom: formHourFrom.trim() || undefined,
           hourTo: formHourTo.trim() || undefined,
@@ -1083,7 +1095,7 @@ export const Quests: React.FC = () => {
   const handleConfirmAction = async () => {
     if (!actionQuest) return;
     try {
-      const now = Timestamp.now();
+      const now = nowTs();
       const adminName = adminProfile?.name || adminProfile?.email || 'Admin';
 
       if (actionType === 'end') {

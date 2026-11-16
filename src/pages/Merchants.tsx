@@ -26,7 +26,7 @@ import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { ExportDateModal } from '../components/common/ExportDateModal';
-import { formatTimestamp, formatRelativeTime } from '../utils/date';
+import { formatTimestamp, formatRelativeTime, nowTs, dateToTs } from '../utils/date';
 import type {
   Merchant,
   MenuItem,
@@ -601,12 +601,13 @@ export const computeEffectiveMerchantOpen = effectiveOpen;
 export function getNextOpeningDate(
   shop: Merchant,
   platformTimezone: string = 'Asia/Manila'
-): { isoString: string; displayString: string } {
+): { date: Date; isoString: string; displayString: string } {
   const fallbackISO = '2100-01-01T00:00:00.000Z';
+  const fallbackDate = new Date(fallbackISO);
   const fallbackDisplay = '2100-01-01';
 
   if (!shop.autoSchedule || !shop.hours) {
-    return { isoString: fallbackISO, displayString: fallbackDisplay };
+    return { date: fallbackDate, isoString: fallbackISO, displayString: fallbackDisplay };
   }
 
   const tz = platformTimezone || 'Asia/Manila';
@@ -657,7 +658,9 @@ export function getNextOpeningDate(
     currentTimeStr < todaySchedule.open
   ) {
     const iso = `${String(currentYear).padStart(4, '0')}-${String(currentMonth).padStart(2, '0')}-${String(currentDayOfMonth).padStart(2, '0')}T${todaySchedule.open}:00+08:00`;
+    const parsed = new Date(iso);
     return {
+      date: isNaN(parsed.getTime()) ? fallbackDate : parsed,
       isoString: iso,
       displayString: `Today at ${todaySchedule.open}`
     };
@@ -688,15 +691,17 @@ export function getNextOpeningDate(
       } catch {}
 
       const iso = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}T${sched.open}:00+08:00`;
+      const parsed = new Date(iso);
       const capitalizedDay = nextDayName.charAt(0).toUpperCase() + nextDayName.slice(1);
       return {
+        date: isNaN(parsed.getTime()) ? fallbackDate : parsed,
         isoString: iso,
         displayString: offset === 1 ? `Tomorrow at ${sched.open}` : `${capitalizedDay} at ${sched.open}`
       };
     }
   }
 
-  return { isoString: fallbackISO, displayString: fallbackDisplay };
+  return { date: fallbackDate, isoString: fallbackISO, displayString: fallbackDisplay };
 }
 
 export function getMerchantRealRating(merchant: Pick<Merchant, 'ratingSum' | 'ratingCount'>): {
@@ -1427,7 +1432,10 @@ export const Merchants: React.FC = () => {
       recomputedBy: adminProfile?.name || adminProfile?.email || 'Admin'
     };
 
-    await setDoc(doc(db, 'merchants', merchantId, 'stats', 'bestSellers'), bestSellersData);
+    await setDoc(doc(db, 'merchants', merchantId, 'stats', 'bestSellers'), {
+      ...bestSellersData,
+      recomputedAt: nowTs()
+    });
 
     return bestSellersData;
   };
@@ -1652,7 +1660,7 @@ export const Merchants: React.FC = () => {
     try {
       setAddingCash(true);
       const isLinked = Boolean(selectedMerchant.linkedCustomerUid);
-      const now = Timestamp.now();
+      const now = nowTs();
       const txnRef = doc(collection(db, 'walletTransactions'));
       const adminId = adminProfile?.uid || 'admin';
       const adminName = adminProfile?.name || 'Administrator';
@@ -1754,7 +1762,7 @@ export const Merchants: React.FC = () => {
     try {
       setSubmittingAdjust(true);
       const isLinked = Boolean(selectedMerchant.linkedCustomerUid);
-      const now = Timestamp.now();
+      const now = nowTs();
       const txnRef = doc(collection(db, 'walletTransactions'));
       const adminId = adminProfile?.uid || 'admin';
       const adminName = adminProfile?.name || 'Administrator';
@@ -1905,7 +1913,8 @@ export const Merchants: React.FC = () => {
       }
 
       const mRef = doc(db, 'merchants', selectedMerchant.id);
-      const now = Timestamp.now();
+      const now = nowTs();
+      const localNow = Timestamp.now();
       const txnRef = doc(collection(db, 'walletTransactions'));
       const adminId = adminProfile?.uid || 'admin';
       const adminName = adminProfile?.name || 'Administrator';
@@ -1969,7 +1978,7 @@ export const Merchants: React.FC = () => {
         linkedCustomerUid: selectedCandidateCustomer.uid,
         linkedCustomerEmail: selectedCandidateCustomer.email,
         linkedCustomerName: selectedCandidateCustomer.name,
-        linkedAt: now,
+        linkedAt: localNow,
         walletBalance: 0
       };
       setSelectedMerchant(updatedMerchant);
@@ -2000,7 +2009,7 @@ export const Merchants: React.FC = () => {
         linkedCustomerEmail: null,
         linkedCustomerName: null,
         linkedAt: null,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       await logAuditEvent({
@@ -2045,7 +2054,7 @@ export const Merchants: React.FC = () => {
       await updateDoc(mRef, {
         hours: merchantHours,
         autoSchedule: Boolean(merchantAutoSchedule),
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       await logAuditEvent({
@@ -2088,7 +2097,10 @@ export const Merchants: React.FC = () => {
 
       const mRef = doc(db, 'merchants', selectedMerchant.id);
       await updateDoc(mRef, {
-        specialRadius: specialRadiusData
+        specialRadius: {
+          ...specialRadiusData,
+          updatedAt: nowTs()
+        }
       });
 
       await logAuditEvent({
@@ -2129,7 +2141,7 @@ export const Merchants: React.FC = () => {
         doc(db, 'settings', 'dispatch'),
         {
           searchRadiusKm: val,
-          updatedAt: Timestamp.now(),
+          updatedAt: nowTs(),
           updatedBy: adminProfile?.uid || 'admin'
         },
         { merge: true }
@@ -2473,7 +2485,7 @@ export const Merchants: React.FC = () => {
         address: finalAddress,
         lat: locLat,
         lng: locLng,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       await logAuditEvent({
@@ -2513,7 +2525,7 @@ export const Merchants: React.FC = () => {
       const mRef = doc(db, 'merchants', selectedMerchant.id);
       await updateDoc(mRef, {
         locationChangedAt: null,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       await logAuditEvent({
@@ -2547,7 +2559,7 @@ export const Merchants: React.FC = () => {
 
     try {
       setFixingCity(true);
-      const now = Timestamp.now();
+      const now = nowTs();
       await updateDoc(doc(db, 'merchants', selectedMerchant.id), {
         cityId: matched.id,
         updatedAt: now
@@ -2614,7 +2626,7 @@ export const Merchants: React.FC = () => {
         logoUrl: logoUrl.trim(),
         cuisineTags: cleanedCuisineTags,
         commissionRate: Number(commissionRate) || 15,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       };
 
       await updateDoc(mRef, updates);
@@ -2655,10 +2667,11 @@ export const Merchants: React.FC = () => {
         details: `Updated details for store ${shopName}`
       });
 
+      const localUpdates = { ...updates, updatedAt: Timestamp.now() };
       showSuccess('Merchant details saved.');
-      setSelectedMerchant((prev) => (prev ? { ...prev, ...updates } : null));
+      setSelectedMerchant((prev) => (prev ? { ...prev, ...localUpdates } : null));
       setMerchants((prev) =>
-        prev.map((m) => (m.id === selectedMerchant.id ? { ...m, ...updates } : m))
+        prev.map((m) => (m.id === selectedMerchant.id ? { ...m, ...localUpdates } : m))
       );
     } catch (err: any) {
       showError(err);
@@ -2679,7 +2692,7 @@ export const Merchants: React.FC = () => {
       batch.update(mRef, {
         status: newStatus,
         isOpen: isSuspended ? selectedMerchant.isOpen : false,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       const ownerUid = selectedMerchant.ownerUid || selectedMerchant.id;
@@ -2743,7 +2756,7 @@ export const Merchants: React.FC = () => {
       await updateDoc(doc(db, 'users', ownerUid), {
         outletsPinHash: deleteField(),
         outletsPinSalt: deleteField(),
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       await logAuditEvent({
@@ -2775,7 +2788,7 @@ export const Merchants: React.FC = () => {
       batch.update(doc(db, 'merchants', outlet.id), {
         status: newStatus,
         ...(newStatus === 'suspended' ? { isOpen: false } : {}),
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       const ownerUid = outlet.ownerUid || outlet.id;
@@ -2875,7 +2888,7 @@ export const Merchants: React.FC = () => {
       const mRef = doc(db, 'merchants', selectedMerchant.id);
       await updateDoc(mRef, {
         isOpen: newOpenState,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       showSuccess(`Store is now ${newOpenState ? 'OPEN' : 'CLOSED'}`);
@@ -2892,12 +2905,12 @@ export const Merchants: React.FC = () => {
   const handleForceCloseMerchant = async (merchantToClose: Merchant) => {
     try {
       const nextOpening = getNextOpeningDate(merchantToClose, platformTimezone);
-      const closedUntilVal = nextOpening.isoString;
+      const closedUntilTs = dateToTs(nextOpening.date);
       const mRef = doc(db, 'merchants', merchantToClose.id);
       await updateDoc(mRef, {
-        closedUntil: closedUntilVal,
+        closedUntil: closedUntilTs,
         isOpen: false,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       const adminId = adminProfile?.uid || 'admin';
@@ -2910,21 +2923,21 @@ export const Merchants: React.FC = () => {
         action: 'MERCHANT_FORCE_CLOSE',
         entityType: 'merchant',
         entityId: merchantToClose.id,
-        details: `Force closed merchant "${merchantToClose.name}" until ${nextOpening.displayString} (${closedUntilVal})`,
+        details: `Force closed merchant "${merchantToClose.name}" until ${nextOpening.displayString} (${nextOpening.isoString})`,
         oldValue: { closedUntil: merchantToClose.closedUntil || null, isOpen: merchantToClose.isOpen },
-        newValue: { closedUntil: closedUntilVal, isOpen: false }
+        newValue: { closedUntil: nextOpening.isoString, isOpen: false }
       });
 
       setMerchants((prev) =>
         prev.map((m) =>
           m.id === merchantToClose.id
-            ? { ...m, closedUntil: closedUntilVal, isOpen: false }
+            ? { ...m, closedUntil: closedUntilTs, isOpen: false }
             : m
         )
       );
       if (selectedMerchant && selectedMerchant.id === merchantToClose.id) {
         setSelectedMerchant((prev) =>
-          prev ? { ...prev, closedUntil: closedUntilVal, isOpen: false } : null
+          prev ? { ...prev, closedUntil: closedUntilTs, isOpen: false } : null
         );
       }
 
@@ -2941,7 +2954,7 @@ export const Merchants: React.FC = () => {
       await updateDoc(mRef, {
         closedUntil: null,
         isOpen: true,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       const adminId = adminProfile?.uid || 'admin';
@@ -3000,7 +3013,7 @@ export const Merchants: React.FC = () => {
       const mRef = doc(db, 'merchants', merchantId);
       await updateDoc(mRef, {
         cuisineTags: tags,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       setSelectedMerchant((prev) =>
@@ -3030,7 +3043,7 @@ export const Merchants: React.FC = () => {
       const mRef = doc(db, 'merchants', selectedMerchant.id);
       await updateDoc(mRef, {
         type: newType,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       await logAuditEvent({
@@ -3093,7 +3106,7 @@ export const Merchants: React.FC = () => {
           batch.update(itemDoc, {
             category: newCatName,
             categoryId: newCatId,
-            updatedAt: Timestamp.now()
+            updatedAt: nowTs()
           });
           return { ...item, category: newCatName, categoryId: newCatId };
         }
@@ -3133,7 +3146,7 @@ export const Merchants: React.FC = () => {
           batch.update(itemDoc, {
             category: newCatName,
             categoryId: newCatId,
-            updatedAt: Timestamp.now()
+            updatedAt: nowTs()
           });
           return { ...item, category: newCatName, categoryId: newCatId };
         }
@@ -3171,8 +3184,8 @@ export const Merchants: React.FC = () => {
       const newDoc = await addDoc(subCol, {
         name: trimmed,
         sortOrder: subcategories.length,
-        createdAt: Timestamp.now(),
-        updatedAt: Timestamp.now()
+        createdAt: nowTs(),
+        updatedAt: nowTs()
       });
       const newSub: Subcategory = {
         id: newDoc.id,
@@ -3210,8 +3223,8 @@ export const Merchants: React.FC = () => {
       const newDoc = await addDoc(subCol, {
         name: trimmed,
         sortOrder: subcategories.length,
-        createdAt: Timestamp.now(),
-        updatedAt: Timestamp.now()
+        createdAt: nowTs(),
+        updatedAt: nowTs()
       });
       const newSub: Subcategory = {
         id: newDoc.id,
@@ -3242,7 +3255,7 @@ export const Merchants: React.FC = () => {
       const subDoc = doc(db, 'merchants', selectedMerchant.id, 'subcategories', subId);
       await updateDoc(subDoc, {
         name: trimmed,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       // Update all associated items in Firestore
@@ -3253,7 +3266,7 @@ export const Merchants: React.FC = () => {
           const itemRef = doc(db, 'merchants', selectedMerchant.id, 'items', item.id);
           batch.update(itemRef, {
             subcategoryName: trimmed,
-            updatedAt: Timestamp.now()
+            updatedAt: nowTs()
           });
         });
         await batch.commit();
@@ -3298,7 +3311,7 @@ export const Merchants: React.FC = () => {
           batch.update(itemRef, {
             subcategoryId: null,
             subcategoryName: 'Other',
-            updatedAt: Timestamp.now()
+            updatedAt: nowTs()
           });
         });
         await batch.commit();
@@ -3387,12 +3400,13 @@ export const Merchants: React.FC = () => {
           active: menuFormActive,
           sortOrder: Number(menuFormSortOrder) || 0,
           schedule: scheduleObj,
-          updatedAt: Timestamp.now()
+          updatedAt: nowTs()
         };
         await updateDoc(menuDocRef, updateData);
+        const localUpdateData = { ...updateData, updatedAt: Timestamp.now() };
         setMenus((prev) =>
           prev
-            .map((m) => (m.id === editingMenu.id ? { ...m, ...updateData } : m))
+            .map((m) => (m.id === editingMenu.id ? { ...m, ...localUpdateData } : m))
             .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
         );
         showSuccess(`Menu "${trimmed}" updated.`);
@@ -3403,7 +3417,7 @@ export const Merchants: React.FC = () => {
           active: menuFormActive,
           sortOrder: Number(menuFormSortOrder) || 0,
           schedule: scheduleObj,
-          createdAt: Timestamp.now()
+          createdAt: nowTs()
         });
         const newMenu: MerchantMenu = {
           id: newDocRef.id,
@@ -3444,7 +3458,7 @@ export const Merchants: React.FC = () => {
       const menuDocRef = doc(db, 'merchants', selectedMerchant.id, 'menus', menu.id);
       await updateDoc(menuDocRef, {
         active: newActive,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
       setMenus((prev) =>
         prev.map((m) => (m.id === menu.id ? { ...m, active: newActive } : m))
@@ -3475,7 +3489,7 @@ export const Merchants: React.FC = () => {
           const nextMenuIds = (i.menuIds || []).filter((id) => id !== menu.id);
           batch.update(itemRef, {
             menuIds: nextMenuIds,
-            updatedAt: Timestamp.now()
+            updatedAt: nowTs()
           });
         });
         await batch.commit();
@@ -3527,7 +3541,7 @@ export const Merchants: React.FC = () => {
           const itemRef = doc(db, 'merchants', selectedMerchant.id, 'items', item.id);
           batch.update(itemRef, {
             menuIds: nextMenuIds,
-            updatedAt: Timestamp.now()
+            updatedAt: nowTs()
           });
 
           return { ...item, menuIds: nextMenuIds };
@@ -3717,7 +3731,7 @@ export const Merchants: React.FC = () => {
                 inStock: derivedInStock
               }
             : {}),
-          updatedAt: Timestamp.now()
+          updatedAt: nowTs()
         };
         await updateDoc(itemDoc, updatePayload);
         updatedItems = menuItems.map((i) =>
@@ -3768,7 +3782,7 @@ export const Merchants: React.FC = () => {
           available: itemAvailable,
           hasSets,
           sets: sanitizedSets,
-          createdAt: Timestamp.now()
+          createdAt: nowTs()
         });
         const newItem: MenuItem = {
           id: newDocRef.id,
@@ -3827,7 +3841,7 @@ export const Merchants: React.FC = () => {
       const itemDoc = doc(db, 'merchants', selectedMerchant.id, 'items', item.id);
       await updateDoc(itemDoc, {
         available: newAvail,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
       const updatedItems = menuItems.map((i) =>
         i.id === item.id ? { ...i, available: newAvail } : i
@@ -3905,7 +3919,7 @@ export const Merchants: React.FC = () => {
         chainId: selectedMerchant.chainId || null,
         amount: Number(payoutAmount),
         status: 'Pending',
-        createdAt: Timestamp.now()
+        createdAt: nowTs()
       });
 
       showSuccess('Payout request generated.');
@@ -3925,7 +3939,7 @@ export const Merchants: React.FC = () => {
       const pRef = doc(db, 'merchantPayouts', payoutId);
       await updateDoc(pRef, {
         status: 'Paid',
-        paidAt: Timestamp.now(),
+        paidAt: nowTs(),
         paidBy: adminProfile?.name || 'Admin'
       });
       showSuccess('Payout marked as Paid.');
@@ -3958,8 +3972,8 @@ export const Merchants: React.FC = () => {
             address: newAddress,
             lat: newLat,
             lng: newLng,
-            locationChangedAt: Timestamp.now(),
-            updatedAt: Timestamp.now()
+            locationChangedAt: nowTs(),
+            updatedAt: nowTs()
           });
           setLocAddress(newAddress);
           setLocLat(newLat);
@@ -3978,7 +3992,7 @@ export const Merchants: React.FC = () => {
       batch.update(reqRef, {
         status: 'Approved',
         reviewedBy: adminProfile?.name || 'Admin',
-        reviewedAt: Timestamp.now()
+        reviewedAt: nowTs()
       });
 
       await batch.commit();
@@ -4000,7 +4014,7 @@ export const Merchants: React.FC = () => {
           riderId: null,
           merchantId: req.merchantId || selectedMerchant.id,
           merchantName: selectedMerchant.name || null,
-          createdAt: Timestamp.now(),
+          createdAt: nowTs(),
           createdBy: adminProfile?.uid || 'admin',
           createdByName: adminProfile?.name || 'Administrator'
         });
@@ -4029,7 +4043,7 @@ export const Merchants: React.FC = () => {
         status: 'Rejected',
         rejectReason: reason.trim(),
         reviewedBy: adminProfile?.name || 'Admin',
-        reviewedAt: Timestamp.now()
+        reviewedAt: nowTs()
       });
 
       // Automatic inbox notice to merchant
@@ -4045,7 +4059,7 @@ export const Merchants: React.FC = () => {
           riderId: null,
           merchantId: targetChangeRequest.merchantId || selectedMerchant?.id,
           merchantName: selectedMerchant?.name || null,
-          createdAt: Timestamp.now(),
+          createdAt: nowTs(),
           createdBy: adminProfile?.uid || 'admin',
           createdByName: adminProfile?.name || 'Administrator'
         });

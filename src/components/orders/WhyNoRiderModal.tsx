@@ -17,8 +17,8 @@ import { haversineKm } from '../merchants/CustomerVisibilityCheckPanel';
 import { parseDate } from '../../utils/date';
 import { formatOrderNumber } from '../../utils/orderNumber';
 import { resolveOrderMerchantDisplay } from '../../utils/outletUtils';
-import { SERVICES_BY_VEHICLE, VEHICLE_LABELS, type VehicleType } from '../../constants';
-import type { Order, Rider, Merchant, City } from '../../types';
+import { SERVICE_LABELS, SERVICES_BY_VEHICLE, VEHICLE_LABELS, type VehicleType } from '../../constants';
+import type { Order, OrderServiceType, Rider, Merchant, City } from '../../types';
 
 interface WhyNoRiderModalProps {
   isOpen: boolean;
@@ -32,9 +32,9 @@ interface RiderDiagnosticCheck {
   key:
     | 'online'
     | 'locationAge'
-    | 'riderInstant'
-    | 'cityInstant'
-    | 'platformInstant'
+    | 'riderService'
+    | 'cityService'
+    | 'platformService'
     | 'notBusy'
     | 'vehicleType'
     | 'distance';
@@ -93,14 +93,25 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
   const [freshMerchant, setFreshMerchant] = useState<Merchant | null>(null);
   const [freshCity, setFreshCity] = useState<City | null>(null);
   const [globalRadiusKm, setGlobalRadiusKm] = useState<number>(5);
+  const [taxiRadiusKm, setTaxiRadiusKm] = useState<number | null>(null);
   const [locationMaxAgeMinutes, setLocationMaxAgeMinutes] = useState<number>(5);
-  const [platformInstantOn, setPlatformInstantOn] = useState<boolean>(true);
+  const [platformServiceOn, setPlatformServiceOn] = useState<boolean>(true);
+  const [platformTaxiVehicles, setPlatformTaxiVehicles] = useState<Record<string, boolean>>({
+    motorcycle: true,
+    tricycle: true,
+    car4: true,
+    car8: true
+  });
   const [evaluatedAtMs, setEvaluatedAtMs] = useState<number>(() => Date.now());
 
   const [searchQuery, setSearchQuery] = useState('');
   const [resultFilter, setResultFilter] = useState<'all' | 'failing' | 'passing'>('all');
 
-  const mId = order.merchantId || order.sourceMerchantId || '';
+  const serviceType: OrderServiceType = (order.serviceType || 'food') as OrderServiceType;
+  const serviceLabel = SERVICE_LABELS[serviceType] || serviceType;
+  const isMerchantService =
+    serviceType === 'food' || serviceType === 'convenience' || serviceType === 'request_rider';
+  const mId = isMerchantService ? order.merchantId || order.sourceMerchantId || '' : '';
 
   const runDiagnostics = useCallback(async () => {
     if (!isOpen) return;
@@ -158,11 +169,15 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
       });
 
       let gRadius = 5;
+      let tRadius: number | null = null;
       let maxAgeMin = 5;
       if (dispatchSnap.exists()) {
         const dData = dispatchSnap.data();
         if (typeof dData.searchRadiusKm === 'number' && dData.searchRadiusKm > 0) {
           gRadius = Number(dData.searchRadiusKm);
+        }
+        if (typeof dData.taxiSearchRadiusKm === 'number' && dData.taxiSearchRadiusKm > 0) {
+          tRadius = Number(dData.taxiSearchRadiusKm);
         }
         const cfgAgeMin = Number(
           dData.riderLocationMaxAgeMinutes ?? dData.locationMaxAgeMinutes ?? 0
@@ -175,10 +190,24 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
         }
       }
 
-      let pInstant = true;
+      let pServiceOn = true;
+      let pTaxiVehicles: Record<string, boolean> = {
+        motorcycle: true,
+        tricycle: true,
+        car4: true,
+        car8: true
+      };
       if (platformSnap.exists()) {
         const pData = platformSnap.data();
-        pInstant = pData.services?.request_rider !== false;
+        pServiceOn = pData.services?.[serviceType] !== false;
+        if (pData.taxiVehicles && typeof pData.taxiVehicles === 'object') {
+          pTaxiVehicles = {
+            motorcycle: pData.taxiVehicles.motorcycle !== false,
+            tricycle: pData.taxiVehicles.tricycle !== false,
+            car4: pData.taxiVehicles.car4 !== false,
+            car8: pData.taxiVehicles.car8 !== false
+          };
+        }
       }
 
       let loadedMerchant: Merchant | null = null;
@@ -221,8 +250,10 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
       setRiders(riderList);
       setActiveOrdersByRiderId(activeMap);
       setGlobalRadiusKm(gRadius);
+      setTaxiRadiusKm(tRadius);
       setLocationMaxAgeMinutes(maxAgeMin);
-      setPlatformInstantOn(pInstant);
+      setPlatformServiceOn(pServiceOn);
+      setPlatformTaxiVehicles(pTaxiVehicles);
       setFreshMerchant(loadedMerchant);
       setFreshCity(loadedCity);
       setEvaluatedAtMs(Date.now());
@@ -231,7 +262,7 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [isOpen, order.id, order.cityId, mId, merchantsById, cities]);
+  }, [isOpen, order.id, order.cityId, serviceType, mId, merchantsById, cities]);
 
   useEffect(() => {
     if (isOpen) {
@@ -240,20 +271,27 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
   }, [isOpen, runDiagnostics]);
 
   const contextSummary = useMemo(() => {
-    const merchant = freshMerchant || (mId ? merchantsById[mId] : undefined);
-    const merchantLat = Number(merchant?.lat) || Number(order.pickup?.lat) || 0;
-    const merchantLng = Number(merchant?.lng) || Number(order.pickup?.lng) || 0;
-    const hasMerchantCoords =
-      Number.isFinite(merchantLat) &&
-      Number.isFinite(merchantLng) &&
-      merchantLat !== 0 &&
-      merchantLng !== 0;
+    const merchant = isMerchantService ? freshMerchant || (mId ? merchantsById[mId] : undefined) : undefined;
+    const pickupLat = isMerchantService
+      ? Number(merchant?.lat) || Number(order.pickup?.lat) || 0
+      : Number(order.pickup?.lat) || 0;
+    const pickupLng = isMerchantService
+      ? Number(merchant?.lng) || Number(order.pickup?.lng) || 0
+      : Number(order.pickup?.lng) || 0;
+    const hasPickupCoords =
+      Number.isFinite(pickupLat) &&
+      Number.isFinite(pickupLng) &&
+      pickupLat !== 0 &&
+      pickupLng !== 0;
 
-    const specialEnabled = Boolean(
-      merchant?.specialRadius?.enabled && Number(merchant.specialRadius.radiusKm) > 0
-    );
+    const specialEnabled =
+      isMerchantService &&
+      Boolean(merchant?.specialRadius?.enabled && Number(merchant.specialRadius.radiusKm) > 0);
+    const usesTaxiRadius = serviceType === 'taxi' && taxiRadiusKm !== null && taxiRadiusKm > 0;
     const effectiveRadiusKm = specialEnabled
       ? Number(merchant!.specialRadius!.radiusKm)
+      : usesTaxiRadius
+      ? Number(taxiRadiusKm)
       : globalRadiusKm;
 
     const targetCityId = order.cityId || merchant?.cityId || '';
@@ -261,34 +299,55 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
 
     const mergedMerchantsMap =
       merchant && mId ? { ...merchantsById, [mId]: merchant } : merchantsById;
-    const merchantDisplayName =
-      resolveOrderMerchantDisplay(order, mergedMerchantsMap, true) ||
-      order.pickup?.label ||
-      'Merchant';
+    const locationDisplayName = isMerchantService
+      ? resolveOrderMerchantDisplay(order, mergedMerchantsMap, true) ||
+        order.pickup?.label ||
+        order.pickup?.address ||
+        'Merchant'
+      : order.pickup?.label || order.pickup?.address || 'Pickup Location';
 
     const orderVehicle = order.vehicleType ? normalizeVehicleType(order.vehicleType) : null;
 
     return {
       merchant,
-      merchantDisplayName,
-      merchantLat,
-      merchantLng,
-      hasMerchantCoords,
+      locationDisplayName,
+      pickupLat,
+      pickupLng,
+      hasPickupCoords,
+      pickupPointLabel: isMerchantService ? 'merchant' : 'pickup',
       specialEnabled,
+      usesTaxiRadius,
       effectiveRadiusKm,
-      radiusKindLabel: specialEnabled ? 'special' : 'global',
+      radiusKindLabel: specialEnabled ? 'special' : usesTaxiRadius ? 'taxi' : 'global',
+      radiusHeaderLabel: specialEnabled
+        ? 'Special Radius'
+        : usesTaxiRadius
+        ? 'Taxi Radius'
+        : 'Global Radius',
       targetCityId,
       cityObj,
       orderVehicle
     };
-  }, [freshMerchant, freshCity, mId, merchantsById, order, globalRadiusKm, cities]);
+  }, [
+    isMerchantService,
+    serviceType,
+    freshMerchant,
+    freshCity,
+    mId,
+    merchantsById,
+    order,
+    globalRadiusKm,
+    taxiRadiusKm,
+    cities
+  ]);
 
   const evaluatedRiders: EvaluatedRider[] = useMemo(() => {
     const maxAgeMs = locationMaxAgeMinutes * 60 * 1000;
     const {
-      merchantLat,
-      merchantLng,
-      hasMerchantCoords,
+      pickupLat,
+      pickupLng,
+      hasPickupCoords,
+      pickupPointLabel,
       effectiveRadiusKm,
       radiusKindLabel,
       targetCityId,
@@ -323,41 +382,51 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
         locationFailReason = `Location is stale (${formatAgeDuration(ageMs)} ago; limit ${locationMaxAgeMinutes}m)`;
       }
 
-      // 3. Instant service on for the rider
+      // 3. Service on for the rider
       const allowedArr = Array.isArray(rider.allowedServices) ? rider.allowedServices : null;
       const activeArr = Array.isArray(rider.activeServices) ? rider.activeServices : null;
-      const allowedHasInstant = allowedArr ? allowedArr.includes('request_rider') : true;
-      const activeHasInstant = activeArr
-        ? activeArr.includes('request_rider')
-        : SERVICES_BY_VEHICLE[vType].includes('request_rider');
-      const riderInstantPass = allowedHasInstant && activeHasInstant;
-      const riderInstantFailReason = !allowedHasInstant
-        ? 'Delivio Instant not allowed for rider (allowedServices)'
-        : 'Rider turned OFF Delivio Instant (activeServices)';
+      const allowedHasService = allowedArr ? allowedArr.includes(serviceType) : true;
+      const activeHasService = activeArr
+        ? activeArr.includes(serviceType)
+        : (SERVICES_BY_VEHICLE[vType] || []).includes(serviceType);
+      const riderServicePass = allowedHasService && activeHasService;
+      const riderServiceFailReason = !allowedHasService
+        ? `${serviceLabel} not allowed for rider (allowedServices)`
+        : `Rider turned OFF ${serviceLabel} (activeServices)`;
 
-      // 4. Instant service on for the city
-      let cityInstantPass = false;
-      let cityInstantFailReason = '';
-      let cityInstantDetail = '';
+      // 4. Service on for the city
+      let cityServicePass = false;
+      let cityServiceFailReason = '';
+      let cityServiceDetail = '';
       if (!targetCityId || !cityObj) {
-        cityInstantFailReason = targetCityId
+        cityServiceFailReason = targetCityId
           ? `Order city "${targetCityId}" not found`
-          : 'Order & merchant have no cityId assigned';
+          : isMerchantService
+          ? 'Order & merchant have no cityId assigned'
+          : 'Order has no cityId assigned';
       } else if (cityObj.status === 'inactive') {
-        cityInstantFailReason = `City "${cityObj.name}" is inactive`;
-      } else if (cityObj.services?.request_rider === false) {
-        cityInstantFailReason = `Delivio Instant is OFF in ${cityObj.name}`;
+        cityServiceFailReason = `City "${cityObj.name}" is inactive`;
+      } else if (cityObj.services?.[serviceType] === false) {
+        cityServiceFailReason = `${serviceLabel} is OFF in ${cityObj.name}`;
       } else if (rider.cityId && rider.cityId !== targetCityId) {
         const rCityName = cities.find((c) => c.id === rider.cityId)?.name || rider.cityId;
-        cityInstantFailReason = `Rider city (${rCityName}) differs from order city (${cityObj.name})`;
+        cityServiceFailReason = `Rider city (${rCityName}) differs from order city (${cityObj.name})`;
       } else {
-        cityInstantPass = true;
-        cityInstantDetail = `${cityObj.name} (Instant ON)`;
+        cityServicePass = true;
+        cityServiceDetail = `${cityObj.name} (${serviceLabel} ON)`;
       }
 
-      // 5. Instant service on for the platform
-      const platformPass = platformInstantOn;
-      const platformFailReason = 'Platform-wide Delivio Instant service is OFF (settings/platform)';
+      // 5. Service on for the platform
+      const platformTaxiVehicleBlocked =
+        serviceType === 'taxi' &&
+        ((orderVehicle && platformTaxiVehicles[orderVehicle] === false) ||
+          platformTaxiVehicles[vType] === false);
+      const platformPass = platformServiceOn && !platformTaxiVehicleBlocked;
+      const platformFailReason = !platformServiceOn
+        ? `Platform-wide ${serviceLabel} service is OFF (settings/platform)`
+        : orderVehicle && platformTaxiVehicles[orderVehicle] === false
+        ? `Platform-wide ${VEHICLE_LABELS[orderVehicle]} taxi option is OFF (settings/platform)`
+        : `Platform-wide ${VEHICLE_LABELS[vType]} taxi option is OFF (settings/platform)`;
 
       // 6. Busy with another order
       const activeAssigned = activeOrdersByRiderId[rider.id];
@@ -371,30 +440,32 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
       }
 
       // 7. Vehicle type
-      const supportsInstantVehicle = (SERVICES_BY_VEHICLE[vType] || []).includes('request_rider');
+      const supportsServiceVehicle = (SERVICES_BY_VEHICLE[vType] || []).includes(serviceType);
       const matchesRequestedVehicle = !orderVehicle || orderVehicle === vType;
-      const vehiclePass = supportsInstantVehicle && matchesRequestedVehicle;
+      const vehiclePass = supportsServiceVehicle && matchesRequestedVehicle;
       const vehicleLabel = VEHICLE_LABELS[vType] || rider.vehicleType || 'Unknown';
       let vehicleFailReason = '';
-      if (!supportsInstantVehicle) {
-        vehicleFailReason = `${vehicleLabel} cannot serve Delivio Instant (Motorcycle required)`;
+      if (!supportsServiceVehicle) {
+        vehicleFailReason = `${vehicleLabel} cannot serve ${serviceLabel}`;
       } else if (!matchesRequestedVehicle) {
         vehicleFailReason = `${vehicleLabel} does not match requested ${VEHICLE_LABELS[orderVehicle!]}`;
       }
 
-      // 8. Distance to merchant vs radius (global or special)
+      // 8. Distance to merchant / pickup vs radius
       const distKm =
-        hasMerchantCoords && hasRiderCoords
-          ? haversineKm(rLat, rLng, merchantLat, merchantLng)
+        hasPickupCoords && hasRiderCoords
+          ? haversineKm(rLat, rLng, pickupLat, pickupLng)
           : null;
       const distancePass = distKm !== null && distKm <= effectiveRadiusKm;
       let distanceFailReason = '';
-      if (!hasMerchantCoords) {
-        distanceFailReason = 'Merchant coordinates are missing (0, 0)';
+      if (!hasPickupCoords) {
+        distanceFailReason = isMerchantService
+          ? 'Merchant coordinates are missing (0, 0)'
+          : 'Pickup coordinates are missing (0, 0)';
       } else if (!hasRiderCoords || distKm === null) {
         distanceFailReason = 'Cannot measure distance without rider GPS coordinates';
       } else if (distKm > effectiveRadiusKm) {
-        distanceFailReason = `${distKm.toFixed(2)} km from merchant (exceeds ${effectiveRadiusKm} km ${radiusKindLabel})`;
+        distanceFailReason = `${distKm.toFixed(2)} km from ${pickupPointLabel} (exceeds ${effectiveRadiusKm} km ${radiusKindLabel})`;
       }
 
       const checks: RiderDiagnosticCheck[] = [
@@ -416,24 +487,24 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
           failReason: locationFailReason
         },
         {
-          key: 'riderInstant',
-          label: 'Instant (Rider)',
-          pass: riderInstantPass,
-          detail: riderInstantPass ? 'Enabled' : riderInstantFailReason,
-          failReason: riderInstantFailReason
+          key: 'riderService',
+          label: 'Service (Rider)',
+          pass: riderServicePass,
+          detail: riderServicePass ? `${serviceLabel} ON` : riderServiceFailReason,
+          failReason: riderServiceFailReason
         },
         {
-          key: 'cityInstant',
-          label: 'Instant (City)',
-          pass: cityInstantPass,
-          detail: cityInstantPass ? cityInstantDetail : cityInstantFailReason,
-          failReason: cityInstantFailReason
+          key: 'cityService',
+          label: 'Service (City)',
+          pass: cityServicePass,
+          detail: cityServicePass ? cityServiceDetail : cityServiceFailReason,
+          failReason: cityServiceFailReason
         },
         {
-          key: 'platformInstant',
-          label: 'Instant (Platform)',
+          key: 'platformService',
+          label: 'Service (Platform)',
           pass: platformPass,
-          detail: platformPass ? 'Enabled' : platformFailReason,
+          detail: platformPass ? `${serviceLabel} ON` : platformFailReason,
           failReason: platformFailReason
         },
         {
@@ -491,7 +562,11 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
     activeOrdersByRiderId,
     contextSummary,
     locationMaxAgeMinutes,
-    platformInstantOn,
+    platformServiceOn,
+    platformTaxiVehicles,
+    serviceType,
+    serviceLabel,
+    isMerchantService,
     evaluatedAtMs,
     order.id,
     cities
@@ -520,6 +595,11 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
 
   if (!isOpen) return null;
 
+  const requestedTaxiVehicleDisabled =
+    serviceType === 'taxi' &&
+    contextSummary.orderVehicle &&
+    platformTaxiVehicles[contextSummary.orderVehicle] === false;
+
   return (
     <div
       className="fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-5 bg-black/60 backdrop-blur-xs"
@@ -540,19 +620,36 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
               <h2 className="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white font-mono">
                 {formatOrderNumber(order)}
               </h2>
-              <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
-                riderRequest: {order.riderRequest?.status || 'Searching'}
+              <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 border border-gray-200 dark:border-zinc-700">
+                {serviceLabel}
               </span>
+              {order.vehicleType && (
+                <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-blue-50 dark:bg-blue-950/50 text-blue-800 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                  {VEHICLE_LABELS[normalizeVehicleType(order.vehicleType)] || order.vehicleType}
+                </span>
+              )}
+              {order.riderRequest?.status ? (
+                <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                  riderRequest: {order.riderRequest.status}
+                </span>
+              ) : (
+                <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                  Status: {order.status}
+                </span>
+              )}
             </div>
             <p className="text-xs text-gray-500 dark:text-zinc-400">
-              Merchant: <strong className="text-gray-800 dark:text-zinc-200">{contextSummary.merchantDisplayName}</strong>
+              {isMerchantService ? 'Merchant' : 'Pickup'}:{' '}
+              <strong className="text-gray-800 dark:text-zinc-200">
+                {contextSummary.locationDisplayName}
+              </strong>
               {' · '}
               City: <strong className="text-gray-800 dark:text-zinc-200">{contextSummary.cityObj?.name || contextSummary.targetCityId || 'Missing'}</strong>
               {' · '}
-              Radius: <strong className="text-gray-800 dark:text-zinc-200 tabular-nums">{contextSummary.effectiveRadiusKm} km</strong> ({contextSummary.specialEnabled ? 'Special Radius' : 'Global Radius'})
-              {!contextSummary.hasMerchantCoords && (
+              Radius: <strong className="text-gray-800 dark:text-zinc-200 tabular-nums">{contextSummary.effectiveRadiusKm} km</strong> ({contextSummary.radiusHeaderLabel})
+              {!contextSummary.hasPickupCoords && (
                 <span className="ml-2 text-red-600 dark:text-red-400 font-bold">
-                  · Missing merchant coordinates!
+                  · {isMerchantService ? 'Missing merchant coordinates!' : 'Missing pickup coordinates!'}
                 </span>
               )}
             </p>
@@ -629,23 +726,26 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
           </div>
         </div>
 
-        {/* Platform/City Global Alert if Instant is off */}
-        {(!platformInstantOn ||
+        {/* Platform/City Global Alert if selected service is off */}
+        {(!platformServiceOn ||
+          requestedTaxiVehicleDisabled ||
           !contextSummary.cityObj ||
           contextSummary.cityObj.status === 'inactive' ||
-          contextSummary.cityObj.services?.request_rider === false) &&
+          contextSummary.cityObj.services?.[serviceType] === false) &&
           !loading && (
             <div className="mx-4 sm:mx-5 mt-3 p-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 flex items-start gap-2 text-xs text-red-700 dark:text-red-300">
               <ShieldAlert className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
               <div>
                 <span className="font-extrabold">Service-level block detected: </span>
-                {!platformInstantOn
-                  ? 'Delivio Instant (request_rider) is turned OFF platform-wide in settings/platform.'
+                {!platformServiceOn
+                  ? `${serviceLabel} (${serviceType}) is turned OFF platform-wide in settings/platform.`
+                  : requestedTaxiVehicleDisabled
+                  ? `${VEHICLE_LABELS[contextSummary.orderVehicle!]} is turned OFF under Taxi vehicles in settings/platform.`
                   : !contextSummary.cityObj
                   ? `Order/merchant city (${contextSummary.targetCityId || 'none'}) does not exist.`
                   : contextSummary.cityObj.status === 'inactive'
                   ? `City "${contextSummary.cityObj.name}" is inactive.`
-                  : `Delivio Instant (request_rider) is turned OFF in ${contextSummary.cityObj.name}.`}
+                  : `${serviceLabel} (${serviceType}) is turned OFF in ${contextSummary.cityObj.name}.`}
               </div>
             </div>
           )}

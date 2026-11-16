@@ -13,6 +13,7 @@ import { useCity } from '../context/CityContext';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
+import { nowTs } from '../utils/date';
 import type { City, Merchant, Rider, OrderServiceType } from '../types';
 import { SERVICES_BY_VEHICLE, type VehicleType } from '../constants';
 import {
@@ -254,7 +255,7 @@ export const CityServicesMatrix: React.FC<CityServicesMatrixProps> = ({ filterCi
       // 1. Dotted-path update on cities/{id}.services.<service>
       const cityRef = doc(db, 'cities', city.id);
       const dottedPath = `services.${service.id}`;
-      const now = Timestamp.now();
+      const now = nowTs();
       const adminName = adminProfile?.name || adminProfile?.email || 'Administrator';
 
       await updateDoc(cityRef, {

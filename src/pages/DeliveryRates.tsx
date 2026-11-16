@@ -14,6 +14,7 @@ import { useCity } from '../context/CityContext';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
+import { nowTs } from '../utils/date';
 import type {
   City,
   DeliveryRatesConfig,
@@ -323,7 +324,7 @@ export const DeliveryRates: React.FC = () => {
         status: cityStatus,
         center: { lat: cityLat, lng: cityLng },
         radiusKm: Number(cityRadiusKm) || 15,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       };
 
       const cityRef = doc(db, 'cities', cityId);
@@ -471,7 +472,7 @@ export const DeliveryRates: React.FC = () => {
         request_rider: ratesConfig.request_rider,
         rideRates: ratesConfig.rideRates,
         riderPay: ratesConfig.riderPay || DEFAULT_RIDER_PAY,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       };
 
       await setDoc(rateRef, payload, { merge: true });

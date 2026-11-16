@@ -17,7 +17,7 @@ import { useToast } from '../context/ToastContext';
 import { useCity } from '../context/CityContext';
 import { logAuditEvent } from '../utils/audit';
 import { findMatchingCity } from '../utils/cityUtils';
-import { formatTimestamp, formatRelativeTime } from '../utils/date';
+import { formatTimestamp, formatRelativeTime, nowTs } from '../utils/date';
 import type { City, MerchantApplication, RiderApplication } from '../types';
 import {
   VEHICLE_TYPES,
@@ -245,7 +245,7 @@ export const Applications: React.FC = () => {
       const batch = writeBatch(db);
       // The applicant's own UID is the same as the application document ID
       const applicantUid = app.id;
-      const now = Timestamp.now();
+      const now = nowTs();
 
       // 1. set users/{applicantUid}
       const userRef = doc(db, 'users', applicantUid);
@@ -330,7 +330,7 @@ export const Applications: React.FC = () => {
       const batch = writeBatch(db);
       // The applicant's own UID is the same as the application document ID
       const applicantUid = app.id;
-      const now = Timestamp.now();
+      const now = nowTs();
       const riderCode = app.riderCode || `DLV-D-${Math.floor(100000 + Math.random() * 900000)}`;
 
       // Normalize vehicleType
@@ -435,7 +435,7 @@ export const Applications: React.FC = () => {
         status: newStatus,
         reviewNote: reason,
         reviewedBy: adminProfile?.name || 'Administrator',
-        reviewedAt: Timestamp.now()
+        reviewedAt: nowTs()
       });
 
       await logAuditEvent({

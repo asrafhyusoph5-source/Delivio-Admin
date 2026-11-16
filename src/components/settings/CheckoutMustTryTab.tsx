@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { db, doc, setDoc, Timestamp } from '../../firebase';
+import { db, doc, setDoc } from '../../firebase';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { logAuditEvent } from '../../utils/audit';
+import { nowTs } from '../../utils/date';
 import type { CheckoutSettings } from '../../types';
 import { DEFAULT_CHECKOUT_SETTINGS } from '../../constants';
 import { ConfirmationModal } from '../common/ConfirmationModal';
@@ -66,7 +67,7 @@ export const CheckoutMustTryTab: React.FC<CheckoutMustTryTabProps> = ({
           description: mustTry.description?.trim() || 'Add a favorite from this shop to go with your order',
           maxItems: Math.min(12, Math.max(1, Number(mustTry.maxItems) || 8))
         },
-        updatedAt: Timestamp.now(),
+        updatedAt: nowTs() as any,
         updatedBy: adminProfile?.email || 'admin'
       };
 

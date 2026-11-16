@@ -16,7 +16,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
-import { formatTimestamp, formatRelativeTime } from '../utils/date';
+import { formatTimestamp, formatRelativeTime, nowTs } from '../utils/date';
 import type { TierConfig, TierEvent, Rider } from '../types';
 import {
   Award,
@@ -155,7 +155,7 @@ export const TiersCoins: React.FC = () => {
     try {
       setProcessingCredit(true);
       const batch = writeBatch(db);
-      const now = Timestamp.now();
+      const now = nowTs();
 
       // 1. increment riders.coins
       const riderRef = doc(db, 'riders', creditingEvent.riderId);

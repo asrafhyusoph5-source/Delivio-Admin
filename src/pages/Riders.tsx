@@ -22,7 +22,7 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
-import { formatTimestamp, formatRelativeTime } from '../utils/date';
+import { formatTimestamp, formatRelativeTime, nowTs } from '../utils/date';
 import { formatOrderNumber } from '../utils/orderNumber';
 import type {
   Rider,
@@ -339,7 +339,7 @@ export const Riders: React.FC = () => {
         doc(db, 'settings', 'dispatch'),
         {
           searchRadiusKm: val,
-          updatedAt: Timestamp.now(),
+          updatedAt: nowTs(),
           updatedBy: adminProfile?.uid || 'admin'
         },
         { merge: true }
@@ -777,7 +777,7 @@ export const Riders: React.FC = () => {
         allowedServices: allowed,
         activeServices: active,
         seats: defaultSeats,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       await logAuditEvent({
@@ -840,7 +840,7 @@ export const Riders: React.FC = () => {
         vehicleColor: vehicleColor.trim(),
         seats: Number(seats) || 1,
         plate: plate.trim(),
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       };
 
       await updateDoc(rRef, updates);
@@ -870,9 +870,10 @@ export const Riders: React.FC = () => {
         details: `Updated driver profile for ${name}`
       });
 
+      const localUpdates = { ...updates, updatedAt: Timestamp.now() };
       showSuccess('Driver details saved.');
-      setSelectedRider((prev) => (prev ? { ...prev, ...updates } : null));
-      setRiders((prev) => prev.map((r) => (r.id === selectedRider.id ? { ...r, ...updates } : r)));
+      setSelectedRider((prev) => (prev ? { ...prev, ...localUpdates } : null));
+      setRiders((prev) => prev.map((r) => (r.id === selectedRider.id ? { ...r, ...localUpdates } : r)));
     } catch (err: any) {
       showError(err);
     } finally {
@@ -934,7 +935,7 @@ export const Riders: React.FC = () => {
       await updateDoc(rRef, {
         allowedServices: allowed,
         activeServices: active,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       showSuccess(`Updated service status for ${selectedRider.name}.`);
@@ -968,7 +969,7 @@ export const Riders: React.FC = () => {
         note: remitNote.trim(),
         adminId: adminProfile?.uid || 'admin',
         adminName: adminProfile?.name || 'Administrator',
-        createdAt: Timestamp.now()
+        createdAt: nowTs()
       });
 
       const rRef = doc(db, 'riders', selectedRider.id);
@@ -1058,7 +1059,8 @@ export const Riders: React.FC = () => {
       // write a walletTransactions entry type "merge" (riderId, customerId, amount);
       // write auditLogs.
       const riderRef = doc(db, 'riders', selectedRider.id);
-      const now = Timestamp.now();
+      const now = nowTs();
+      const localNow = Timestamp.now();
       const txnRef = doc(collection(db, 'walletTransactions'));
 
       let riderBal = 0;
@@ -1132,7 +1134,7 @@ export const Riders: React.FC = () => {
               linkedCustomerUid: selectedCandidateCustomer.uid,
               linkedCustomerEmail: selectedCandidateCustomer.email,
               linkedCustomerName: selectedCandidateCustomer.name,
-              linkedAt: now,
+              linkedAt: localNow,
               walletBalance: 0
             }
           : null
@@ -1145,7 +1147,7 @@ export const Riders: React.FC = () => {
                 linkedCustomerUid: selectedCandidateCustomer.uid,
                 linkedCustomerEmail: selectedCandidateCustomer.email,
                 linkedCustomerName: selectedCandidateCustomer.name,
-                linkedAt: now,
+                linkedAt: localNow,
                 walletBalance: 0
               }
             : r
@@ -1183,7 +1185,7 @@ export const Riders: React.FC = () => {
         linkedCustomerEmail: null,
         linkedCustomerName: null,
         linkedAt: null,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       await logAuditEvent({
@@ -1237,7 +1239,7 @@ export const Riders: React.FC = () => {
     if (!selectedRider || cashInAmount <= 0) return;
     try {
       setAddingCash(true);
-      const now = Timestamp.now();
+      const now = nowTs();
       const noteClean = cashInNote.trim() || 'Admin top-up';
       const txnRef = doc(collection(db, 'walletTransactions'));
       const isLinked = Boolean(selectedRider.linkedCustomerUid);
@@ -1335,7 +1337,7 @@ export const Riders: React.FC = () => {
 
     try {
       setSubmittingAdjust(true);
-      const now = Timestamp.now();
+      const now = nowTs();
       const txnRef = doc(collection(db, 'walletTransactions'));
       const isLinked = Boolean(selectedRider.linkedCustomerUid);
 
@@ -1443,7 +1445,7 @@ export const Riders: React.FC = () => {
         body: msgBody.trim(),
         category: msgCategory,
         sentBy: adminProfile?.name || 'Administrator',
-        createdAt: Timestamp.now()
+        createdAt: nowTs()
       });
 
       showSuccess(`Dispatched message to ${selectedRider.name}.`);
@@ -1481,18 +1483,33 @@ export const Riders: React.FC = () => {
           ? { ...selectedRider.documents }
           : {};
 
-      currentDocs[editingDocType] = {
-        title: editingDocTitle,
-        documentNumber: editingDocNumber.trim(),
-        expiryDate: editingDocExpiry,
-        verified: editingDocVerified,
-        notes: editingDocNotes.trim(),
-        updatedAt: Timestamp.now()
+      const firestoreDocs = {
+        ...currentDocs,
+        [editingDocType]: {
+          title: editingDocTitle,
+          documentNumber: editingDocNumber.trim(),
+          expiryDate: editingDocExpiry,
+          verified: editingDocVerified,
+          notes: editingDocNotes.trim(),
+          updatedAt: nowTs()
+        }
+      };
+
+      const localDocs = {
+        ...currentDocs,
+        [editingDocType]: {
+          title: editingDocTitle,
+          documentNumber: editingDocNumber.trim(),
+          expiryDate: editingDocExpiry,
+          verified: editingDocVerified,
+          notes: editingDocNotes.trim(),
+          updatedAt: Timestamp.now()
+        }
       };
 
       await updateDoc(doc(db, 'riders', selectedRider.id), {
-        documents: currentDocs,
-        updatedAt: Timestamp.now()
+        documents: firestoreDocs,
+        updatedAt: nowTs()
       });
 
       await logAuditEvent({
@@ -1506,8 +1523,8 @@ export const Riders: React.FC = () => {
       });
 
       showSuccess(`${editingDocTitle} updated successfully.`);
-      setSelectedRider((prev) => (prev ? { ...prev, documents: currentDocs } : null));
-      setRiders((prev) => prev.map((r) => (r.id === selectedRider.id ? { ...r, documents: currentDocs } : r)));
+      setSelectedRider((prev) => (prev ? { ...prev, documents: localDocs } : null));
+      setRiders((prev) => prev.map((r) => (r.id === selectedRider.id ? { ...r, documents: localDocs } : r)));
       setDocModalOpen(false);
     } catch (err: any) {
       showError(err);

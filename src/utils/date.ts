@@ -1,3 +1,20 @@
+import { Timestamp, serverTimestamp } from '../firebase';
+
+/**
+ * Use for top-level / map "now" date fields written to Firestore.
+ */
+export const nowTs = () => serverTimestamp();
+
+/**
+ * Use inside Firestore arrays (e.g. statusHistory entries) where serverTimestamp() is unsupported.
+ */
+export const arrayNowTs = () => Timestamp.now();
+
+/**
+ * Use when writing a specific chosen Date to Firestore.
+ */
+export const dateToTs = (date: Date) => Timestamp.fromDate(date);
+
 export function formatTimestamp(ts: any): string {
   if (!ts) return '—';
 

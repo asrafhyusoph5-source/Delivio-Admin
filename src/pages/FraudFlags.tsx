@@ -14,6 +14,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
+import { nowTs } from '../utils/date';
 import type { FraudFlag } from '../types';
 import {
   AlertOctagon,
@@ -121,14 +122,14 @@ export const FraudFlags: React.FC = () => {
           const key = `customer_${cid}_${reasonKey}`;
           if (!existingKeySet.has(key)) {
             const flagId = `flag_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-            const payload: FraudFlag = {
+            const payload = {
               id: flagId,
-              subjectType: 'customer',
+              subjectType: 'customer' as const,
               subjectId: cid,
               reason: reasonKey,
-              status: 'open',
+              status: 'open' as const,
               note: `Automated detection: Account has ${info.count} cancelled orders. Customer name: ${info.name || 'Unknown'}.`,
-              createdAt: Timestamp.now(),
+              createdAt: nowTs(),
               createdBy: adminProfile?.email || 'system_detector'
             };
             await setDoc(doc(db, 'fraudFlags', flagId), payload);
@@ -150,14 +151,14 @@ export const FraudFlags: React.FC = () => {
           const key = `customer_${sender}_${reasonKey}`;
           if (!existingKeySet.has(key)) {
             const flagId = `flag_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-            const payload: FraudFlag = {
+            const payload = {
               id: flagId,
-              subjectType: 'customer',
+              subjectType: 'customer' as const,
               subjectId: sender,
               reason: reasonKey,
-              status: 'open',
+              status: 'open' as const,
               note: `Automated detection: Single transfer of ₱${dt.amount} to ${dt.recipientPhone || dt.recipientEmail || 'recipient'}. Reference: ${d.id}`,
-              createdAt: Timestamp.now(),
+              createdAt: nowTs(),
               createdBy: adminProfile?.email || 'system_detector'
             };
             setDoc(doc(db, 'fraudFlags', flagId), payload);
@@ -190,14 +191,14 @@ export const FraudFlags: React.FC = () => {
     try {
       setCreatingFlag(true);
       const flagId = `flag_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const payload: FraudFlag = {
+      const payload = {
         id: flagId,
         subjectType: newSubjectType,
         subjectId: newSubjectId.trim(),
         reason: newReason.trim(),
-        status: 'open',
+        status: 'open' as const,
         note: newNote.trim(),
-        createdAt: Timestamp.now(),
+        createdAt: nowTs(),
         createdBy: adminProfile?.email || 'admin'
       };
 
@@ -231,7 +232,7 @@ export const FraudFlags: React.FC = () => {
       const newStatus = flag.status === 'open' ? 'dismissed' : 'open';
       await updateDoc(doc(db, 'fraudFlags', flag.id), {
         status: newStatus,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       await logAuditEvent({
@@ -260,7 +261,7 @@ export const FraudFlags: React.FC = () => {
       setSavingNote(true);
       await updateDoc(doc(db, 'fraudFlags', selectedFlagForNote.id), {
         note: noteText.trim(),
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       showSuccess('Flag note updated.');
@@ -292,20 +293,20 @@ export const FraudFlags: React.FC = () => {
         // Suspend in users collection
         await updateDoc(doc(db, 'users', subId), {
           status: 'suspended',
-          suspendedAt: Timestamp.now(),
+          suspendedAt: nowTs(),
           suspendedReason: reason || flagToSuspend.reason
         });
       } else {
         // Driver: suspend in riders collection and users collection if exists
         await updateDoc(doc(db, 'riders', subId), {
           status: 'suspended',
-          suspendedAt: Timestamp.now(),
+          suspendedAt: nowTs(),
           suspendedReason: reason || flagToSuspend.reason
         });
         try {
           await updateDoc(doc(db, 'users', subId), {
             status: 'suspended',
-            suspendedAt: Timestamp.now(),
+            suspendedAt: nowTs(),
             suspendedReason: reason || flagToSuspend.reason
           });
         } catch (e) {

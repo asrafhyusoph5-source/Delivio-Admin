@@ -15,7 +15,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
-import { formatTimestamp, formatRelativeTime } from '../utils/date';
+import { formatTimestamp, formatRelativeTime, nowTs, dateToTs } from '../utils/date';
 import type { Rider, UserProfile, InboxCategory, InboxMessage, InboxLink } from '../types';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import {
@@ -392,13 +392,13 @@ export const Inbox: React.FC = () => {
       let sendAtTimestamp: Timestamp | null = null;
       if (sendLater) {
         const scheduledDateTime = new Date(`${scheduledDate}T${scheduledTime}`);
-        sendAtTimestamp = Timestamp.fromDate(scheduledDateTime);
+        sendAtTimestamp = dateToTs(scheduledDateTime);
       }
 
       // Prepare payload matching exact user specification:
       // inbox/{id} {title, body, category, imageUrl, link {merchantId, category}, audience, customerId, riderId, merchantId, createdAt, createdBy, createdByName, sendAt}
       // using null for unused fields
-      const now = Timestamp.now();
+      const now = nowTs();
       const payload: Record<string, any> = {
         title: title.trim(),
         body: body.trim(),

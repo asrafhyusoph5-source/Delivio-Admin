@@ -5,9 +5,9 @@ import {
   getDocs,
   query,
   where,
-  writeBatch,
-  Timestamp
+  writeBatch
 } from '../firebase';
+import { nowTs } from './date';
 import type { Merchant, Order } from '../types';
 
 /**
@@ -183,7 +183,7 @@ export async function copyMerchantMenu(
     return { categoriesCopied: 0, subcategoriesCopied: 0, menusCopied: 0, itemsCopied: 0 };
   }
 
-  const now = Timestamp.now();
+  const now = nowTs();
 
   // Fetch source collections
   const [srcCatSnap, srcSubSnap, srcMenuSnap, srcItemSnap] = await Promise.all([

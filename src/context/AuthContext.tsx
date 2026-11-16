@@ -22,6 +22,7 @@ import {
 import type { UserProfile } from '../types';
 import { useToast } from './ToastContext';
 import { cleanupExpiredChats } from '../utils/chatCleanup';
+import { nowTs } from '../utils/date';
 
 interface AuthContextType {
   currentUser: FirebaseUser | null;
@@ -115,7 +116,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 email: emailLower,
                 name: user.displayName || emailLower.split('@')[0],
                 status: 'active' as const,
-                createdAt: new Date()
+                createdAt: nowTs()
               };
 
               await setDoc(userDocRef, newProfile);
@@ -223,7 +224,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             email: emailLower,
             name: user.displayName || emailLower.split('@')[0],
             status: 'active' as const,
-            createdAt: new Date()
+            createdAt: nowTs()
           };
 
           await setDoc(userDocRef, newProfile);
@@ -341,7 +342,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         name: data.name,
         phone: data.phone || '',
         photoUrl: data.photoUrl || '',
-        updatedAt: new Date()
+        updatedAt: nowTs()
       });
 
       setAdminProfile((prev) => (prev ? { ...prev, ...data } : null));

@@ -67,7 +67,7 @@ import {
   DRIVER_CANNED_REPLIES
 } from '../constants';
 import { compressImageToDataUri } from '../utils/imageCompressor';
-import { formatRelativeTime, formatTimestamp, parseDate } from '../utils/date';
+import { formatRelativeTime, formatTimestamp, parseDate, nowTs, arrayNowTs } from '../utils/date';
 import { formatOrderNumber, matchesOrderSearch } from '../utils/orderNumber';
 import { getChainOptions, resolveOrderChainId, resolveOrderMerchantDisplay } from '../utils/outletUtils';
 import type { SupportTicket, SupportTicketMessage, Order, SupportTicketStatus, Merchant } from '../types';
@@ -754,7 +754,8 @@ export const Support: React.FC = () => {
 
     try {
       setSplittingDelivery(true);
-      const now = Timestamp.now();
+      const now = nowTs();
+      const localNow = Timestamp.now();
       const adminName = adminProfile?.name || 'Delivio Support';
       const adminId = adminProfile?.uid || 'admin';
       const parentNum = relatedOrder.orderNumber || selectedTicket.orderNumber || relatedOrder.id.slice(0, 6);
@@ -877,7 +878,7 @@ export const Support: React.FC = () => {
           statusHistory: [
             {
               status: 'Ready',
-              at: now,
+              at: arrayNowTs(),
               note: `Split child order for Rider ${seq} of ${ridersNeeded} created from #${parentNum} by Support (${adminName})`
             }
           ],
@@ -1001,7 +1002,7 @@ export const Support: React.FC = () => {
               splitOut: {
                 count: ridersNeeded,
                 children: childSummaryList,
-                at: now,
+                at: localNow,
                 by: adminName
               }
             }
@@ -1026,7 +1027,7 @@ export const Support: React.FC = () => {
 
     try {
       setCancellingChildId(childOrder.id);
-      const now = Timestamp.now();
+      const now = nowTs();
       const adminName = adminProfile?.name || 'Delivio Support';
       const batch = writeBatch(db);
 
@@ -1036,6 +1037,7 @@ export const Support: React.FC = () => {
         status: 'Cancelled',
         cancelReason: 'Split delivery cancelled by admin',
         cancelledBy: 'admin',
+        cancelledAt: now,
         updatedAt: now
       });
 
@@ -1116,7 +1118,8 @@ export const Support: React.FC = () => {
       setAccepting(true);
       const ticketRef = doc(db, 'supportTickets', selectedTicket.id);
       const adminName = adminProfile?.name || 'Delivio Support';
-      const now = Timestamp.now();
+      const now = nowTs();
+      const localNow = Timestamp.now();
 
       await updateDoc(ticketRef, {
         status: 'accepted',
@@ -1136,7 +1139,7 @@ export const Support: React.FC = () => {
       });
 
       setSelectedTicket((prev) =>
-        prev ? { ...prev, status: 'accepted', acceptedAt: now, acceptedBy: adminName } : null
+        prev ? { ...prev, status: 'accepted', acceptedAt: localNow, acceptedBy: adminName } : null
       );
       showSuccess(`Ticket accepted by ${adminName}. Chat is now unlocked.`);
     } catch (err: any) {
@@ -1174,7 +1177,7 @@ export const Support: React.FC = () => {
     try {
       setSendingReply(true);
       const msgsCol = collection(db, 'supportTickets', selectedTicket.id, 'messages');
-      const now = Timestamp.now();
+      const now = nowTs();
       const adminName = adminProfile?.name || 'Delivio Admin';
       const adminId = adminProfile?.uid || 'admin';
 
@@ -1222,7 +1225,8 @@ export const Support: React.FC = () => {
 
     try {
       setResolving(true);
-      const now = Timestamp.now();
+      const now = nowTs();
+      const localNow = Timestamp.now();
       const adminName = adminProfile?.name || 'Delivio Support';
       const adminId = adminProfile?.uid || 'admin';
 
@@ -1283,7 +1287,7 @@ export const Support: React.FC = () => {
           ? {
               ...prev,
               status: 'resolved',
-              resolvedAt: now,
+              resolvedAt: localNow,
               resolvedBy: adminName,
               resolution: note
             }
@@ -1316,7 +1320,8 @@ export const Support: React.FC = () => {
       const orderRef = doc(db, 'orders', relatedOrder.id);
       const customerId = relatedOrder.customerId;
       const userRef = doc(db, 'users', customerId);
-      const now = Timestamp.now();
+      const now = nowTs();
+      const histAt = arrayNowTs();
       const adminName = adminProfile?.name || 'Delivio Support';
 
       await runTransaction(db, async (transaction) => {
@@ -1335,11 +1340,14 @@ export const Support: React.FC = () => {
             cancelReason: fullReason,
             cancelFault,
             cancelledBy: 'admin',
+            cancelledAt: now,
             walletRefunded: true,
             paymentStatus: 'Refunded',
+            refundedAt: now,
+            walletRefundedAt: now,
             statusHistory: arrayUnion({
               status: 'Cancelled',
-              at: now,
+              at: histAt,
               note: `Cancelled by Support (${adminName}): ${fullReason}. Refunded ₱${refundAmt.toFixed(2)} to customer wallet.`
             }),
             updatedAt: now
@@ -1366,6 +1374,7 @@ export const Support: React.FC = () => {
             adminId: adminProfile?.uid || 'admin',
             adminName,
             balanceAfter: newBal,
+            refundedAt: now,
             createdAt: now
           });
         } else {
@@ -1374,9 +1383,10 @@ export const Support: React.FC = () => {
             cancelReason: fullReason,
             cancelFault,
             cancelledBy: 'admin',
+            cancelledAt: now,
             statusHistory: arrayUnion({
               status: 'Cancelled',
-              at: now,
+              at: histAt,
               note: `Cancelled by Support (${adminName}): ${fullReason} (Fault: ${cancelFault})`
             }),
             updatedAt: now
@@ -1419,10 +1429,11 @@ export const Support: React.FC = () => {
 
     try {
       setProcessingRefund(true);
-      const now = Timestamp.now();
+      const now = nowTs();
       const adminName = adminProfile?.name || 'Delivio Support';
       const adminId = adminProfile?.uid || 'admin';
       const userRef = doc(db, 'users', cid);
+      const targetOrderId = relatedOrder?.id || selectedTicket?.orderId || null;
       let balanceAfter = 0;
 
       await runTransaction(db, async (t) => {
@@ -1439,10 +1450,20 @@ export const Support: React.FC = () => {
           t.set(userRef, { walletBalance: refundAmount, updatedAt: now }, { merge: true });
         }
 
+        if (targetOrderId) {
+          t.update(doc(db, 'orders', targetOrderId), {
+            walletRefunded: true,
+            paymentStatus: 'Refunded',
+            refundedAt: now,
+            walletRefundedAt: now,
+            updatedAt: now
+          });
+        }
+
         const txnRef = doc(collection(db, 'walletTransactions'));
         t.set(txnRef, {
           customerId: cid,
-          orderId: relatedOrder?.id || selectedTicket?.orderId,
+          orderId: targetOrderId,
           orderNumber: relatedOrder?.orderNumber || selectedTicket?.orderNumber,
           type: 'refund',
           amount: refundAmount,
@@ -1450,6 +1471,7 @@ export const Support: React.FC = () => {
           adminId,
           adminName,
           balanceAfter,
+          refundedAt: now,
           createdAt: now
         });
       });
@@ -1492,7 +1514,7 @@ export const Support: React.FC = () => {
   // Demo Ticket Generator (helps immediately test driver reports & split delivery)
   const handleCreateDemoTicket = async () => {
     try {
-      const now = Timestamp.now();
+      const now = nowTs();
       const sampleOrderNum = `DLV-${Math.floor(100000 + Math.random() * 900000)}`;
 
       if (supportAudience === 'rider') {
@@ -1507,7 +1529,7 @@ export const Support: React.FC = () => {
           serviceType: 'food',
           fulfillmentType: 'delivery',
           status: 'Ready',
-          statusHistory: [{ status: 'Ready', at: now, note: 'Order ready for dispatch' }],
+          statusHistory: [{ status: 'Ready', at: arrayNowTs(), note: 'Order ready for dispatch' }],
           customerId: 'demo_customer_123',
           customerName: 'Maria Santos',
           customerPhone: '+63 917 555 4321',

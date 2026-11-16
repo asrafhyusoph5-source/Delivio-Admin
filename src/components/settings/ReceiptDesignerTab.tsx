@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { db, doc, setDoc, Timestamp } from '../../firebase';
+import { db, doc, setDoc } from '../../firebase';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { logAuditEvent } from '../../utils/audit';
+import { nowTs } from '../../utils/date';
 import type { ReceiptDesignConfig } from '../../types';
 import { DEFAULT_RECEIPT_CONFIG } from '../../constants';
 import { ConfirmationModal } from '../common/ConfirmationModal';
@@ -129,7 +130,7 @@ export const ReceiptDesignerTab: React.FC<ReceiptDesignerTabProps> = ({
           title: receiptConfig.customerCopy?.title?.trim() || "Customer's Copy",
           showItemPrices: Boolean(receiptConfig.customerCopy?.showItemPrices)
         },
-        updatedAt: Timestamp.now(),
+        updatedAt: nowTs() as any,
         updatedBy: adminProfile?.email || 'admin'
       };
 

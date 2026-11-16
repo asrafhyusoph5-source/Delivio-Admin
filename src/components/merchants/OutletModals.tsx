@@ -10,6 +10,7 @@ import {
 } from '../../firebase';
 import { useToast } from '../../context/ToastContext';
 import { logAuditEvent } from '../../utils/audit';
+import { nowTs } from '../../utils/date';
 import {
   checkBranchCodeUniqueInChain,
   copyMerchantMenu,
@@ -264,7 +265,8 @@ export const AddOutletModal: React.FC<AddOutletModalProps> = ({
         }
       }
 
-      const now = Timestamp.now();
+      const now = nowTs();
+      const localNow = Timestamp.now();
       const batch = writeBatch(db);
       let updatedMainShop: Merchant | undefined;
 
@@ -281,9 +283,10 @@ export const AddOutletModal: React.FC<AddOutletModalProps> = ({
           updatedAt: now
         };
         batch.update(mainRef, mainUpdate);
+        const { updatedAt: _omitted, ...mainUpdateLocal } = mainUpdate;
         updatedMainShop = {
           ...mainShop,
-          ...mainUpdate
+          ...mainUpdateLocal
         };
       }
 
@@ -343,10 +346,12 @@ export const AddOutletModal: React.FC<AddOutletModalProps> = ({
         }, true)} under chain ${mainShop.name} (${resolvedChainId})${menuCopySummary}`
       });
 
-      const createdOutlet: Merchant = {
+      const createdOutlet = {
         id: newOutletRef.id,
-        ...newOutletPayload
-      } as Merchant;
+        ...newOutletPayload,
+        createdAt: localNow,
+        updatedAt: localNow
+      } as unknown as Merchant;
 
       showSuccess(`Outlet created successfully${menuCopySummary}.`);
       onSuccess(createdOutlet, updatedMainShop);
@@ -872,7 +877,7 @@ export const EditOutletModal: React.FC<EditOutletModalProps> = ({
         status,
         ...(status === 'suspended' ? { isOpen: false } : {}),
         commissionRate: Number(commissionRate) || 15,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       };
 
       await updateDoc(doc(db, 'merchants', outlet.id), updates);
@@ -893,7 +898,8 @@ export const EditOutletModal: React.FC<EditOutletModalProps> = ({
 
       const updatedOutlet: Merchant = {
         ...outlet,
-        ...updates
+        ...updates,
+        updatedAt: Timestamp.now()
       } as Merchant;
 
       showSuccess('Outlet updated.');

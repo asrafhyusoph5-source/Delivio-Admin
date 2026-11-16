@@ -7,14 +7,13 @@ import {
   setDoc,
   deleteDoc,
   updateDoc,
-  Timestamp,
   query,
   limit
 } from '../../firebase';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { logAuditEvent } from '../../utils/audit';
-import { formatTimestamp } from '../../utils/date';
+import { formatTimestamp, nowTs } from '../../utils/date';
 import type { StaffInvite, UserProfile, AdminRole } from '../../types';
 import {
   Users,
@@ -122,7 +121,7 @@ export const StaffTab: React.FC = () => {
         email: cleanEmail,
         adminRole: inviteRole,
         invitedBy: adminProfile?.email || 'admin',
-        createdAt: Timestamp.now()
+        createdAt: nowTs() as any
       };
 
       await setDoc(inviteRef, newInvite);
@@ -189,7 +188,7 @@ export const StaffTab: React.FC = () => {
       await updateDoc(userRef, {
         status: newStatus,
         adminNote: actionReason.trim() ? `${actionType.toUpperCase()}: ${actionReason.trim()}` : targetStaff.adminNote || '',
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       });
 
       await logAuditEvent({

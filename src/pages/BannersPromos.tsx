@@ -16,7 +16,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { logAuditEvent } from '../utils/audit';
-import { formatTimestamp, formatRelativeTime } from '../utils/date';
+import { formatTimestamp, formatRelativeTime, nowTs, dateToTs } from '../utils/date';
 import type { Banner, PromoRequest, Merchant } from '../types';
 import {
   Ticket,
@@ -337,16 +337,16 @@ export const BannersPromos: React.FC = () => {
 
     try {
       const sDate = startDate ? new Date(startDate + 'T00:00:00') : new Date();
-      startTimestamp = Timestamp.fromDate(!isNaN(sDate.getTime()) ? sDate : new Date());
+      startTimestamp = dateToTs(!isNaN(sDate.getTime()) ? sDate : new Date());
     } catch {
-      startTimestamp = Timestamp.now();
+      startTimestamp = dateToTs(new Date());
     }
 
     try {
       const eDate = endDate ? new Date(endDate + 'T23:59:59') : new Date(Date.now() + 30 * 24 * 3600 * 1000);
-      endTimestamp = Timestamp.fromDate(!isNaN(eDate.getTime()) ? eDate : new Date(Date.now() + 30 * 24 * 3600 * 1000));
+      endTimestamp = dateToTs(!isNaN(eDate.getTime()) ? eDate : new Date(Date.now() + 30 * 24 * 3600 * 1000));
     } catch {
-      endTimestamp = Timestamp.fromDate(new Date(Date.now() + 30 * 24 * 3600 * 1000));
+      endTimestamp = dateToTs(new Date(Date.now() + 30 * 24 * 3600 * 1000));
     }
 
     try {
@@ -360,7 +360,7 @@ export const BannersPromos: React.FC = () => {
         target: 'all',
         startAt: startTimestamp,
         endAt: endTimestamp,
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       };
 
       // Only set discount if discount is set
@@ -377,7 +377,7 @@ export const BannersPromos: React.FC = () => {
         await updateDoc(bRef, payload);
         showSuccess('Banner updated.');
       } else {
-        payload.createdAt = Timestamp.now();
+        payload.createdAt = nowTs();
         const bCol = collection(db, 'banners');
         await addDoc(bCol, payload);
         showSuccess('Banner published.');
@@ -389,7 +389,7 @@ export const BannersPromos: React.FC = () => {
         await updateDoc(pRef, {
           status: 'Approved',
           approvedBy: adminProfile?.name || 'Administrator',
-          approvedAt: Timestamp.now()
+          approvedAt: nowTs()
         });
 
         // Automatic notice in inbox for the merchant
@@ -407,7 +407,7 @@ export const BannersPromos: React.FC = () => {
             riderId: null,
             imageUrl: imageUrl.trim() || null,
             link: { merchantId: mId, category: null },
-            createdAt: Timestamp.now(),
+            createdAt: nowTs(),
             createdBy: adminProfile?.uid || 'admin',
             createdByName: adminProfile?.name || 'Administrator'
           });
@@ -454,7 +454,7 @@ export const BannersPromos: React.FC = () => {
         status: 'Rejected',
         rejectReason: reason,
         rejectedBy: adminProfile?.name || 'Administrator',
-        rejectedAt: Timestamp.now()
+        rejectedAt: nowTs()
       });
 
       // Automatic notice in inbox for the merchant
@@ -470,7 +470,7 @@ export const BannersPromos: React.FC = () => {
           riderId: null,
           imageUrl: targetPromoRequest.imageUrl || null,
           link: { merchantId: targetPromoRequest.merchantId, category: null },
-          createdAt: Timestamp.now(),
+          createdAt: nowTs(),
           createdBy: adminProfile?.uid || 'admin',
           createdByName: adminProfile?.name || 'Administrator'
         });

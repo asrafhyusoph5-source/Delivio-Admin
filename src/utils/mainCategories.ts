@@ -1,5 +1,6 @@
 import { db, doc, getDoc, setDoc, Timestamp } from '../firebase';
 import type { MainCategoryItem, MainCategoriesDoc } from '../types';
+import { nowTs } from './date';
 
 const ASSET_BASE =
   'https://raw.githubusercontent.com/asrafhyusoph5-source/Delivio-Assets/main';
@@ -243,7 +244,10 @@ export async function loadOrInitMainCategories(
   if (!snap.exists()) {
     const defaults = getDefaultMainCategoriesDoc(updatedBy);
     if (createIfMissing) {
-      await setDoc(docRef, defaults);
+      await setDoc(docRef, {
+        ...defaults,
+        updatedAt: nowTs()
+      });
     }
     return { data: defaults, created: createIfMissing };
   }

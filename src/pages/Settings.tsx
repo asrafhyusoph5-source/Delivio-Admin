@@ -16,6 +16,7 @@ import { useToast } from '../context/ToastContext';
 import { useCity } from '../context/CityContext';
 import { logAuditEvent } from '../utils/audit';
 import { findMatchingCity } from '../utils/cityUtils';
+import { nowTs } from '../utils/date';
 import {
   loadOrInitMainCategories,
   getActiveMainCategoriesForType,
@@ -47,6 +48,7 @@ import { cleanupExpiredChats } from '../utils/chatCleanup';
 import { ReceiptDesignerTab } from '../components/settings/ReceiptDesignerTab';
 import { CheckoutMustTryTab } from '../components/settings/CheckoutMustTryTab';
 import { StaffTab } from '../components/settings/StaffTab';
+import { DataHealthCheckPanel } from '../components/settings/DataHealthCheckPanel';
 import {
   Settings as SettingsIcon,
   Shield,
@@ -574,7 +576,7 @@ export const Settings: React.FC = () => {
       const dRef = doc(db, 'settings', 'dispatch');
       const payload = {
         ...DEFAULT_DISPATCH_SETTINGS,
-        updatedAt: Timestamp.now(),
+        updatedAt: nowTs(),
         updatedBy: adminProfile?.uid || 'admin'
       };
       await setDoc(dRef, payload);
@@ -636,12 +638,12 @@ export const Settings: React.FC = () => {
         priorityHeadStartSeconds: Math.max(0, Number(dispatchSettings.priorityHeadStartSeconds ?? 10)),
         priorityMaxBatch: Math.max(1, Number(dispatchSettings.priorityMaxBatch ?? 4)),
         martBatching: Boolean(dispatchSettings.martBatching),
-        updatedAt: Timestamp.now(),
+        updatedAt: nowTs() as any,
         updatedBy: adminProfile?.uid || 'admin'
       };
 
       await setDoc(dRef, payload);
-      setDispatchSettings(payload);
+      setDispatchSettings({ ...payload, updatedAt: Timestamp.now() });
 
       // Save scheduledReleaseLeadMinutes to settings/platform (range 0 to 120, default 0)
       const leadMinutes = Math.min(120, Math.max(0, Number(scheduledReleaseLeadMinutes) || 0));
@@ -650,7 +652,7 @@ export const Settings: React.FC = () => {
         platformRef,
         {
           scheduledReleaseLeadMinutes: leadMinutes,
-          updatedAt: Timestamp.now()
+          updatedAt: nowTs()
         },
         { merge: true }
       );
@@ -696,7 +698,7 @@ export const Settings: React.FC = () => {
 
       if (docsToUpdate.length > 0) {
         const CHUNK_SIZE = 400;
-        const now = Timestamp.now();
+        const now = nowTs();
         for (let i = 0; i < docsToUpdate.length; i += CHUNK_SIZE) {
           const slice = docsToUpdate.slice(i, i + CHUNK_SIZE);
           const batch = writeBatch(db);
@@ -757,7 +759,7 @@ export const Settings: React.FC = () => {
       merchSnap.forEach((d) => merchantIds.push(d.id));
 
       const CHUNK_SIZE = 400;
-      const now = Timestamp.now();
+      const now = nowTs();
       for (let i = 0; i < merchantIds.length; i += CHUNK_SIZE) {
         const slice = merchantIds.slice(i, i + CHUNK_SIZE);
         const batch = writeBatch(db);
@@ -826,7 +828,7 @@ export const Settings: React.FC = () => {
       merchSnap.forEach((d) => merchantIds.push(d.id));
 
       const CHUNK_SIZE = 400;
-      const now = Timestamp.now();
+      const now = nowTs();
       for (let i = 0; i < merchantIds.length; i += CHUNK_SIZE) {
         const slice = merchantIds.slice(i, i + CHUNK_SIZE);
         const batch = writeBatch(db);
@@ -941,7 +943,7 @@ export const Settings: React.FC = () => {
     try {
       setApplyingCityFixes(true);
       const CHUNK_SIZE = 400;
-      const now = Timestamp.now();
+      const now = nowTs();
 
       for (let i = 0; i < fixableRows.length; i += CHUNK_SIZE) {
         const slice = fixableRows.slice(i, i + CHUNK_SIZE);
@@ -1126,7 +1128,7 @@ export const Settings: React.FC = () => {
 
     try {
       setApplyingItemCatFixes(true);
-      const now = Timestamp.now();
+      const now = nowTs();
 
       // Build list of item updates while preserving all other item fields via batch.update
       const updates: {
@@ -1238,11 +1240,14 @@ export const Settings: React.FC = () => {
         const updatedMainCatsPayload: MainCategoriesDoc = {
           food: appendAliasToGroup(latestDoc.food, 'food'),
           convenience: appendAliasToGroup(latestDoc.convenience, 'convenience'),
-          updatedAt: now,
+          updatedAt: Timestamp.now(),
           updatedBy: adminProfile?.uid || adminProfile?.name || 'Admin'
         };
 
-        await setDoc(doc(db, 'settings', 'mainCategories'), updatedMainCatsPayload);
+        await setDoc(doc(db, 'settings', 'mainCategories'), {
+          ...updatedMainCatsPayload,
+          updatedAt: now
+        });
         nextMainCatsDoc = updatedMainCatsPayload;
       }
 
@@ -1285,7 +1290,7 @@ export const Settings: React.FC = () => {
         services: platformServices,
         taxiVehicles: platformTaxiVehicles,
         scheduledReleaseLeadMinutes: Math.min(120, Math.max(0, Number(scheduledReleaseLeadMinutes) || 0)),
-        updatedAt: Timestamp.now()
+        updatedAt: nowTs()
       };
 
       await setDoc(sRef, payload, { merge: true });
@@ -1325,7 +1330,7 @@ export const Settings: React.FC = () => {
         {
           vat: vatPayload,
           timezone: cleanTimezone,
-          updatedAt: Timestamp.now()
+          updatedAt: nowTs()
         },
         { merge: true }
       );
@@ -1475,7 +1480,7 @@ export const Settings: React.FC = () => {
             vehicleType: vType,
             allowedServices: finalAllowed,
             activeServices: finalActive,
-            updatedAt: Timestamp.now()
+            updatedAt: nowTs()
           },
           { merge: true }
         );
@@ -1509,7 +1514,7 @@ export const Settings: React.FC = () => {
         {
           services: mergedServices,
           taxiVehicles: mergedTaxiVehicles,
-          updatedAt: Timestamp.now()
+          updatedAt: nowTs()
         },
         { merge: true }
       );
@@ -1529,7 +1534,7 @@ export const Settings: React.FC = () => {
           {
             id: 'puerto-princesa',
             rideRates: DEFAULT_TAXI_RATES,
-            createdAt: Timestamp.now()
+            createdAt: nowTs()
           },
           { merge: true }
         );
@@ -1542,7 +1547,7 @@ export const Settings: React.FC = () => {
               doc(db, 'deliveryRates', rDoc.id),
               {
                 rideRates: DEFAULT_TAXI_RATES,
-                updatedAt: Timestamp.now()
+                updatedAt: nowTs()
               },
               { merge: true }
             );
@@ -1589,7 +1594,7 @@ export const Settings: React.FC = () => {
           status: 'active',
           center: { lat: 9.7392, lng: 118.7353 },
           radiusKm: 15,
-          createdAt: Timestamp.now()
+          createdAt: nowTs()
         });
         summary.push('Created cities/puerto-princesa');
       } else {
@@ -1621,7 +1626,7 @@ export const Settings: React.FC = () => {
             peak: { enabled: false, multiplier: 1.2 },
             night: { enabled: false, flat: 25 }
           },
-          createdAt: Timestamp.now()
+          createdAt: nowTs()
         });
         summary.push('Created deliveryRates/puerto-princesa with delivery & taxi rates');
       } else {
@@ -1671,7 +1676,7 @@ export const Settings: React.FC = () => {
             car4: true,
             car8: true
           },
-          createdAt: Timestamp.now()
+          createdAt: nowTs()
         });
         summary.push('Created settings/platform with all services active');
       } else {
@@ -3331,6 +3336,9 @@ export const Settings: React.FC = () => {
       {/* MAINTENANCE & TOOLS TAB */}
       {settingsTab === 'tools' && (
       <>
+      {/* Data Health Check Card */}
+      <DataHealthCheckPanel />
+
       {/* One-Time Banner Fields Cleanup Card */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
