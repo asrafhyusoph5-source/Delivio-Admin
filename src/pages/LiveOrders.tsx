@@ -67,11 +67,13 @@ import {
   MessageSquare,
   ShoppingBag,
   Building2,
-  HelpCircle
+  HelpCircle,
+  UserCheck
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { OrderChatsViewer } from '../components/chat/OrderChatsViewer';
 import { WhyNoRiderModal } from '../components/orders/WhyNoRiderModal';
+import { AssignRiderModal } from '../components/orders/AssignRiderModal';
 
 export const FulfillmentChip: React.FC<{ order: Order }> = ({ order }) => {
   const isScheduled = Boolean(
@@ -838,6 +840,17 @@ export const LiveOrders: React.FC = () => {
     if (ord.isPickup || ord.fulfillmentType === 'pickup') return false;
     if (['Delivered', 'Completed', 'Cancelled', 'Rejected'].includes(ord.status)) return false;
     return !ord.riderId || (ord.riderRequest?.status || '').trim().toLowerCase() === 'searching';
+  };
+
+  // Manual Rider Assignment Modal State
+  const [assignRiderOrder, setAssignRiderOrder] = useState<Order | null>(null);
+  const canManualAssignRider = (ord: Order) => {
+    if (ord.riderId) return false;
+    if (ord.isPickup || ord.fulfillmentType === 'pickup' || (ord.serviceType as any) === 'pickup') {
+      return false;
+    }
+    if (['Delivered', 'Completed', 'Cancelled', 'Rejected'].includes(ord.status)) return false;
+    return true;
   };
 
   // Mini map reference for order detail modal
@@ -2226,6 +2239,20 @@ export const LiveOrders: React.FC = () => {
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-1.5">
+                          {canManualAssignRider(order) && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setAssignRiderOrder(order);
+                              }}
+                              className="px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-100 text-emerald-900 dark:bg-emerald-950/70 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700 hover:bg-emerald-200 dark:hover:bg-emerald-900/70 transition-colors inline-flex items-center gap-1 whitespace-nowrap"
+                              title="Pick an eligible online rider for this order"
+                            >
+                              <UserCheck className="w-3.5 h-3.5 shrink-0" />
+                              <span>Assign rider manually</span>
+                            </button>
+                          )}
                           {canDiagnoseNoRider(order) && (
                             <button
                               type="button"
@@ -2393,6 +2420,19 @@ export const LiveOrders: React.FC = () => {
                           </div>
                           <div className="pt-1.5 flex items-center justify-between gap-2 text-[10px] border-t border-gray-100 dark:border-zinc-800">
                             <div className="flex items-center gap-2 flex-wrap">
+                              {canManualAssignRider(ord) && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setAssignRiderOrder(ord);
+                                  }}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-bold bg-emerald-100 text-emerald-900 dark:bg-emerald-950/70 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700 hover:bg-emerald-200"
+                                >
+                                  <UserCheck className="w-3 h-3" />
+                                  <span>Assign rider manually</span>
+                                </button>
+                              )}
                               {canDiagnoseNoRider(ord) && (
                                 <button
                                   type="button"
@@ -2748,6 +2788,16 @@ export const LiveOrders: React.FC = () => {
 
                 {/* Dispatch Actions buttons */}
                 <div className="flex items-center gap-2 flex-wrap">
+                  {canManualAssignRider(selectedOrder) && (
+                    <button
+                      type="button"
+                      onClick={() => setAssignRiderOrder(selectedOrder)}
+                      className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold shadow-xs transition-colors"
+                    >
+                      <UserCheck className="w-3.5 h-3.5" />
+                      <span>Assign rider manually</span>
+                    </button>
+                  )}
                   {canDiagnoseNoRider(selectedOrder) && (
                     <button
                       type="button"
@@ -2914,16 +2964,28 @@ export const LiveOrders: React.FC = () => {
                       ) : (
                         <div className="space-y-1">
                           <div className="text-amber-600 text-[11px]">Searching for driver...</div>
-                          {canDiagnoseNoRider(selectedOrder) && (
-                            <button
-                              type="button"
-                              onClick={() => setWhyNoRiderOrder(selectedOrder)}
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700 hover:bg-amber-200"
-                            >
-                              <HelpCircle className="w-3 h-3" />
-                              <span>Why no rider?</span>
-                            </button>
-                          )}
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {canManualAssignRider(selectedOrder) && (
+                              <button
+                                type="button"
+                                onClick={() => setAssignRiderOrder(selectedOrder)}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-100 text-emerald-900 dark:bg-emerald-950/70 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700 hover:bg-emerald-200"
+                              >
+                                <UserCheck className="w-3 h-3" />
+                                <span>Assign rider manually</span>
+                              </button>
+                            )}
+                            {canDiagnoseNoRider(selectedOrder) && (
+                              <button
+                                type="button"
+                                onClick={() => setWhyNoRiderOrder(selectedOrder)}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700 hover:bg-amber-200"
+                              >
+                                <HelpCircle className="w-3 h-3" />
+                                <span>Why no rider?</span>
+                              </button>
+                            )}
+                          </div>
                         </div>
                       )}
                       {(selectedOrder.riderVehicle || selectedOrder.vehicleType) && (
@@ -3415,6 +3477,22 @@ export const LiveOrders: React.FC = () => {
           order={whyNoRiderOrder}
           merchantsById={merchantsById}
           cities={cities}
+        />
+      )}
+
+      {/* Assign Rider Manually Modal */}
+      {assignRiderOrder && (
+        <AssignRiderModal
+          isOpen={Boolean(assignRiderOrder)}
+          onClose={() => setAssignRiderOrder(null)}
+          order={assignRiderOrder}
+          merchantsById={merchantsById}
+          cities={cities}
+          onAssigned={(updatedFields) => {
+            setSelectedOrder((prev) =>
+              prev && prev.id === assignRiderOrder.id ? { ...prev, ...updatedFields } : prev
+            );
+          }}
         />
       )}
     </div>

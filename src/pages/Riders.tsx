@@ -248,8 +248,8 @@ export const Riders: React.FC = () => {
           vehicleColor: dt.vehicleColor || '',
           seats: Number(dt.seats) || defaultSeats,
           plate: dt.plate || '',
-          allowedServices: dt.allowedServices || SERVICES_BY_VEHICLE[vType],
-          activeServices: dt.activeServices || SERVICES_BY_VEHICLE[vType],
+          allowedServices: Array.isArray(dt.allowedServices) ? dt.allowedServices : [],
+          activeServices: Array.isArray(dt.activeServices) ? dt.activeServices : [],
           isOnline: Boolean(dt.isOnline),
           location: dt.location,
           currentOrderId: dt.currentOrderId,
@@ -751,7 +751,80 @@ export const Riders: React.FC = () => {
       .slice(0, 15);
   }, [allCustomers, customerSearchQuery]);
 
-  // Handle vehicle type change request
+  const DRIVER_SERVICE_OPTIONS: { id: OrderServiceType; label: string }[] = [
+    { id: 'food', label: 'Delivio Food' },
+    { id: 'convenience', label: 'Mart' },
+    { id: 'parcel', label: 'Parcel' },
+    { id: 'pabili', label: 'Pabili' },
+    { id: 'request_rider', label: 'Instant' },
+    { id: 'taxi', label: 'Taxi' }
+  ];
+
+  // Immediate lowercase vehicleType change with vehicle rule enforcement
+  const handleImmediateVehicleChange = async (rawNewType: string) => {
+    if (!selectedRider) return;
+    const newType = rawNewType.trim().toLowerCase() as VehicleType;
+    if (!SERVICES_BY_VEHICLE[newType]) return;
+
+    const allowed = [...(SERVICES_BY_VEHICLE[newType] || ['parcel', 'taxi'])];
+    const active = (selectedRider.activeServices || [])
+      .map((s) => String(s).trim().toLowerCase() as OrderServiceType)
+      .filter((s) => allowed.includes(s));
+    const defaultSeats = VEHICLE_TYPES.find((v) => v.id === newType)?.defaultSeats || 1;
+
+    setVehicleType(newType);
+    setSeats(defaultSeats);
+
+    try {
+      const rRef = doc(db, 'riders', selectedRider.id);
+      await updateDoc(rRef, {
+        vehicleType: newType,
+        allowedServices: allowed,
+        activeServices: active,
+        seats: defaultSeats,
+        updatedAt: nowTs()
+      });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        action: 'CHANGE_DRIVER_VEHICLE_TYPE',
+        entityType: 'rider',
+        entityId: selectedRider.id,
+        details: `Updated vehicleType to "${newType}" and applied vehicle rule (${allowed.join(', ')}).`
+      });
+
+      showSuccess(`Vehicle set to ${VEHICLE_LABELS[newType]} (${newType}).`);
+      setSelectedRider((prev) =>
+        prev
+          ? {
+              ...prev,
+              vehicleType: newType,
+              allowedServices: allowed,
+              activeServices: active,
+              seats: defaultSeats
+            }
+          : null
+      );
+      setRiders((prev) =>
+        prev.map((r) =>
+          r.id === selectedRider.id
+            ? {
+                ...r,
+                vehicleType: newType,
+                allowedServices: allowed,
+                activeServices: active,
+                seats: defaultSeats
+              }
+            : r
+        )
+      );
+    } catch (err: any) {
+      showError(err);
+    }
+  };
+
+  // Handle vehicle type change request (from profile form modal)
   const handleSelectVehicleType = (newType: VehicleType) => {
     if (newType === vehicleType) return;
     setPendingVehicleType(newType);
@@ -761,8 +834,8 @@ export const Riders: React.FC = () => {
   // Confirm vehicle type change and recompute services
   const confirmChangeVehicleType = async () => {
     if (!pendingVehicleType || !selectedRider) return;
-    const newType = pendingVehicleType;
-    const allowed = SERVICES_BY_VEHICLE[newType] || [];
+    const newType = String(pendingVehicleType).trim().toLowerCase() as VehicleType;
+    const allowed = [...(SERVICES_BY_VEHICLE[newType] || ['parcel', 'taxi'])];
     const active = (selectedRider.activeServices || []).filter((s) => allowed.includes(s));
     const defaultSeats = VEHICLE_TYPES.find((v) => v.id === newType)?.defaultSeats || 1;
 
@@ -828,6 +901,7 @@ export const Riders: React.FC = () => {
     try {
       setSavingDetails(true);
       const rRef = doc(db, 'riders', selectedRider.id);
+      const normalizedVType = String(vehicleType || 'motorcycle').trim().toLowerCase() as VehicleType;
       const updates = {
         name: name.trim(),
         phone: phone.trim(),
@@ -835,7 +909,7 @@ export const Riders: React.FC = () => {
         photoUrl: photoUrl.trim(),
         riderCode: riderCode.trim(),
         cityId,
-        vehicleType,
+        vehicleType: normalizedVType,
         vehicleModel: vehicleModel.trim(),
         vehicleColor: vehicleColor.trim(),
         seats: Number(seats) || 1,
@@ -916,35 +990,66 @@ export const Riders: React.FC = () => {
     }
   };
 
-  // Action: Toggle Allowed Services
+  // Action: Toggle Allowed Services (with strict vehicle rule enforcement)
   const handleToggleService = async (service: OrderServiceType) => {
     if (!selectedRider) return;
-    try {
-      let allowed = [...(selectedRider.allowedServices || [])];
-      let active = [...(selectedRider.activeServices || [])];
+    const currentVType = String(selectedRider.vehicleType || vehicleType || 'motorcycle')
+      .trim()
+      .toLowerCase() as VehicleType;
+    const allowedByRule = SERVICES_BY_VEHICLE[currentVType] || ['parcel', 'taxi'];
 
-      if (allowed.includes(service)) {
-        // Turning one off removes it from allowedServices AND removes it from activeServices
-        allowed = allowed.filter((s) => s !== service);
-        active = active.filter((s) => s !== service);
+    if (!allowedByRule.includes(service)) {
+      showError(`${VEHICLE_LABELS[currentVType] || currentVType} drivers can only take Parcel and Taxi.`);
+      return;
+    }
+
+    try {
+      const currentAllowed = Array.isArray(selectedRider.allowedServices)
+        ? selectedRider.allowedServices
+            .map((s) => String(s).trim().toLowerCase() as OrderServiceType)
+            .filter((s) => allowedByRule.includes(s))
+        : [];
+      const currentActive = Array.isArray(selectedRider.activeServices)
+        ? selectedRider.activeServices
+            .map((s) => String(s).trim().toLowerCase() as OrderServiceType)
+            .filter((s) => allowedByRule.includes(s))
+        : [];
+
+      const nextSet = new Set<OrderServiceType>(currentAllowed);
+      let nextActive = [...currentActive];
+
+      if (nextSet.has(service)) {
+        nextSet.delete(service);
+        nextActive = nextActive.filter((s) => s !== service);
       } else {
-        allowed.push(service);
+        nextSet.add(service);
       }
+
+      const allowed = allowedByRule.filter((s) => nextSet.has(s));
 
       const rRef = doc(db, 'riders', selectedRider.id);
       await updateDoc(rRef, {
         allowedServices: allowed,
-        activeServices: active,
+        activeServices: nextActive,
         updatedAt: nowTs()
       });
 
-      showSuccess(`Updated service status for ${selectedRider.name}.`);
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        action: 'UPDATE_DRIVER_ALLOWED_SERVICES',
+        entityType: 'rider',
+        entityId: selectedRider.id,
+        details: `Updated allowedServices for ${selectedRider.name}: [${allowed.join(', ')}]`
+      });
+
+      showSuccess(`Updated allowed services for ${selectedRider.name}.`);
       setSelectedRider((prev) =>
-        prev ? { ...prev, allowedServices: allowed, activeServices: active } : null
+        prev ? { ...prev, allowedServices: allowed, activeServices: nextActive } : null
       );
       setRiders((prev) =>
         prev.map((r) =>
-          r.id === selectedRider.id ? { ...r, allowedServices: allowed, activeServices: active } : r
+          r.id === selectedRider.id ? { ...r, allowedServices: allowed, activeServices: nextActive } : r
         )
       );
     } catch (err: any) {
@@ -2364,6 +2469,104 @@ export const Riders: React.FC = () => {
                     </button>
                   </div>
                 </form>
+
+                {/* Panel: Services this driver can take */}
+                {(() => {
+                  const currentVType = String(selectedRider.vehicleType || vehicleType || 'motorcycle')
+                    .trim()
+                    .toLowerCase() as VehicleType;
+                  const ruleServices = SERVICES_BY_VEHICLE[currentVType] || ['parcel', 'taxi'];
+                  const rawAllowed = Array.isArray(selectedRider.allowedServices)
+                    ? selectedRider.allowedServices.map((s) => String(s).trim().toLowerCase())
+                    : [];
+                  const hasDisallowedStored = rawAllowed.some(
+                    (s) => !ruleServices.includes(s as OrderServiceType)
+                  );
+
+                  return (
+                    <div className="p-4 sm:p-5 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-gray-50/70 dark:bg-zinc-900/70 space-y-4">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-200/80 dark:border-zinc-800 pb-3">
+                        <div>
+                          <h4 className="font-extrabold text-sm text-gray-900 dark:text-white">
+                            Services this driver can take
+                          </h4>
+                          <p className="text-[11px] text-gray-500 dark:text-zinc-400 mt-0.5">
+                            {currentVType === 'motorcycle'
+                              ? 'Vehicle rule: motorcycle allows all six services.'
+                              : `Vehicle rule: ${currentVType} allows only parcel and taxi.`}
+                          </p>
+                        </div>
+
+                        <div className="w-full sm:w-56">
+                          <label className="block text-[10px] font-bold uppercase text-gray-500 dark:text-zinc-400 mb-1">
+                            Vehicle type
+                          </label>
+                          <select
+                            aria-label="Vehicle type"
+                            value={currentVType}
+                            onChange={(e) => handleImmediateVehicleChange(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                          >
+                            <option value="motorcycle">motorcycle (Motorcycle)</option>
+                            <option value="tricycle">tricycle (Tricycle)</option>
+                            <option value="car4">car4 (4-Seater Car)</option>
+                            <option value="car8">car8 (8-Seater Car)</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      {hasDisallowedStored && (
+                        <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 flex items-center gap-2 text-[11px] text-amber-800 dark:text-amber-300">
+                          <AlertTriangle className="w-4 h-4 shrink-0 text-amber-500" />
+                          <span>
+                            This driver currently has stored services disallowed for {currentVType}. Toggling any box or changing vehicle type will clean up allowedServices.
+                          </span>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                        {DRIVER_SERVICE_OPTIONS.map((srv) => {
+                          const vehicleAllows = ruleServices.includes(srv.id);
+                          const isChecked = vehicleAllows && rawAllowed.includes(srv.id);
+
+                          return (
+                            <label
+                              key={srv.id}
+                              className={`flex items-center justify-between gap-2.5 p-3 rounded-xl border text-xs transition-all ${
+                                !vehicleAllows
+                                  ? 'bg-gray-100/80 dark:bg-zinc-900/40 border-gray-200 dark:border-zinc-800 text-gray-400 cursor-not-allowed opacity-60'
+                                  : isChecked
+                                  ? 'bg-white dark:bg-zinc-850 border-emerald-300 dark:border-emerald-800/80 text-gray-900 dark:text-white cursor-pointer shadow-2xs'
+                                  : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-800 text-gray-700 dark:text-zinc-300 cursor-pointer hover:border-gray-300 dark:hover:border-zinc-700'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  disabled={!vehicleAllows}
+                                  onChange={() => handleToggleService(srv.id)}
+                                  className="w-4 h-4 rounded border-gray-300 text-amber-500 focus:ring-amber-400 disabled:opacity-50"
+                                />
+                                <div className="min-w-0">
+                                  <span className="font-bold block truncate">{srv.label}</span>
+                                  <span className="text-[10px] font-mono text-gray-400 block">
+                                    {srv.id}
+                                  </span>
+                                </div>
+                              </div>
+                              {!vehicleAllows && (
+                                <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-gray-200 dark:bg-zinc-800 text-gray-500 shrink-0">
+                                  Locked
+                                </span>
+                              )}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
@@ -2417,7 +2620,10 @@ export const Riders: React.FC = () => {
 
                     <div className="space-y-3">
                       {ALL_SERVICES.map((srv) => {
-                        const isDriverAllowed = (selectedRider.allowedServices || []).includes(srv.id);
+                        const allowedByVehicle = SERVICES_BY_VEHICLE[currentVType] || ['parcel', 'taxi'];
+                        const vehicleAllows = allowedByVehicle.includes(srv.id);
+                        const isDriverAllowed =
+                          vehicleAllows && (selectedRider.allowedServices || []).includes(srv.id);
                         const isCityBlocked = driverCity ? driverCity.services?.[srv.id] === false : false;
                         const isPlatformBlocked = platformServices[srv.id] === false;
 
@@ -2427,7 +2633,9 @@ export const Riders: React.FC = () => {
                         return (
                           <div
                             key={srv.id}
-                            className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs shadow-xs space-y-3"
+                            className={`p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs shadow-xs space-y-3 ${
+                              !vehicleAllows ? 'opacity-65' : ''
+                            }`}
                           >
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-gray-100 dark:border-zinc-800">
                               <div>
@@ -2438,7 +2646,11 @@ export const Riders: React.FC = () => {
                                   <span className="text-[11px] font-semibold text-gray-500">
                                     • {srv.subtitle}
                                   </span>
-                                  {isOperational ? (
+                                  {!vehicleAllows ? (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400 border border-gray-300 dark:border-zinc-700">
+                                      Not supported by {currentVType}
+                                    </span>
+                                  ) : isOperational ? (
                                     <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300">
                                       Active for Dispatch
                                     </span>
@@ -2460,14 +2672,19 @@ export const Riders: React.FC = () => {
                                 </span>
                                 <button
                                   type="button"
+                                  disabled={!vehicleAllows}
                                   onClick={() => handleToggleService(srv.id)}
-                                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shadow-2xs ${
+                                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shadow-2xs disabled:opacity-50 disabled:cursor-not-allowed ${
                                     isDriverAllowed
                                       ? 'bg-emerald-600 text-white hover:bg-emerald-700'
                                       : 'bg-gray-200 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400 hover:bg-gray-300'
                                   }`}
                                 >
-                                  {isDriverAllowed ? 'Allowed' : 'Blocked (Disabled)'}
+                                  {!vehicleAllows
+                                    ? 'Disabled by vehicle rule'
+                                    : isDriverAllowed
+                                    ? 'Allowed'
+                                    : 'Blocked (Disabled)'}
                                 </button>
                               </div>
                             </div>

@@ -33,6 +33,8 @@ interface RiderDiagnosticCheck {
     | 'online'
     | 'locationAge'
     | 'riderService'
+    | 'allowedTaxi'
+    | 'activeOnlineNotExcluded'
     | 'cityService'
     | 'platformService'
     | 'notBusy'
@@ -355,46 +357,33 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
       orderVehicle
     } = contextSummary;
 
+    const excludedSet = new Set<string>(
+      [
+        ...(Array.isArray(order.excludeRiderIds) ? order.excludeRiderIds : []),
+        ...(Array.isArray((order.riderRequest as any)?.excludedRiderIds)
+          ? (order.riderRequest as any).excludedRiderIds
+          : []),
+        ...(Array.isArray((order.riderRequest as any)?.declinedRiderIds)
+          ? (order.riderRequest as any).declinedRiderIds
+          : [])
+      ].map(String)
+    );
+
+    const rawOrderVehicleLower = String(order.vehicleType || '').trim().toLowerCase();
+
     const list: EvaluatedRider[] = riders.map((rider) => {
       const vType = normalizeVehicleType(rider.vehicleType);
+      const rawRiderVehicleLower = String(rider.vehicleType || '').trim().toLowerCase();
+      const isExcluded = excludedSet.has(rider.id);
 
-      // 1. Online check
-      const onlinePass = Boolean(rider.isOnline) && rider.status !== 'suspended';
-      const onlineFailReason =
-        rider.status === 'suspended'
-          ? 'Driver account is suspended'
-          : 'Driver is offline (isOnline is false)';
-
-      // 2. Location age check
       const rLat = Number(rider.location?.lat);
       const rLng = Number(rider.location?.lng);
       const hasRiderCoords =
         Number.isFinite(rLat) && Number.isFinite(rLng) && rLat !== 0 && rLng !== 0;
       const locDate = parseDate(rider.location?.updatedAt);
       const ageMs = locDate ? Math.max(0, evaluatedAtMs - locDate.getTime()) : null;
-      const locationPass = hasRiderCoords && locDate !== null && ageMs !== null && ageMs <= maxAgeMs;
-      let locationFailReason = '';
-      if (!hasRiderCoords) {
-        locationFailReason = 'Missing rider GPS coordinates';
-      } else if (!locDate || ageMs === null) {
-        locationFailReason = 'Missing location timestamp (updatedAt)';
-      } else if (ageMs > maxAgeMs) {
-        locationFailReason = `Location is stale (${formatAgeDuration(ageMs)} ago; limit ${locationMaxAgeMinutes}m)`;
-      }
 
-      // 3. Service on for the rider
-      const allowedArr = Array.isArray(rider.allowedServices) ? rider.allowedServices : null;
-      const activeArr = Array.isArray(rider.activeServices) ? rider.activeServices : null;
-      const allowedHasService = allowedArr ? allowedArr.includes(serviceType) : true;
-      const activeHasService = activeArr
-        ? activeArr.includes(serviceType)
-        : (SERVICES_BY_VEHICLE[vType] || []).includes(serviceType);
-      const riderServicePass = allowedHasService && activeHasService;
-      const riderServiceFailReason = !allowedHasService
-        ? `${serviceLabel} not allowed for rider (allowedServices)`
-        : `Rider turned OFF ${serviceLabel} (activeServices)`;
-
-      // 4. Service on for the city
+      // City check (reused across services)
       let cityServicePass = false;
       let cityServiceFailReason = '';
       let cityServiceDetail = '';
@@ -416,42 +405,7 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
         cityServiceDetail = `${cityObj.name} (${serviceLabel} ON)`;
       }
 
-      // 5. Service on for the platform
-      const platformTaxiVehicleBlocked =
-        serviceType === 'taxi' &&
-        ((orderVehicle && platformTaxiVehicles[orderVehicle] === false) ||
-          platformTaxiVehicles[vType] === false);
-      const platformPass = platformServiceOn && !platformTaxiVehicleBlocked;
-      const platformFailReason = !platformServiceOn
-        ? `Platform-wide ${serviceLabel} service is OFF (settings/platform)`
-        : orderVehicle && platformTaxiVehicles[orderVehicle] === false
-        ? `Platform-wide ${VEHICLE_LABELS[orderVehicle]} taxi option is OFF (settings/platform)`
-        : `Platform-wide ${VEHICLE_LABELS[vType]} taxi option is OFF (settings/platform)`;
-
-      // 6. Busy with another order
-      const activeAssigned = activeOrdersByRiderId[rider.id];
-      const hasCurrentOrder = Boolean(rider.currentOrderId && rider.currentOrderId !== order.id);
-      const notBusyPass = !activeAssigned && !hasCurrentOrder;
-      let notBusyFailReason = '';
-      if (activeAssigned) {
-        notBusyFailReason = `Busy on order #${activeAssigned.orderNumber || activeAssigned.id.slice(0, 8)} (${activeAssigned.status})`;
-      } else if (hasCurrentOrder) {
-        notBusyFailReason = `Busy with currentOrderId (${rider.currentOrderId})`;
-      }
-
-      // 7. Vehicle type
-      const supportsServiceVehicle = (SERVICES_BY_VEHICLE[vType] || []).includes(serviceType);
-      const matchesRequestedVehicle = !orderVehicle || orderVehicle === vType;
-      const vehiclePass = supportsServiceVehicle && matchesRequestedVehicle;
-      const vehicleLabel = VEHICLE_LABELS[vType] || rider.vehicleType || 'Unknown';
-      let vehicleFailReason = '';
-      if (!supportsServiceVehicle) {
-        vehicleFailReason = `${vehicleLabel} cannot serve ${serviceLabel}`;
-      } else if (!matchesRequestedVehicle) {
-        vehicleFailReason = `${vehicleLabel} does not match requested ${VEHICLE_LABELS[orderVehicle!]}`;
-      }
-
-      // 8. Distance to merchant / pickup vs radius
+      // Distance check (reused across services)
       const distKm =
         hasPickupCoords && hasRiderCoords
           ? haversineKm(rLat, rLng, pickupLat, pickupLng)
@@ -468,70 +422,222 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
         distanceFailReason = `${distKm.toFixed(2)} km from ${pickupPointLabel} (exceeds ${effectiveRadiusKm} km ${radiusKindLabel})`;
       }
 
-      const checks: RiderDiagnosticCheck[] = [
-        {
-          key: 'online',
-          label: 'Online',
-          pass: onlinePass,
-          detail: onlinePass ? 'Online' : onlineFailReason,
-          failReason: onlineFailReason
-        },
-        {
-          key: 'locationAge',
-          label: 'Location age',
-          pass: locationPass,
-          detail:
-            hasRiderCoords && ageMs !== null
-              ? `${formatAgeDuration(ageMs)} ago (max ${locationMaxAgeMinutes}m)`
-              : locationFailReason,
-          failReason: locationFailReason
-        },
-        {
-          key: 'riderService',
-          label: 'Service (Rider)',
-          pass: riderServicePass,
-          detail: riderServicePass ? `${serviceLabel} ON` : riderServiceFailReason,
-          failReason: riderServiceFailReason
-        },
-        {
-          key: 'cityService',
-          label: 'Service (City)',
-          pass: cityServicePass,
-          detail: cityServicePass ? cityServiceDetail : cityServiceFailReason,
-          failReason: cityServiceFailReason
-        },
-        {
-          key: 'platformService',
-          label: 'Service (Platform)',
-          pass: platformPass,
-          detail: platformPass ? `${serviceLabel} ON` : platformFailReason,
-          failReason: platformFailReason
-        },
-        {
-          key: 'notBusy',
-          label: 'Busy check',
-          pass: notBusyPass,
-          detail: notBusyPass ? 'Free' : notBusyFailReason,
-          failReason: notBusyFailReason
-        },
-        {
-          key: 'vehicleType',
-          label: 'Vehicle type',
-          pass: vehiclePass,
-          detail: vehiclePass ? vehicleLabel : vehicleFailReason,
-          failReason: vehicleFailReason
-        },
-        {
-          key: 'distance',
-          label: `Distance (${effectiveRadiusKm} km ${radiusKindLabel})`,
-          pass: distancePass,
-          detail:
-            distKm !== null
-              ? `${distKm.toFixed(2)} km / ${effectiveRadiusKm} km`
-              : distanceFailReason,
-          failReason: distanceFailReason
+      let checks: RiderDiagnosticCheck[];
+
+      if (serviceType === 'taxi') {
+        // 1. allowedServices contains taxi
+        const allowedList = Array.isArray(rider.allowedServices)
+          ? rider.allowedServices.map((s) => String(s).trim().toLowerCase())
+          : null;
+        const allowedHasTaxi = Boolean(allowedList && allowedList.includes('taxi'));
+        const allowedFailReason = !allowedList
+          ? 'Rider has no allowedServices configured'
+          : 'allowedServices does not contain taxi';
+
+        // 2. vehicleType equals order's vehicleType (ignoring capitals)
+        const validTaxiVehicles = new Set(['motorcycle', 'tricycle', 'car4', 'car8']);
+        const riderVehicleSupported = validTaxiVehicles.has(rawRiderVehicleLower);
+        const matchesOrderVehicle = rawOrderVehicleLower
+          ? rawRiderVehicleLower === rawOrderVehicleLower
+          : riderVehicleSupported;
+        const taxiVehiclePass = riderVehicleSupported && matchesOrderVehicle;
+        let taxiVehicleFailReason = '';
+        if (!riderVehicleSupported) {
+          taxiVehicleFailReason = `Driver vehicleType "${rider.vehicleType || 'missing'}" is not a valid taxi vehicle`;
+        } else if (!matchesOrderVehicle) {
+          taxiVehicleFailReason = `Driver vehicleType "${rider.vehicleType || 'missing'}" does not match order "${order.vehicleType}"`;
         }
-      ];
+
+        // 3. Rider is active, online, and not excluded
+        const isActive = rider.status === 'active';
+        const isOnline = Boolean(rider.isOnline);
+        const statusOnlineNotExcludedPass = isActive && isOnline && !isExcluded;
+        let statusOnlineFailReason = '';
+        if (!isActive) {
+          statusOnlineFailReason = `Driver is not active (status: ${rider.status || 'unknown'})`;
+        } else if (!isOnline) {
+          statusOnlineFailReason = 'Driver is offline (isOnline is false)';
+        } else if (isExcluded) {
+          statusOnlineFailReason = 'Driver is excluded on this order (excludeRiderIds)';
+        }
+
+        checks = [
+          {
+            key: 'allowedTaxi',
+            label: 'allowedServices has taxi',
+            pass: allowedHasTaxi,
+            detail: allowedHasTaxi
+              ? `Allowed (${allowedList!.join(', ')})`
+              : allowedFailReason,
+            failReason: allowedFailReason
+          },
+          {
+            key: 'vehicleType',
+            label: 'vehicleType matches order',
+            pass: taxiVehiclePass,
+            detail: taxiVehiclePass
+              ? `${rider.vehicleType || vType}${rawOrderVehicleLower ? ` == ${order.vehicleType}` : ''}`
+              : taxiVehicleFailReason,
+            failReason: taxiVehicleFailReason
+          },
+          {
+            key: 'activeOnlineNotExcluded',
+            label: 'Active, online & not excluded',
+            pass: statusOnlineNotExcludedPass,
+            detail: statusOnlineNotExcludedPass
+              ? 'Active, online & eligible'
+              : statusOnlineFailReason,
+            failReason: statusOnlineFailReason
+          },
+          {
+            key: 'cityService',
+            label: 'City taxi service ON',
+            pass: cityServicePass,
+            detail: cityServicePass ? cityServiceDetail : cityServiceFailReason,
+            failReason: cityServiceFailReason
+          },
+          {
+            key: 'distance',
+            label: `Distance to pickup (${effectiveRadiusKm} km)`,
+            pass: distancePass,
+            detail:
+              distKm !== null
+                ? `${distKm.toFixed(2)} km / ${effectiveRadiusKm} km`
+                : distanceFailReason,
+            failReason: distanceFailReason
+          }
+        ];
+      } else {
+        // 1. Online & not excluded check
+        const onlinePass =
+          rider.status === 'active' && Boolean(rider.isOnline) && !isExcluded;
+        const onlineFailReason =
+          rider.status !== 'active'
+            ? `Driver account is ${rider.status || 'inactive'}`
+            : !rider.isOnline
+            ? 'Driver is offline (isOnline is false)'
+            : 'Driver is excluded on this order (excludeRiderIds)';
+
+        // 2. Location age check
+        const locationPass =
+          hasRiderCoords && locDate !== null && ageMs !== null && ageMs <= maxAgeMs;
+        let locationFailReason = '';
+        if (!hasRiderCoords) {
+          locationFailReason = 'Missing rider GPS coordinates';
+        } else if (!locDate || ageMs === null) {
+          locationFailReason = 'Missing location timestamp (updatedAt)';
+        } else if (ageMs > maxAgeMs) {
+          locationFailReason = `Location is stale (${formatAgeDuration(ageMs)} ago; limit ${locationMaxAgeMinutes}m)`;
+        }
+
+        // 3. Service on for the rider
+        const allowedArr = Array.isArray(rider.allowedServices)
+          ? rider.allowedServices.map((s) => String(s).trim().toLowerCase())
+          : null;
+        const activeArr = Array.isArray(rider.activeServices)
+          ? rider.activeServices.map((s) => String(s).trim().toLowerCase())
+          : null;
+        const allowedHasService = allowedArr ? allowedArr.includes(serviceType) : true;
+        const activeHasService = activeArr
+          ? activeArr.includes(serviceType)
+          : (SERVICES_BY_VEHICLE[vType] || []).includes(serviceType);
+        const riderServicePass = allowedHasService && activeHasService;
+        const riderServiceFailReason = !allowedHasService
+          ? `${serviceLabel} not allowed for rider (allowedServices)`
+          : `Rider turned OFF ${serviceLabel} (activeServices)`;
+
+        // 5. Service on for the platform
+        const platformPass = platformServiceOn;
+        const platformFailReason = `Platform-wide ${serviceLabel} service is OFF (settings/platform)`;
+
+        // 6. Busy with another order
+        const activeAssigned = activeOrdersByRiderId[rider.id];
+        const hasCurrentOrder = Boolean(rider.currentOrderId && rider.currentOrderId !== order.id);
+        const notBusyPass = !activeAssigned && !hasCurrentOrder;
+        let notBusyFailReason = '';
+        if (activeAssigned) {
+          notBusyFailReason = `Busy on order #${activeAssigned.orderNumber || activeAssigned.id.slice(0, 8)} (${activeAssigned.status})`;
+        } else if (hasCurrentOrder) {
+          notBusyFailReason = `Busy with currentOrderId (${rider.currentOrderId})`;
+        }
+
+        // 7. Vehicle type
+        const supportsServiceVehicle = (SERVICES_BY_VEHICLE[vType] || []).includes(serviceType);
+        const matchesRequestedVehicle = !orderVehicle || orderVehicle === vType;
+        const vehiclePass = supportsServiceVehicle && matchesRequestedVehicle;
+        const vehicleLabel = VEHICLE_LABELS[vType] || rider.vehicleType || 'Unknown';
+        let vehicleFailReason = '';
+        if (!supportsServiceVehicle) {
+          vehicleFailReason = `${vehicleLabel} cannot serve ${serviceLabel}`;
+        } else if (!matchesRequestedVehicle) {
+          vehicleFailReason = `${vehicleLabel} does not match requested ${VEHICLE_LABELS[orderVehicle!]}`;
+        }
+
+        checks = [
+          {
+            key: 'online',
+            label: 'Online',
+            pass: onlinePass,
+            detail: onlinePass ? 'Online' : onlineFailReason,
+            failReason: onlineFailReason
+          },
+          {
+            key: 'locationAge',
+            label: 'Location age',
+            pass: locationPass,
+            detail:
+              hasRiderCoords && ageMs !== null
+                ? `${formatAgeDuration(ageMs)} ago (max ${locationMaxAgeMinutes}m)`
+                : locationFailReason,
+            failReason: locationFailReason
+          },
+          {
+            key: 'riderService',
+            label: 'Service (Rider)',
+            pass: riderServicePass,
+            detail: riderServicePass ? `${serviceLabel} ON` : riderServiceFailReason,
+            failReason: riderServiceFailReason
+          },
+          {
+            key: 'cityService',
+            label: 'Service (City)',
+            pass: cityServicePass,
+            detail: cityServicePass ? cityServiceDetail : cityServiceFailReason,
+            failReason: cityServiceFailReason
+          },
+          {
+            key: 'platformService',
+            label: 'Service (Platform)',
+            pass: platformPass,
+            detail: platformPass ? `${serviceLabel} ON` : platformFailReason,
+            failReason: platformFailReason
+          },
+          {
+            key: 'notBusy',
+            label: 'Busy check',
+            pass: notBusyPass,
+            detail: notBusyPass ? 'Free' : notBusyFailReason,
+            failReason: notBusyFailReason
+          },
+          {
+            key: 'vehicleType',
+            label: 'Vehicle type',
+            pass: vehiclePass,
+            detail: vehiclePass ? vehicleLabel : vehicleFailReason,
+            failReason: vehicleFailReason
+          },
+          {
+            key: 'distance',
+            label: `Distance (${effectiveRadiusKm} km ${radiusKindLabel})`,
+            pass: distancePass,
+            detail:
+              distKm !== null
+                ? `${distKm.toFixed(2)} km / ${effectiveRadiusKm} km`
+                : distanceFailReason,
+            failReason: distanceFailReason
+          }
+        ];
+      }
 
       const firstFailing = checks.find((c) => !c.pass) || null;
 
@@ -563,12 +669,14 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
     contextSummary,
     locationMaxAgeMinutes,
     platformServiceOn,
-    platformTaxiVehicles,
     serviceType,
     serviceLabel,
     isMerchantService,
     evaluatedAtMs,
     order.id,
+    order.vehicleType,
+    order.excludeRiderIds,
+    order.riderRequest,
     cities
   ]);
 
@@ -836,7 +944,11 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
                   </div>
 
                   {/* Individual Checks Grid (each explicitly PASS or FAIL) */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 pt-1">
+                  <div
+                    className={`grid grid-cols-1 sm:grid-cols-2 ${
+                      checks.length === 5 ? 'lg:grid-cols-5' : 'lg:grid-cols-4'
+                    } gap-2 pt-1`}
+                  >
                     {checks.map((chk) => (
                       <div
                         key={chk.key}

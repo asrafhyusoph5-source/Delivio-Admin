@@ -49,6 +49,7 @@ import { ReceiptDesignerTab } from '../components/settings/ReceiptDesignerTab';
 import { CheckoutMustTryTab } from '../components/settings/CheckoutMustTryTab';
 import { StaffTab } from '../components/settings/StaffTab';
 import { DataHealthCheckPanel } from '../components/settings/DataHealthCheckPanel';
+import { FixDriversPanel } from '../components/settings/FixDriversPanel';
 import {
   Settings as SettingsIcon,
   Shield,
@@ -3338,6 +3339,9 @@ export const Settings: React.FC = () => {
       <>
       {/* Data Health Check Card */}
       <DataHealthCheckPanel />
+
+      {/* Fix Drivers Card */}
+      <FixDriversPanel />
 
       {/* One-Time Banner Fields Cleanup Card */}
       <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-4">
