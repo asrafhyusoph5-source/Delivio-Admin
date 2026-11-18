@@ -1091,16 +1091,118 @@ export interface MerchantBestSellers {
 
 export interface FraudFlag {
   id: string;
-  subjectType: 'customer' | 'driver';
+  subjectType: 'customer' | 'driver' | 'merchant';
   subjectId: string;
   reason: string;
   status: 'open' | 'dismissed';
   note?: string;
   createdAt: any;
+  updatedAt?: any;
   createdBy: string;
   subjectName?: string;
   subjectEmail?: string;
   subjectPhone?: string;
+  accountSuspended?: boolean;
+}
+
+export type PosOrderType = 'dine_in' | 'take_out';
+export type PosOrderStatus = 'open' | 'sent' | 'held' | 'paid' | 'voided' | 'refunded';
+export type PosPaymentMethod = 'cash' | 'gcash' | 'maya' | 'card' | 'other';
+
+export interface PosOrderItem {
+  name: string;
+  variantLabel?: string;
+  unitPrice: number;
+  qty: number;
+  voided: boolean;
+}
+
+export interface PosOrderPayment {
+  method: PosPaymentMethod;
+  amount: number;
+}
+
+export interface PosOrderRefund {
+  amount: number;
+  reason: string;
+  at: Date | null;
+}
+
+export interface PosOrder {
+  id: string;
+  type: PosOrderType | string;
+  status: PosOrderStatus | string;
+  items: PosOrderItem[];
+  subtotal: number;
+  discountTotal: number;
+  serviceCharge: number;
+  vatAmount: number;
+  total: number;
+  payments: PosOrderPayment[];
+  tip: number;
+  cashierName: string;
+  shiftId: string;
+  refund: PosOrderRefund | null;
+  paidAt: Date | null;
+  createdAt: Date | null;
+}
+
+export interface PosShift {
+  id: string;
+  cashierName: string;
+  openedAt: Date | null;
+  closedAt: Date | null;
+  openingCash: number;
+  closingCash: number | null;
+  expectedCash: number | null;
+  variance: number | null;
+  status: string;
+}
+
+export type PosLogType =
+  | 'void'
+  | 'refund'
+  | 'discount'
+  | 'price_override'
+  | 'cash_movement'
+  | 'shift_open'
+  | 'shift_close';
+
+export interface PosLog {
+  id: string;
+  type: PosLogType | string;
+  amount: number;
+  reason: string;
+  byName: string;
+  approvedBy: string;
+  at: Date | null;
+}
+
+export interface PosTeamMember {
+  id: string;
+  name: string;
+  role: string;
+  active: boolean;
+}
+
+export interface PosSettingsMain {
+  vatEnabled: boolean;
+  vatPercent: number;
+  vatMode: string;
+  serviceChargeEnabled: boolean;
+  serviceChargePercent: number;
+  tin?: string;
+  taxLabel?: string;
+}
+
+export interface AppLinksSettings {
+  posUrl: string;
+  posEnabled: boolean;
+  partnerAppUrl?: string;
+  supportEmail?: string;
+  supportPhone?: string;
+  updatedAt?: any;
+  updatedBy?: string;
 }
 
 export interface PromoCode {

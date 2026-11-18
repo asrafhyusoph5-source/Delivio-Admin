@@ -17,6 +17,7 @@ import { useCity } from '../context/CityContext';
 import { logAuditEvent } from '../utils/audit';
 import { findMatchingCity } from '../utils/cityUtils';
 import { nowTs } from '../utils/date';
+import { isValidHttpsUrl } from '../utils/posUtils';
 import {
   loadOrInitMainCategories,
   getActiveMainCategoriesForType,
@@ -89,7 +90,9 @@ import {
   MessageSquare,
   MapPin,
   Wrench,
-  Tag
+  Tag,
+  ExternalLink,
+  Link2
 } from 'lucide-react';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 
@@ -136,6 +139,14 @@ export const Settings: React.FC = () => {
   const [defaultCommissionRate, setDefaultCommissionRate] = useState<number>(15);
   const [savingSettings, setSavingSettings] = useState(false);
   const [loading, setLoading] = useState(true);
+
+  // Delivio POS & App Links (settings/appLinks)
+  const [appLinksPosUrl, setAppLinksPosUrl] = useState('');
+  const [appLinksPosEnabled, setAppLinksPosEnabled] = useState(false);
+  const [appLinksPartnerAppUrl, setAppLinksPartnerAppUrl] = useState('');
+  const [appLinksSupportEmail, setAppLinksSupportEmail] = useState('');
+  const [appLinksSupportPhone, setAppLinksSupportPhone] = useState('');
+  const [savingAppLinks, setSavingAppLinks] = useState(false);
 
   // Expired chats cleanup state
   const [cleanupChatsModalOpen, setCleanupChatsModalOpen] = useState(false);
@@ -560,6 +571,21 @@ export const Settings: React.FC = () => {
           console.warn('Failed to load settings/checkout:', e);
         } finally {
           setLoadingCheckout(false);
+        }
+
+        // Fetch settings/appLinks
+        try {
+          const alSnap = await getDoc(doc(db, 'settings', 'appLinks'));
+          if (alSnap.exists()) {
+            const al = alSnap.data() || {};
+            setAppLinksPosUrl(typeof al.posUrl === 'string' ? al.posUrl : '');
+            setAppLinksPosEnabled(Boolean(al.posEnabled));
+            setAppLinksPartnerAppUrl(typeof al.partnerAppUrl === 'string' ? al.partnerAppUrl : '');
+            setAppLinksSupportEmail(typeof al.supportEmail === 'string' ? al.supportEmail : '');
+            setAppLinksSupportPhone(typeof al.supportPhone === 'string' ? al.supportPhone : '');
+          }
+        } catch (e) {
+          console.warn('Failed to load settings/appLinks:', e);
         }
       } catch (err) {
         showError(err);
@@ -1313,6 +1339,57 @@ export const Settings: React.FC = () => {
     }
   };
 
+  // Save settings/appLinks (Delivio POS & Partner App links)
+  const handleSaveAppLinks = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanPosUrl = appLinksPosUrl.trim();
+    const cleanPartnerUrl = appLinksPartnerAppUrl.trim();
+
+    if (cleanPosUrl && !isValidHttpsUrl(cleanPosUrl)) {
+      showError('POS URL must be a valid https:// URL.');
+      return;
+    }
+    if (appLinksPosEnabled && !isValidHttpsUrl(cleanPosUrl)) {
+      showError('Please enter a valid https:// POS URL before enabling Delivio POS inside the Partner app.');
+      return;
+    }
+    if (cleanPartnerUrl && !isValidHttpsUrl(cleanPartnerUrl)) {
+      showError('Partner App URL must be a valid https:// URL.');
+      return;
+    }
+
+    try {
+      setSavingAppLinks(true);
+      const payload = {
+        posUrl: cleanPosUrl,
+        posEnabled: Boolean(appLinksPosEnabled),
+        partnerAppUrl: cleanPartnerUrl,
+        supportEmail: appLinksSupportEmail.trim(),
+        supportPhone: appLinksSupportPhone.trim(),
+        updatedAt: nowTs(),
+        updatedBy: adminProfile?.uid || 'admin'
+      };
+
+      await setDoc(doc(db, 'settings', 'appLinks'), payload, { merge: true });
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'UPDATE_APP_LINKS',
+        entityType: 'settings',
+        entityId: 'appLinks',
+        details: `Updated Delivio POS app links. posEnabled: ${payload.posEnabled}, posUrl: ${payload.posUrl || '(empty)'}`
+      });
+
+      showSuccess('Delivio POS app links saved to settings/appLinks.');
+    } catch (err: any) {
+      showError(err);
+    } finally {
+      setSavingAppLinks(false);
+    }
+  };
+
   // Save Taxes & Fees (VAT and Timezone) to Firestore
   const handleSaveTaxesAndFees = async () => {
     try {
@@ -1944,6 +2021,157 @@ export const Settings: React.FC = () => {
               </button>
             )}
           </div>
+        </div>
+
+        {/* Delivio POS & App Links Card (settings/appLinks) */}
+        <div className="lg:col-span-3 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-3xl p-6 shadow-xs space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-gray-100 dark:border-zinc-800">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-xl bg-amber-400 text-black shadow-xs">
+                <Link2 className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="font-extrabold text-base text-gray-900 dark:text-white">
+                  Delivio POS
+                </h3>
+                <p className="text-xs text-gray-500 dark:text-zinc-400">
+                  Configure the Delivio POS web link and support details stored in{' '}
+                  <code className="font-mono text-amber-600">settings/appLinks</code>.
+                </p>
+              </div>
+            </div>
+
+            {isValidHttpsUrl(appLinksPosUrl) ? (
+              <a
+                href={appLinksPosUrl.trim()}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 hover:bg-amber-100 text-xs font-bold transition-colors self-start sm:self-auto"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>Test link</span>
+              </a>
+            ) : (
+              <span
+                title="Enter a valid https:// POS URL to test"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-100 dark:bg-zinc-850 text-gray-400 text-xs font-bold cursor-not-allowed self-start sm:self-auto"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>Test link</span>
+              </span>
+            )}
+          </div>
+
+          <form onSubmit={handleSaveAppLinks} className="space-y-4">
+            <div className="p-4 rounded-2xl border border-gray-200 dark:border-zinc-800 bg-gray-50/70 dark:bg-zinc-850 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <span className="font-bold text-xs text-gray-900 dark:text-white block">
+                  Show Delivio POS inside the Partner app
+                </span>
+                <p className="text-[11px] text-gray-500">
+                  Controls whether merchants see and can launch Delivio POS directly inside the Delivio Partner app.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={appLinksPosEnabled}
+                onClick={() => setAppLinksPosEnabled((prev) => !prev)}
+                className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold transition-colors shrink-0 self-start sm:self-auto ${
+                  appLinksPosEnabled
+                    ? 'bg-emerald-500 text-white'
+                    : 'bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-zinc-200'
+                }`}
+              >
+                {appLinksPosEnabled ? (
+                  <ToggleRight className="w-4 h-4" />
+                ) : (
+                  <ToggleLeft className="w-4 h-4" />
+                )}
+                <span>{appLinksPosEnabled ? 'Enabled' : 'Hidden'}</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  POS URL (<span className="lowercase font-mono">https://</span> only)
+                </label>
+                <input
+                  type="url"
+                  value={appLinksPosUrl}
+                  onChange={(e) => setAppLinksPosUrl(e.target.value)}
+                  placeholder="https://pos.delivio.ph"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white font-mono"
+                />
+                {appLinksPosUrl.trim() && !isValidHttpsUrl(appLinksPosUrl) && (
+                  <span className="text-[11px] text-rose-600 font-semibold mt-1 block">
+                    URL must start with https://
+                  </span>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  Partner App URL (Optional)
+                </label>
+                <input
+                  type="url"
+                  value={appLinksPartnerAppUrl}
+                  onChange={(e) => setAppLinksPartnerAppUrl(e.target.value)}
+                  placeholder="https://partner.delivio.ph"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white font-mono"
+                />
+                {appLinksPartnerAppUrl.trim() && !isValidHttpsUrl(appLinksPartnerAppUrl) && (
+                  <span className="text-[11px] text-rose-600 font-semibold mt-1 block">
+                    URL must start with https://
+                  </span>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  POS Support Email
+                </label>
+                <input
+                  type="email"
+                  value={appLinksSupportEmail}
+                  onChange={(e) => setAppLinksSupportEmail(e.target.value)}
+                  placeholder="support@delivio.ph"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                  POS Support Phone
+                </label>
+                <input
+                  type="text"
+                  value={appLinksSupportPhone}
+                  onChange={(e) => setAppLinksSupportPhone(e.target.value)}
+                  placeholder="+63 917 123 4567"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs text-gray-900 dark:text-white"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                type="submit"
+                disabled={savingAppLinks}
+                className="delivio-btn-yellow px-6 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 shadow-xs disabled:opacity-50"
+              >
+                {savingAppLinks ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Save className="w-4 h-4" />
+                )}
+                <span>Save Delivio POS Links</span>
+              </button>
+            </div>
+          </form>
         </div>
       </div>
       )}

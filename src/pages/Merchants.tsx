@@ -6,6 +6,7 @@ import {
   collection,
   query,
   where,
+  orderBy,
   limit,
   getDocs,
   getDoc,
@@ -123,9 +124,11 @@ import { TableSkeleton } from '../components/common/SkeletonLoader';
 import { PromoCodesTab } from '../components/promos/PromoCodesTab';
 import { AddOutletModal, EditOutletModal } from '../components/merchants/OutletModals';
 import { CustomerVisibilityCheckPanel } from '../components/merchants/CustomerVisibilityCheckPanel';
+import { MerchantPosTab } from '../components/merchants/MerchantPosTab';
 import { formatShopDisplayName, getChainOptions, type ChainOption } from '../utils/outletUtils';
 import { findMatchingCity, isExistingCityId } from '../utils/cityUtils';
 import { formatGeocoderAddress, reverseGeocodePin } from '../utils/geocoder';
+import { parsePosOrderDoc, isCountingPosSale, runWithConcurrency } from '../utils/posUtils';
 
 export const DEFAULT_WEEKLY_HOURS: MerchantWeeklyHours = {
   monday: { open: '08:00', close: '22:00', isOpen: true, closed: false },
@@ -799,6 +802,7 @@ export function getActivePriceDrop(
 export const Merchants: React.FC = () => {
   const [searchParams] = useSearchParams();
   const initialSearch = searchParams.get('search') || '';
+  const initialTab = searchParams.get('tab') || '';
 
   const { selectedCityId, cities } = useCity();
   const { adminProfile } = useAuth();
@@ -806,6 +810,7 @@ export const Merchants: React.FC = () => {
 
   const [merchants, setMerchants] = useState<Merchant[]>([]);
   const [loading, setLoading] = useState(true);
+  const [posLastSaleMap, setPosLastSaleMap] = useState<Record<string, Date | null>>({});
 
   // Platform Timezone & Services
   const [platformTimezone, setPlatformTimezone] = useState('Asia/Manila');
@@ -847,7 +852,7 @@ export const Merchants: React.FC = () => {
 
   // Selected Merchant for detail
   const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(null);
-  const [activeTab, setActiveTab] = useState<'details' | 'outlets' | 'status' | 'location' | 'radius' | 'specialRadius' | 'menu' | 'orders' | 'changes' | 'history' | 'wallet' | 'reviews' | 'vouchers'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'outlets' | 'status' | 'location' | 'radius' | 'specialRadius' | 'menu' | 'vouchers' | 'reviews' | 'orders' | 'pos' | 'changes' | 'history' | 'wallet'>('details');
 
   // Outlets & Chain Management State
   const [addOutletModalOpen, setAddOutletModalOpen] = useState(false);
@@ -1114,6 +1119,43 @@ export const Merchants: React.FC = () => {
       });
       list.sort((a, b) => a.name.localeCompare(b.name));
       setMerchants(list);
+
+      if (initialTab === 'pos' && initialSearch) {
+        const match = list.find((m) => m.id === initialSearch);
+        if (match) {
+          setSelectedMerchant(match);
+          setActiveTab('pos');
+        }
+      }
+
+      // Asynchronously load last POS sale per shop with 5x concurrency
+      runWithConcurrency(list, 5, async (shop) => {
+        try {
+          const snap = await getDocs(
+            query(
+              collection(db, 'merchants', shop.id, 'posOrders'),
+              orderBy('paidAt', 'desc'),
+              limit(1)
+            )
+          );
+          if (snap.empty) {
+            return { id: shop.id, lastSale: null as Date | null };
+          }
+          const d = snap.docs[0];
+          const parsed = parsePosOrderDoc(d.id, d.data());
+          const lastSale =
+            parsed && isCountingPosSale(parsed) && parsed.paidAt ? parsed.paidAt : null;
+          return { id: shop.id, lastSale };
+        } catch {
+          return { id: shop.id, lastSale: null as Date | null };
+        }
+      }).then((entries) => {
+        const nextMap: Record<string, Date | null> = {};
+        for (const e of entries) {
+          nextMap[e.id] = e.lastSale;
+        }
+        setPosLastSaleMap(nextMap);
+      });
     } catch (err) {
       showError(err);
     } finally {
@@ -4437,7 +4479,7 @@ export const Merchants: React.FC = () => {
 
       {/* Merchants Table */}
       {loading ? (
-        <TableSkeleton rows={8} cols={7} />
+        <TableSkeleton rows={8} cols={8} />
       ) : (
         <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl overflow-hidden shadow-xs">
           <div className="overflow-x-auto">
@@ -4449,6 +4491,7 @@ export const Merchants: React.FC = () => {
                   <th className="px-4 py-3.5">Type</th>
                   <th className="px-4 py-3.5">Rating</th>
                   <th className="px-4 py-3.5">Live Status</th>
+                  <th className="px-4 py-3.5">POS</th>
                   <th className="px-4 py-3.5">Commission</th>
                   <th className="px-4 py-3.5 text-right">Actions</th>
                 </tr>
@@ -4456,7 +4499,7 @@ export const Merchants: React.FC = () => {
               <tbody className="divide-y divide-gray-100 dark:divide-zinc-800 font-medium">
                 {groupedDisplayRows.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="text-center py-12 text-gray-400 text-xs">
+                    <td colSpan={8} className="text-center py-12 text-gray-400 text-xs">
                       No matching merchants found.
                     </td>
                   </tr>
@@ -4594,6 +4637,28 @@ export const Merchants: React.FC = () => {
                                 )}
                               </div>
                             </td>
+                            <td className="px-4 py-3.5 whitespace-nowrap">
+                              {(() => {
+                                const activeDates = row.outlets
+                                  .map((o) => posLastSaleMap[o.id])
+                                  .filter((d): d is Date => Boolean(d));
+                                if (activeDates.length === 0) {
+                                  return <span className="text-[11px] text-gray-400">Not used</span>;
+                                }
+                                const latest = activeDates.reduce((a, b) => (b > a ? b : a));
+                                return (
+                                  <div className="flex flex-col">
+                                    <span className="inline-flex items-center gap-1 font-bold text-emerald-700 dark:text-emerald-400 text-[11px]">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                      <span>Active ({activeDates.length}/{row.outlets.length})</span>
+                                    </span>
+                                    <span className="text-[10px] text-gray-400">
+                                      {formatRelativeTime(latest)}
+                                    </span>
+                                  </div>
+                                );
+                              })()}
+                            </td>
                             <td className="px-4 py-3.5 font-bold text-amber-600">
                               {(() => {
                                 const rates = Array.from(new Set(row.outlets.map((o) => o.commissionRate ?? 15)));
@@ -4725,6 +4790,21 @@ export const Merchants: React.FC = () => {
                                       </div>
                                     );
                                   })()}
+                                </td>
+                                <td className="px-4 py-3 whitespace-nowrap">
+                                  {posLastSaleMap[m.id] ? (
+                                    <div className="flex flex-col">
+                                      <span className="inline-flex items-center gap-1 font-bold text-emerald-700 dark:text-emerald-400 text-[11px]">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                        <span>Active</span>
+                                      </span>
+                                      <span className="text-[10px] text-gray-400">
+                                        {formatRelativeTime(posLastSaleMap[m.id]!)}
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <span className="text-[11px] text-gray-400">Not used</span>
+                                  )}
                                 </td>
                                 <td className="px-4 py-3 font-bold text-amber-600">
                                   {m.commissionRate || 15}%
@@ -4894,6 +4974,21 @@ export const Merchants: React.FC = () => {
                               </div>
                             );
                           })()}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          {posLastSaleMap[m.id] ? (
+                            <div className="flex flex-col">
+                              <span className="inline-flex items-center gap-1 font-bold text-emerald-700 dark:text-emerald-400 text-[11px]">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                <span>Active</span>
+                              </span>
+                              <span className="text-[10px] text-gray-400">
+                                {formatRelativeTime(posLastSaleMap[m.id]!)}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-[11px] text-gray-400">Not used</span>
+                          )}
                         </td>
                         <td className="px-4 py-3 font-bold text-amber-600">
                           {m.commissionRate || 15}%
@@ -5089,6 +5184,7 @@ export const Merchants: React.FC = () => {
                 { id: 'vouchers', label: 'Vouchers' },
                 { id: 'reviews', label: `Reviews (${merchantReviews.length})` },
                 { id: 'orders', label: 'Orders & Payouts' },
+                { id: 'pos', label: 'POS' },
                 { id: 'changes', label: `Change Requests (${changeRequests.length})` },
                 { id: 'history', label: 'Edit History' }
               ].map((tab) => (
@@ -8098,6 +8194,14 @@ export const Merchants: React.FC = () => {
                     </div>
                   )}
                 </div>
+              )}
+
+              {/* TAB: POS (READ-ONLY) */}
+              {activeTab === 'pos' && selectedMerchant && (
+                <MerchantPosTab
+                  merchant={selectedMerchant}
+                  platformTimezone={platformTimezone}
+                />
               )}
             </div>
           </div>

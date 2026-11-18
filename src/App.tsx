@@ -31,6 +31,7 @@ import { ServicesByCity } from './pages/ServicesByCity';
 import { FraudFlags } from './pages/FraudFlags';
 import { Chats } from './pages/Chats';
 import { CuisinesCategories } from './pages/CuisinesCategories';
+import { PosSales } from './pages/PosSales';
 
 export default function App() {
   return (
@@ -65,6 +66,7 @@ export default function App() {
                     <Route path="tiers" element={<TiersCoins />} />
                     <Route path="notifications" element={<Notifications />} />
                     <Route path="reports" element={<Reports />} />
+                    <Route path="pos-sales" element={<PosSales />} />
                     <Route path="audit" element={<AuditLog />} />
                     <Route path="settings" element={<Settings />} />
                     <Route path="flags" element={<FraudFlags />} />

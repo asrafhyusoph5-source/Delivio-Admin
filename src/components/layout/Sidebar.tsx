@@ -24,7 +24,8 @@ import {
   Headphones,
   Trophy,
   MessageSquare,
-  LayoutGrid
+  LayoutGrid,
+  CreditCard
 } from 'lucide-react';
 import { useBadgeCounts } from '../../context/BadgeCountsContext';
 import { useAuth } from '../../context/AuthContext';
@@ -103,6 +104,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-amber-500'
     },
     { name: 'Reports', path: '/reports', icon: BarChart3 },
+    { name: 'POS Sales', path: '/pos-sales', icon: CreditCard },
     { name: 'Audit Log', path: '/audit', icon: ShieldAlert },
     { name: 'Settings', path: '/settings', icon: Settings },
   ];
@@ -128,11 +130,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
       '/support',
       '/tiers',
       '/reports',
+      '/pos-sales',
       '/audit',
       '/settings'
     ],
     support: ['/', '/map', '/orders', '/inbox', '/chats', '/support', '/flags'],
-    finance: ['/', '/wallet-transfers', '/merchants', '/riders', '/reports']
+    finance: ['/', '/wallet-transfers', '/merchants', '/riders', '/reports', '/pos-sales']
   };
 
   const visibleNavItems = navItems.filter((item) => {
