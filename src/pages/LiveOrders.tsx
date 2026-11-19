@@ -25,6 +25,15 @@ import { ExportDateModal } from '../components/common/ExportDateModal';
 import { formatTimestamp, formatRelativeTime, nowTs, arrayNowTs } from '../utils/date';
 import { formatOrderNumber, matchesOrderSearch } from '../utils/orderNumber';
 import { getChainOptions, resolveOrderChainId, resolveOrderMerchantDisplay } from '../utils/outletUtils';
+import {
+  PARCEL_STATUS_ORDER,
+  getNextParcelStatus,
+  normalizeParcelVehicle,
+  getParcelVehicleLabel,
+  getParcelFeePayer,
+  getParcelCashRuleSummary,
+  getOrderCashCollectedAmount
+} from '../utils/parcel';
 import type { Order, OrderStatus, OrderServiceType, Merchant } from '../types';
 import {
   VEHICLE_TYPES,
@@ -168,6 +177,26 @@ export const ServiceChips: React.FC<{ order: Order }> = ({ order }) => {
     );
   }
 
+  if (order.serviceType === 'parcel') {
+    const parcelVehicle = getParcelVehicleLabel(order.vehicleType);
+    const feePayer = getParcelFeePayer(order);
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-extrabold bg-purple-100 text-purple-900 dark:bg-purple-950/70 dark:text-purple-200 border border-purple-300 dark:border-purple-800">
+          <span>{label}</span>
+        </span>
+        <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-blue-50 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+          {parcelVehicle}
+        </span>
+        {feePayer && (
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-300 border border-gray-200 dark:border-zinc-700 capitalize">
+            Fee: {feePayer}
+          </span>
+        )}
+      </div>
+    );
+  }
+
   return (
     <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200">
       {label}
@@ -218,6 +247,8 @@ export const PaymentChip: React.FC<{ order: Order }> = ({ order }) => {
     );
   }
 
+  const collectedAmt = getOrderCashCollectedAmount(order);
+
   return (
     <div className="inline-flex flex-col gap-0.5 items-start">
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
@@ -225,7 +256,11 @@ export const PaymentChip: React.FC<{ order: Order }> = ({ order }) => {
         <span>COD</span>
       </span>
       <span className="text-[9px] font-semibold text-gray-500 dark:text-zinc-400 px-1">
-        {order.codCollected ? 'Collected' : status || 'To Collect'}
+        {collectedAmt > 0 || order.cashCollected === true
+          ? order.cashCollectedStage
+            ? `Collected (${order.cashCollectedStage})`
+            : 'Collected'
+          : status || 'To Collect'}
       </span>
     </div>
   );
@@ -917,7 +952,10 @@ export const LiveOrders: React.FC = () => {
             paymentStatus: data.paymentStatus,
             paymentProvider: data.paymentProvider,
             payment: data.payment,
+            feePayer: data.feePayer || data.parcel?.feePayer,
             cashToCollect: data.cashToCollect,
+            cashCollected: data.cashCollected,
+            cashCollectedStage: data.cashCollectedStage,
             codAmount: data.codAmount,
             codCollected: data.codCollected,
             walletRefunded: data.walletRefunded,
@@ -1646,6 +1684,62 @@ export const LiveOrders: React.FC = () => {
     }
   };
 
+  // Action: Advance Parcel step (strictly forward-only, one step at a time)
+  const handleAdvanceParcelStep = async () => {
+    if (!selectedOrder || selectedOrder.serviceType !== 'parcel') return;
+    const nextStatus = getNextParcelStatus(selectedOrder.status);
+    if (!nextStatus) return;
+
+    try {
+      const orderRef = doc(db, 'orders', selectedOrder.id);
+      const now = nowTs();
+      const localNow = Timestamp.now();
+      const updatePayload: Record<string, any> = {
+        status: nextStatus,
+        statusHistory: arrayUnion({
+          status: nextStatus,
+          at: arrayNowTs(),
+          note: `Parcel step advanced to "${nextStatus}" by Admin (${adminProfile?.name || 'Operations'})`
+        }),
+        updatedAt: now
+      };
+      if (nextStatus === 'Rider is on the way to recipient') {
+        updatePayload.pickedUpAt = now;
+      }
+      if (nextStatus === 'Delivered') {
+        updatePayload.deliveredAt = now;
+      }
+
+      await updateDoc(orderRef, updatePayload);
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'UPDATE_ORDER_STATUS',
+        entityType: 'order',
+        entityId: selectedOrder.id,
+        details: `Advanced parcel order #${selectedOrder.orderNumber} from "${selectedOrder.status}" to "${nextStatus}".`,
+        oldValue: { status: selectedOrder.status },
+        newValue: { status: nextStatus }
+      });
+
+      setSelectedOrder((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: nextStatus,
+              ...(nextStatus === 'Rider is on the way to recipient' ? { pickedUpAt: localNow } : {}),
+              ...(nextStatus === 'Delivered' ? { deliveredAt: localNow } : {})
+            }
+          : null
+      );
+      showSuccess(`Parcel order #${selectedOrder.orderNumber} moved to "${nextStatus}".`);
+    } catch (err: any) {
+      showError(err);
+    }
+  };
+
   // CSV Export Modal state
   const [exportModalOpen, setExportModalOpen] = useState(false);
 
@@ -1672,7 +1766,11 @@ export const LiveOrders: React.FC = () => {
       Fulfillment: o.serviceType === 'taxi' ? 'Delivio Taxi Ride' : o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
       ScheduledFor: o.scheduledFor ? formatTimestamp(o.scheduledFor) : '',
       Service: SERVICE_LABELS[o.serviceType] || o.serviceType,
-      VehicleType: o.vehicleType || o.riderVehicle?.vehicleType || '',
+      VehicleType:
+        o.serviceType === 'parcel'
+          ? getParcelVehicleLabel(o.vehicleType)
+          : o.vehicleType || o.riderVehicle?.vehicleType || '',
+      FeePayer: o.serviceType === 'parcel' ? getParcelFeePayer(o) || '' : '',
       Status: o.status,
       Customer: o.customerName,
       CustomerPhone: o.customerPhone || '',
@@ -1696,7 +1794,8 @@ export const LiveOrders: React.FC = () => {
           : 'Pending'),
       PaymentProvider: o.paymentProvider || o.payment?.provider || '',
       CashToCollect: o.cashToCollect ?? o.codAmount ?? 0,
-      CODCollected: o.codCollected ?? 0,
+      CODCollected: getOrderCashCollectedAmount(o),
+      CashCollectedStage: o.cashCollectedStage || '',
       WalletRefunded: o.walletRefunded ? 'Yes' : 'No',
       City: cities.find((c) => c.id === o.cityId)?.name || o.cityId || '',
       Created: formatTimestamp(o.createdAt)
@@ -2821,12 +2920,26 @@ export const LiveOrders: React.FC = () => {
                             <Car className="w-3.5 h-3.5" /> On another delivery
                           </button>
                         )}
-                        <button
-                          onClick={handleMarkCompleted}
-                          className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 shadow-xs transition-colors"
-                        >
-                          <CheckCircle2 className="w-3.5 h-3.5" /> Mark Completed
-                        </button>
+                        {selectedOrder.serviceType === 'parcel' ? (
+                          (() => {
+                            const nextParcelStep = getNextParcelStatus(selectedOrder.status);
+                            return nextParcelStep ? (
+                              <button
+                                onClick={handleAdvanceParcelStep}
+                                className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 shadow-xs transition-colors"
+                              >
+                                <ChevronRight className="w-3.5 h-3.5" /> Next Step: {nextParcelStep}
+                              </button>
+                            ) : null;
+                          })()
+                        ) : (
+                          <button
+                            onClick={handleMarkCompleted}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 shadow-xs transition-colors"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" /> Mark Completed
+                          </button>
+                        )}
                         {!selectedOrder.isPickup && selectedOrder.fulfillmentType !== 'pickup' && (
                           <button
                             onClick={() => setReassignModalOpen(true)}
@@ -2855,6 +2968,93 @@ export const LiveOrders: React.FC = () => {
                   )}
                 </div>
               </div>
+
+              {/* Parcel 6-Step Progress Bar & Cash Collection Rule */}
+              {selectedOrder.serviceType === 'parcel' &&
+                (() => {
+                  const cashRule = getParcelCashRuleSummary(selectedOrder);
+                  const currentIdx = PARCEL_STATUS_ORDER.indexOf(selectedOrder.status as OrderStatus);
+                  const nextStep = getNextParcelStatus(selectedOrder.status);
+                  const parcelVehicleLabel = getParcelVehicleLabel(selectedOrder.vehicleType);
+                  const isSedan = normalizeParcelVehicle(selectedOrder.vehicleType) === 'sedan';
+
+                  return (
+                    <div className="p-4 rounded-2xl bg-purple-50/60 dark:bg-purple-950/20 border border-purple-200 dark:border-purple-900/50 space-y-3 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <span className="text-[10px] uppercase font-bold tracking-wider text-purple-800 dark:text-purple-300 block">
+                            Parcel Step Progression (Forward-Only)
+                          </span>
+                          <span className="font-bold text-gray-900 dark:text-white">
+                            Vehicle: {parcelVehicleLabel}
+                            {isSedan ? ' (4- or 8-wheel car)' : ''}
+                            {cashRule.feePayer ? ` • Fee Payer: ${cashRule.feePayer === 'sender' ? 'Sender' : 'Recipient'}` : ''}
+                          </span>
+                        </div>
+                        {nextStep && selectedOrder.status !== 'Cancelled' && selectedOrder.status !== 'Rejected' && (
+                          <span className="px-2 py-0.5 rounded-md bg-white dark:bg-zinc-900 border border-purple-200 dark:border-purple-800 text-[11px] font-bold text-purple-800 dark:text-purple-200">
+                            Next: {nextStep}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-1.5">
+                        {PARCEL_STATUS_ORDER.map((step, idx) => {
+                          const isCompleted = currentIdx > idx || (currentIdx === PARCEL_STATUS_ORDER.length - 1 && idx === currentIdx);
+                          const isCurrent = currentIdx === idx;
+                          return (
+                            <div
+                              key={step}
+                              className={`p-2 rounded-xl border text-[10px] leading-tight ${
+                                isCurrent
+                                  ? 'bg-amber-100/80 dark:bg-amber-950/50 border-amber-400 text-amber-950 dark:text-amber-200 font-extrabold'
+                                  : isCompleted
+                                  ? 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-300 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 font-semibold'
+                                  : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-800 text-gray-500 dark:text-zinc-400'
+                              }`}
+                            >
+                              <div className="font-black text-[9px] opacity-75 mb-0.5">Step {idx + 1}</div>
+                              <div>{step}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+                        <div className="p-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800">
+                          <span className="text-[10px] uppercase font-bold text-gray-400 block">Cash to Collect (Total)</span>
+                          <span className="font-extrabold text-gray-900 dark:text-white">
+                            {cashRule.isCashless ? '₱0.00 (Paid Online / Wallet)' : `₱${cashRule.cashToCollect.toFixed(2)}`}
+                          </span>
+                        </div>
+                        <div className="p-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800">
+                          <span className="text-[10px] uppercase font-bold text-gray-400 block">At Pickup (Sender)</span>
+                          <span
+                            className={`font-bold ${
+                              cashRule.expectedStage === 'pickup'
+                                ? 'text-amber-700 dark:text-amber-400'
+                                : 'text-gray-500 dark:text-zinc-400'
+                            }`}
+                          >
+                            {cashRule.pickupStepLabel}
+                          </span>
+                        </div>
+                        <div className="p-2.5 rounded-xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800">
+                          <span className="text-[10px] uppercase font-bold text-gray-400 block">At Drop-off (Recipient)</span>
+                          <span
+                            className={`font-bold ${
+                              cashRule.expectedStage === 'dropoff'
+                                ? 'text-amber-700 dark:text-amber-400'
+                                : 'text-gray-500 dark:text-zinc-400'
+                            }`}
+                          >
+                            {cashRule.dropoffStepLabel}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
 
               {/* Scheduled Order Pre-Release Notice */}
               {Boolean(selectedOrder.scheduledFor || selectedOrder.fulfillmentType === 'scheduled' || (selectedOrder as any).isScheduled) && (
@@ -2914,28 +3114,72 @@ export const LiveOrders: React.FC = () => {
                   )}
                 </div>
 
-                {/* Merchant or Service */}
+                {/* Merchant or Service / Parcel Parties */}
                 <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-zinc-900 border border-gray-100 dark:border-zinc-800 text-xs space-y-1">
                   <div className="flex items-center gap-1.5 text-gray-400 font-bold uppercase text-[10px]">
                     <Store className="w-3.5 h-3.5 text-amber-500" />
-                    <span>{selectedOrder.serviceType === 'taxi' ? 'Delivio Taxi' : 'Merchant'}</span>
+                    <span>
+                      {selectedOrder.serviceType === 'taxi'
+                        ? 'Delivio Taxi'
+                        : selectedOrder.serviceType === 'parcel'
+                        ? 'Parcel Parties'
+                        : 'Merchant'}
+                    </span>
                   </div>
-                  <div className="font-bold text-gray-900 dark:text-white truncate">
-                    {selectedOrder.serviceType === 'taxi'
-                      ? 'Passenger Ride-Hailing'
-                      : resolveOrderMerchantDisplay(selectedOrder, merchantsById, true) || 'Direct Service'}
-                  </div>
-                  {selectedOrder.merchantPhone ? (
-                    <a
-                      href={`tel:${selectedOrder.merchantPhone}`}
-                      className="text-amber-600 dark:text-amber-400 font-semibold hover:underline flex items-center gap-1 text-[11px]"
-                    >
-                      <Phone className="w-3 h-3" /> {selectedOrder.merchantPhone}
-                    </a>
-                  ) : (
-                    <div className="text-gray-400 text-[11px]">
-                      {selectedOrder.serviceType === 'taxi' ? 'Point-to-point transit' : 'No phone listed'}
+                  {selectedOrder.serviceType === 'parcel' ? (
+                    <div className="space-y-1 text-[11px]">
+                      <div className="text-gray-800 dark:text-zinc-200 truncate">
+                        <span className="font-bold">Sender:</span>{' '}
+                        {selectedOrder.pickup?.name ||
+                          selectedOrder.pickup?.contactName ||
+                          selectedOrder.pickup?.label ||
+                          selectedOrder.customerName ||
+                          'Sender'}
+                        {(selectedOrder.pickup?.phone || selectedOrder.pickup?.contactPhone) && (
+                          <span className="text-gray-500 ml-1">
+                            ({selectedOrder.pickup?.phone || selectedOrder.pickup?.contactPhone})
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-gray-800 dark:text-zinc-200 truncate">
+                        <span className="font-bold">Recipient:</span>{' '}
+                        {selectedOrder.dropoff?.name ||
+                          selectedOrder.dropoff?.contactName ||
+                          selectedOrder.parcel?.recipientName ||
+                          'Recipient'}
+                        {(selectedOrder.dropoff?.phone ||
+                          selectedOrder.dropoff?.contactPhone ||
+                          selectedOrder.parcel?.recipientPhone) && (
+                          <span className="text-gray-500 ml-1">
+                            (
+                            {selectedOrder.dropoff?.phone ||
+                              selectedOrder.dropoff?.contactPhone ||
+                              selectedOrder.parcel?.recipientPhone}
+                            )
+                          </span>
+                        )}
+                      </div>
                     </div>
+                  ) : (
+                    <>
+                      <div className="font-bold text-gray-900 dark:text-white truncate">
+                        {selectedOrder.serviceType === 'taxi'
+                          ? 'Passenger Ride-Hailing'
+                          : resolveOrderMerchantDisplay(selectedOrder, merchantsById, true) || 'Direct Service'}
+                      </div>
+                      {selectedOrder.merchantPhone ? (
+                        <a
+                          href={`tel:${selectedOrder.merchantPhone}`}
+                          className="text-amber-600 dark:text-amber-400 font-semibold hover:underline flex items-center gap-1 text-[11px]"
+                        >
+                          <Phone className="w-3 h-3" /> {selectedOrder.merchantPhone}
+                        </a>
+                      ) : (
+                        <div className="text-gray-400 text-[11px]">
+                          {selectedOrder.serviceType === 'taxi' ? 'Point-to-point transit' : 'No phone listed'}
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
 
@@ -2990,8 +3234,16 @@ export const LiveOrders: React.FC = () => {
                       )}
                       {(selectedOrder.riderVehicle || selectedOrder.vehicleType) && (
                         <div className="text-[10px] text-gray-500 dark:text-zinc-400 pt-0.5">
-                          Vehicle: <strong className="text-gray-800 dark:text-zinc-200">
-                            {VEHICLE_LABELS[(selectedOrder.vehicleType || selectedOrder.riderVehicle?.vehicleType) as VehicleType] || 'Motorcycle'}
+                          Vehicle:{' '}
+                          <strong className="text-gray-800 dark:text-zinc-200">
+                            {selectedOrder.serviceType === 'parcel'
+                              ? getParcelVehicleLabel(
+                                  selectedOrder.vehicleType || selectedOrder.riderVehicle?.vehicleType
+                                )
+                              : VEHICLE_LABELS[
+                                  (selectedOrder.vehicleType ||
+                                    selectedOrder.riderVehicle?.vehicleType) as VehicleType
+                                ] || 'Motorcycle'}
                           </strong>
                           {selectedOrder.riderVehicle?.plate && ` • ${selectedOrder.riderVehicle.plate}`}
                         </div>
@@ -3013,22 +3265,48 @@ export const LiveOrders: React.FC = () => {
 
                 {/* Route stops list */}
                 <div className="mt-3 space-y-2">
-                  {/* Stop 1: Pickup */}
+                  {/* Stop 1: Pickup / Sender */}
                   <div className="p-3 rounded-xl bg-gray-50 dark:bg-zinc-900 flex items-start gap-3 border border-gray-200/60 dark:border-zinc-800">
                     <div className="w-6 h-6 rounded-full bg-emerald-600 text-white font-black text-xs flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
                       1
                     </div>
-                    <div className="flex-1 text-xs">
-                      <span className="text-[10px] uppercase font-bold text-emerald-600 block">
-                        Pickup Location
-                      </span>
+                    <div className="flex-1 text-xs space-y-0.5">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <span className="text-[10px] uppercase font-bold text-emerald-600">
+                          {selectedOrder.serviceType === 'parcel' ? 'Sender (Pickup)' : 'Pickup Location'}
+                        </span>
+                        {selectedOrder.serviceType === 'parcel' && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 text-gray-700 dark:text-zinc-200">
+                            {getParcelCashRuleSummary(selectedOrder).pickupStepLabel}
+                          </span>
+                        )}
+                      </div>
+                      {selectedOrder.serviceType === 'parcel' && (
+                        <p className="text-gray-800 dark:text-zinc-200 font-bold">
+                          {selectedOrder.pickup?.name ||
+                            selectedOrder.pickup?.contactName ||
+                            selectedOrder.pickup?.label ||
+                            selectedOrder.customerName ||
+                            'Sender'}
+                          {(selectedOrder.pickup?.phone || selectedOrder.pickup?.contactPhone) && (
+                            <span className="ml-1.5 font-mono text-[11px] font-normal text-gray-500">
+                              • {selectedOrder.pickup?.phone || selectedOrder.pickup?.contactPhone}
+                            </span>
+                          )}
+                        </p>
+                      )}
                       <p className="text-gray-900 dark:text-white font-medium">
                         {selectedOrder.pickup?.address || 'Pickup Point'}
                       </p>
+                      {selectedOrder.pickup?.note && (
+                        <p className="text-[11px] text-gray-500 dark:text-zinc-400 italic">
+                          Note: {selectedOrder.pickup.note}
+                        </p>
+                      )}
                     </div>
                   </div>
 
-                  {/* Stop 2: Dropoff (or first stop) */}
+                  {/* Stop 2: Dropoff (or multi-stop) */}
                   {selectedOrder.stops && selectedOrder.stops.length > 0 ? (
                     selectedOrder.stops.map((st, idx) => (
                       <div
@@ -3053,13 +3331,45 @@ export const LiveOrders: React.FC = () => {
                       <div className="w-6 h-6 rounded-full bg-red-600 text-white font-black text-xs flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
                         2
                       </div>
-                      <div className="flex-1 text-xs">
-                        <span className="text-[10px] uppercase font-bold text-red-600 block">
-                          Drop-Off Destination
-                        </span>
+                      <div className="flex-1 text-xs space-y-0.5">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-[10px] uppercase font-bold text-red-600">
+                            {selectedOrder.serviceType === 'parcel'
+                              ? 'Recipient (Drop-off)'
+                              : 'Drop-Off Destination'}
+                          </span>
+                          {selectedOrder.serviceType === 'parcel' && (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 text-gray-700 dark:text-zinc-200">
+                              {getParcelCashRuleSummary(selectedOrder).dropoffStepLabel}
+                            </span>
+                          )}
+                        </div>
+                        {selectedOrder.serviceType === 'parcel' && (
+                          <p className="text-gray-800 dark:text-zinc-200 font-bold">
+                            {selectedOrder.dropoff?.name ||
+                              selectedOrder.dropoff?.contactName ||
+                              selectedOrder.parcel?.recipientName ||
+                              'Recipient'}
+                            {(selectedOrder.dropoff?.phone ||
+                              selectedOrder.dropoff?.contactPhone ||
+                              selectedOrder.parcel?.recipientPhone) && (
+                              <span className="ml-1.5 font-mono text-[11px] font-normal text-gray-500">
+                                •{' '}
+                                {selectedOrder.dropoff?.phone ||
+                                  selectedOrder.dropoff?.contactPhone ||
+                                  selectedOrder.parcel?.recipientPhone}
+                              </span>
+                            )}
+                          </p>
+                        )}
                         <p className="text-gray-900 dark:text-white font-medium">
                           {selectedOrder.dropoff?.address || 'Customer destination'}
                         </p>
+                        {selectedOrder.dropoff?.note && (
+                          <p className="text-[11px] text-gray-500 dark:text-zinc-400 italic">
+                            Note: {selectedOrder.dropoff.note}
+                          </p>
+                        )}
                       </div>
                     </div>
                   )}
@@ -3132,19 +3442,67 @@ export const LiveOrders: React.FC = () => {
                     })}
 
                     {/* Parcel Details */}
-                    {selectedOrder.parcel && (
-                      <div className="p-3 bg-purple-50/50 dark:bg-purple-950/20 text-xs space-y-1">
-                        <div className="font-bold text-purple-900 dark:text-purple-300">
-                          Parcel Specifications:
+                    {(selectedOrder.parcel || selectedOrder.serviceType === 'parcel') && (
+                      <div className="p-3.5 bg-purple-50/50 dark:bg-purple-950/20 text-xs space-y-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="font-bold text-purple-900 dark:text-purple-300">
+                            Parcel Specifications
+                          </span>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-950 text-blue-800 dark:text-blue-300 font-bold text-[10px]">
+                              Vehicle: {getParcelVehicleLabel(selectedOrder.vehicleType)}
+                              {normalizeParcelVehicle(selectedOrder.vehicleType) === 'sedan'
+                                ? ' (4- or 8-wheel car)'
+                                : ''}
+                            </span>
+                            {selectedOrder.parcel?.fragile && (
+                              <span className="px-2 py-0.5 rounded bg-red-100 dark:bg-red-950 text-red-800 dark:text-red-300 font-bold text-[10px]">
+                                Fragile
+                              </span>
+                            )}
+                          </div>
                         </div>
-                        <p className="text-purple-800 dark:text-purple-400">
-                          Item: {selectedOrder.parcel.itemType || 'Package'} • Weight:{' '}
-                          {selectedOrder.parcel.weightKg || 1}kg
-                        </p>
-                        <p className="text-purple-700 dark:text-purple-400">
-                          Recipient: {selectedOrder.parcel.recipientName} (
-                          {selectedOrder.parcel.recipientPhone})
-                        </p>
+
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                          <div>
+                            <span className="text-gray-500 dark:text-zinc-400 block text-[10px]">Size</span>
+                            <span className="font-semibold text-gray-900 dark:text-white">
+                              {selectedOrder.parcel?.size || '—'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500 dark:text-zinc-400 block text-[10px]">Weight</span>
+                            <span className="font-semibold text-gray-900 dark:text-white">
+                              {selectedOrder.parcel?.weightKg !== undefined
+                                ? `${selectedOrder.parcel.weightKg} kg`
+                                : '—'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500 dark:text-zinc-400 block text-[10px]">
+                              Delivery Fee Payer
+                            </span>
+                            <span className="font-semibold text-gray-900 dark:text-white capitalize">
+                              {getParcelFeePayer(selectedOrder) || '—'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500 dark:text-zinc-400 block text-[10px]">
+                              Description / Item
+                            </span>
+                            <span className="font-semibold text-gray-900 dark:text-white">
+                              {selectedOrder.parcel?.description ||
+                                selectedOrder.parcel?.itemType ||
+                                'Package'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {selectedOrder.parcel?.notes && (
+                          <p className="text-purple-700 dark:text-purple-400 italic text-[11px]">
+                            Notes: {selectedOrder.parcel.notes}
+                          </p>
+                        )}
                       </div>
                     )}
 
@@ -3252,18 +3610,35 @@ export const LiveOrders: React.FC = () => {
                     </div>
                   )}
 
-                  <div className="flex items-center justify-between">
-                    <span className="text-gray-500">COD Collected:</span>
-                    <span
-                      className={`font-bold text-xs ${
-                        Number(selectedOrder.codCollected || 0) > 0
-                          ? 'text-emerald-600 dark:text-emerald-400'
-                          : 'text-gray-400'
-                      }`}
-                    >
-                      ₱{Number(selectedOrder.codCollected || 0).toFixed(2)}
-                    </span>
-                  </div>
+                  {selectedOrder.serviceType === 'parcel' && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-500">Delivery Fee Payer:</span>
+                      <span className="font-bold capitalize text-gray-800 dark:text-zinc-200">
+                        {getParcelFeePayer(selectedOrder) || '—'}
+                      </span>
+                    </div>
+                  )}
+
+                  {(() => {
+                    const cashCollectedAmount = getOrderCashCollectedAmount(selectedOrder);
+                    return (
+                      <div className="flex items-center justify-between">
+                        <span className="text-gray-500">COD / Cash Collected:</span>
+                        <span
+                          className={`font-bold text-xs ${
+                            cashCollectedAmount > 0
+                              ? 'text-emerald-600 dark:text-emerald-400'
+                              : 'text-gray-400'
+                          }`}
+                        >
+                          ₱{cashCollectedAmount.toFixed(2)}
+                          {selectedOrder.cashCollectedStage
+                            ? ` (at ${selectedOrder.cashCollectedStage})`
+                            : ''}
+                        </span>
+                      </div>
+                    );
+                  })()}
 
                   <div className="flex items-center justify-between">
                     <span className="text-gray-500">Wallet Refunded:</span>

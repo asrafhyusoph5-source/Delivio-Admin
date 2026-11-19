@@ -8,6 +8,7 @@ import {
   getDoc,
   setDoc,
   updateDoc,
+  deleteField,
   Timestamp
 } from '../firebase';
 import { useCity } from '../context/CityContext';
@@ -24,7 +25,10 @@ import type {
   TaxiVehicleRates,
   RiderPayConfig,
   DispatchSettings,
-  DeliveryOptionType
+  DeliveryOptionType,
+  ParcelVehicleType,
+  ParcelVehicleRates,
+  ParcelRatesByVehicle
 } from '../types';
 import {
   VEHICLE_TYPES,
@@ -84,6 +88,94 @@ const DEFAULT_SERVICE_RATES: ServiceRates = {
   serviceFeeMax: 0
 };
 
+const DEFAULT_PARCEL_VEHICLE_RATES: ParcelVehicleRates = {
+  baseFare: 40,
+  includedKm: 2,
+  perKm: 10,
+  minFee: 40,
+  maxFee: 350,
+  serviceFeeType: 'flat',
+  serviceFee: 10,
+  serviceFeeMin: 0,
+  serviceFeeMax: 0,
+  driverShare: 80,
+  maxWeightKg: 20,
+  peakEnabled: false,
+  peakMultiplier: 1.2,
+  nightEnabled: false,
+  nightFlat: 25
+};
+
+function sanitizeParcelVehicleRates(
+  raw: any,
+  defaultWeightKg: number,
+  fallbackCommission: number,
+  fallbackSurcharges?: { peak?: { enabled?: boolean; multiplier?: number }; night?: { enabled?: boolean; flat?: number } }
+): ParcelVehicleRates {
+  return {
+    baseFare: Number(raw?.baseFare ?? DEFAULT_PARCEL_VEHICLE_RATES.baseFare) || 0,
+    includedKm: Number(raw?.includedKm ?? DEFAULT_PARCEL_VEHICLE_RATES.includedKm) || 0,
+    perKm: Number(raw?.perKm ?? DEFAULT_PARCEL_VEHICLE_RATES.perKm) || 0,
+    minFee: Number(raw?.minFee ?? DEFAULT_PARCEL_VEHICLE_RATES.minFee) || 0,
+    maxFee: Number(raw?.maxFee ?? DEFAULT_PARCEL_VEHICLE_RATES.maxFee) || 0,
+    serviceFeeType: raw?.serviceFeeType === 'percent' ? 'percent' : 'flat',
+    serviceFee: Number(raw?.serviceFee ?? DEFAULT_PARCEL_VEHICLE_RATES.serviceFee) || 0,
+    serviceFeeMin: Number(raw?.serviceFeeMin ?? 0) || 0,
+    serviceFeeMax: Number(raw?.serviceFeeMax ?? 0) || 0,
+    driverShare: Number(raw?.driverShare ?? fallbackCommission ?? 80),
+    maxWeightKg: Number(raw?.maxWeightKg ?? defaultWeightKg) || defaultWeightKg,
+    peakEnabled: Boolean(raw?.peakEnabled ?? raw?.peak?.enabled ?? fallbackSurcharges?.peak?.enabled ?? false),
+    peakMultiplier: Number(raw?.peakMultiplier ?? raw?.peak?.multiplier ?? fallbackSurcharges?.peak?.multiplier ?? 1.2) || 1.2,
+    nightEnabled: Boolean(raw?.nightEnabled ?? raw?.night?.enabled ?? fallbackSurcharges?.night?.enabled ?? false),
+    nightFlat: Number(raw?.nightFlat ?? raw?.night?.flat ?? fallbackSurcharges?.night?.flat ?? 25) || 0
+  };
+}
+
+function normalizeParcelConfig(
+  rawParcel: any,
+  fallbackCommission: number,
+  fallbackSurcharges?: { peak?: { enabled?: boolean; multiplier?: number }; night?: { enabled?: boolean; flat?: number } }
+): { parcel: ParcelRatesByVehicle; migrated: boolean; sedanConfigured: boolean } {
+  if (rawParcel && typeof rawParcel === 'object' && rawParcel.motorcycle && typeof rawParcel.motorcycle === 'object') {
+    const moto = sanitizeParcelVehicleRates(rawParcel.motorcycle, 20, fallbackCommission, fallbackSurcharges);
+    const hasSedan = Boolean(rawParcel.sedan && typeof rawParcel.sedan === 'object' && 'baseFare' in rawParcel.sedan);
+    const sedan = hasSedan
+      ? sanitizeParcelVehicleRates(rawParcel.sedan, 100, moto.driverShare ?? fallbackCommission, fallbackSurcharges)
+      : { ...moto, maxWeightKg: 100 };
+    return {
+      parcel: { motorcycle: moto, sedan },
+      migrated: false,
+      sedanConfigured: hasSedan
+    };
+  }
+
+  if (
+    rawParcel &&
+    typeof rawParcel === 'object' &&
+    ('baseFare' in rawParcel || 'perKm' in rawParcel || 'minFee' in rawParcel)
+  ) {
+    const moto = sanitizeParcelVehicleRates(rawParcel, 20, fallbackCommission, fallbackSurcharges);
+    return {
+      parcel: {
+        motorcycle: moto,
+        sedan: { ...moto, maxWeightKg: 100 }
+      },
+      migrated: true,
+      sedanConfigured: false
+    };
+  }
+
+  const moto = sanitizeParcelVehicleRates(null, 20, fallbackCommission, fallbackSurcharges);
+  return {
+    parcel: {
+      motorcycle: moto,
+      sedan: { ...moto, maxWeightKg: 100 }
+    },
+    migrated: false,
+    sedanConfigured: false
+  };
+}
+
 export const DeliveryRates: React.FC = () => {
   const { cities, refreshCities } = useCity();
   const { adminProfile } = useAuth();
@@ -98,6 +190,11 @@ export const DeliveryRates: React.FC = () => {
 
   // Selected Service sub-tab for Delivery Rates config
   const [activeServiceTab, setActiveServiceTab] = useState<DeliveryServiceType>('food');
+
+  // Selected Parcel vehicle sub-tab ("motorcycle" | "sedan") + migration & draft flags
+  const [activeParcelVehicleTab, setActiveParcelVehicleTab] = useState<ParcelVehicleType>('motorcycle');
+  const [parcelMigrated, setParcelMigrated] = useState<boolean>(false);
+  const [sedanConfigured, setSedanConfigured] = useState<boolean>(false);
 
   // Selected Vehicle sub-tab for Taxi Fares config
   const [activeVehicleTab, setActiveVehicleTab] = useState<VehicleType>('motorcycle');
@@ -118,6 +215,7 @@ export const DeliveryRates: React.FC = () => {
 
   // Delivery Fee Simulator States
   const [calcService, setCalcService] = useState<DeliveryServiceType>('food');
+  const [calcParcelVehicle, setCalcParcelVehicle] = useState<ParcelVehicleType>('motorcycle');
   const [calcItemSubtotal, setCalcItemSubtotal] = useState<number>(350);
   const [calcDeliveryDistance, setCalcDeliveryDistance] = useState<number>(4.5);
   const [calcIsNight, setCalcIsNight] = useState<boolean>(false);
@@ -131,6 +229,7 @@ export const DeliveryRates: React.FC = () => {
 
   // Rider Pay Calculator States
   const [calcRiderPayMode, setCalcRiderPayMode] = useState<'single' | 'double' | 'triple'>('single');
+  const [calcRiderSingleVehicle, setCalcRiderSingleVehicle] = useState<'standard' | 'parcelSedan'>('standard');
   const [calcRiderPickupDist, setCalcRiderPickupDist] = useState<number>(1.2);
   const [calcRiderOrder1Dist, setCalcRiderOrder1Dist] = useState<number>(3.5);
   const [calcRiderOrder2Dist, setCalcRiderOrder2Dist] = useState<number>(4.0);
@@ -181,46 +280,65 @@ export const DeliveryRates: React.FC = () => {
         if (snap.exists()) {
           const dt = snap.data();
           const svcs = dt.services || {};
+          const cityComm = dt.riderCommissionPercent ?? 80;
+          const citySurcharges = dt.surcharges || {
+            peak: { enabled: false, multiplier: 1.2 },
+            night: { enabled: false, flat: 25 }
+          };
+          const normParcel = normalizeParcelConfig(dt.parcel || svcs.parcel, cityComm, citySurcharges);
+          const rawRiderPay = dt.riderPay || DEFAULT_RIDER_PAY;
+          const singlePay = rawRiderPay.single || DEFAULT_RIDER_PAY.single;
+          const parcelSedanPay = rawRiderPay.parcelSedan || { ...singlePay };
+
+          setParcelMigrated(normParcel.migrated);
+          setSedanConfigured(normParcel.sedanConfigured);
+
           setRatesConfig({
             id: snap.id,
             food: svcs.food || dt.food || { ...DEFAULT_SERVICE_RATES },
             convenience: svcs.convenience || dt.convenience || { ...DEFAULT_SERVICE_RATES },
-            parcel: svcs.parcel || dt.parcel || { ...DEFAULT_SERVICE_RATES, baseFare: 40, perKm: 10 },
+            parcel: normParcel.parcel,
             pabili: svcs.pabili || dt.pabili || { ...DEFAULT_SERVICE_RATES, baseFare: 60, serviceFee: 20 },
             request_rider: svcs.request_rider || dt.request_rider || { ...DEFAULT_SERVICE_RATES, baseFare: 50 },
             services: {
               food: svcs.food || dt.food || { ...DEFAULT_SERVICE_RATES },
               convenience: svcs.convenience || dt.convenience || { ...DEFAULT_SERVICE_RATES },
-              parcel: svcs.parcel || dt.parcel || { ...DEFAULT_SERVICE_RATES, baseFare: 40, perKm: 10 },
+              parcel: normParcel.parcel,
               pabili: svcs.pabili || dt.pabili || { ...DEFAULT_SERVICE_RATES, baseFare: 60, serviceFee: 20 },
               request_rider: svcs.request_rider || dt.request_rider || { ...DEFAULT_SERVICE_RATES, baseFare: 50 }
             },
             rideRates: dt.rideRates || { ...DEFAULT_TAXI_RATES },
-            riderPay: dt.riderPay || { ...DEFAULT_RIDER_PAY },
-            riderCommissionPercent: dt.riderCommissionPercent ?? 80,
-            surcharges: dt.surcharges || {
-              peak: { enabled: false, multiplier: 1.2 },
-              night: { enabled: false, flat: 25 }
-            }
+            riderPay: {
+              ...DEFAULT_RIDER_PAY,
+              ...rawRiderPay,
+              single: singlePay,
+              parcelSedan: parcelSedanPay
+            },
+            riderCommissionPercent: cityComm,
+            surcharges: citySurcharges
           });
         } else {
           // Provide default template including DEFAULT_TAXI_RATES and DEFAULT_RIDER_PAY
+          const normParcel = normalizeParcelConfig(null, 80);
+          setParcelMigrated(false);
+          setSedanConfigured(false);
+
           setRatesConfig({
             id: activeCityId,
             food: { ...DEFAULT_SERVICE_RATES },
             convenience: { ...DEFAULT_SERVICE_RATES },
-            parcel: { ...DEFAULT_SERVICE_RATES, baseFare: 40, perKm: 10 },
+            parcel: normParcel.parcel,
             pabili: { ...DEFAULT_SERVICE_RATES, baseFare: 60, serviceFee: 20 },
             request_rider: { ...DEFAULT_SERVICE_RATES, baseFare: 50 },
             services: {
               food: { ...DEFAULT_SERVICE_RATES },
               convenience: { ...DEFAULT_SERVICE_RATES },
-              parcel: { ...DEFAULT_SERVICE_RATES, baseFare: 40, perKm: 10 },
+              parcel: normParcel.parcel,
               pabili: { ...DEFAULT_SERVICE_RATES, baseFare: 60, serviceFee: 20 },
               request_rider: { ...DEFAULT_SERVICE_RATES, baseFare: 50 }
             },
             rideRates: { ...DEFAULT_TAXI_RATES },
-            riderPay: { ...DEFAULT_RIDER_PAY },
+            riderPay: { ...DEFAULT_RIDER_PAY, parcelSedan: { ...DEFAULT_RIDER_PAY.single } },
             riderCommissionPercent: 80,
             surcharges: {
               peak: { enabled: false, multiplier: 1.2 },
@@ -364,13 +482,52 @@ export const DeliveryRates: React.FC = () => {
     }
   };
 
-  // Update delivery service rate field
+  // Update delivery service rate field (or active parcel vehicle field)
   const updateDeliveryRateField = (
-    field: keyof ServiceRates,
+    field: keyof ParcelVehicleRates,
     value: any
   ) => {
     if (!ratesConfig) return;
-    const currentServiceRates = ratesConfig[activeServiceTab] || DEFAULT_SERVICE_RATES;
+
+    if (activeServiceTab === 'parcel') {
+      const curVehicleRates = ratesConfig.parcel[activeParcelVehicleTab] || { ...DEFAULT_PARCEL_VEHICLE_RATES };
+      const parsedVal =
+        field === 'serviceFeeType'
+          ? value
+          : field === 'peakEnabled' || field === 'nightEnabled'
+          ? Boolean(value)
+          : Number(value);
+
+      const updatedVehicle: ParcelVehicleRates = {
+        ...curVehicleRates,
+        [field]: parsedVal
+      };
+
+      const nextParcel: ParcelRatesByVehicle = {
+        ...ratesConfig.parcel,
+        [activeParcelVehicleTab]: updatedVehicle
+      };
+
+      // While Sedan has not been explicitly saved yet, mirror Motorcycle changes into the Sedan draft (except maxWeightKg stays 100)
+      if (activeParcelVehicleTab === 'motorcycle' && !sedanConfigured) {
+        nextParcel.sedan = {
+          ...updatedVehicle,
+          maxWeightKg: ratesConfig.parcel.sedan?.maxWeightKg ?? 100
+        };
+      }
+
+      setRatesConfig({
+        ...ratesConfig,
+        parcel: nextParcel,
+        services: {
+          ...(ratesConfig.services || {}),
+          parcel: nextParcel
+        }
+      });
+      return;
+    }
+
+    const currentServiceRates = (ratesConfig[activeServiceTab] as ServiceRates) || DEFAULT_SERVICE_RATES;
     const updatedRates: ServiceRates = {
       ...currentServiceRates,
       [field]: field === 'serviceFeeType' ? value : Number(value)
@@ -407,20 +564,25 @@ export const DeliveryRates: React.FC = () => {
     });
   };
 
-  // Update Rider Pay Single or Pickup field
+  // Update Rider Pay Single, Parcel Sedan, or Pickup field
   const updateRiderPayField = (
-    tier: 'single' | 'pickup',
+    tier: 'single' | 'parcelSedan' | 'pickup',
     field: string,
     value: any
   ) => {
     if (!ratesConfig) return;
     const currentPay = ratesConfig.riderPay || DEFAULT_RIDER_PAY;
+    const existingTier =
+      tier === 'parcelSedan'
+        ? currentPay.parcelSedan || currentPay.single || DEFAULT_RIDER_PAY.single
+        : currentPay[tier];
+
     setRatesConfig({
       ...ratesConfig,
       riderPay: {
         ...currentPay,
         [tier]: {
-          ...currentPay[tier],
+          ...existingTier,
           [field]: Math.max(0, Number(value))
         }
       }
@@ -450,32 +612,90 @@ export const DeliveryRates: React.FC = () => {
     });
   };
 
+  const isSavingSedanNow =
+    activeMainTab === 'delivery' &&
+    activeServiceTab === 'parcel' &&
+    activeParcelVehicleTab === 'sedan';
+
   // Save Rates to Firestore
   const handleSaveRates = async () => {
     if (!ratesConfig || !activeCityId) return;
     try {
       setSavingRates(true);
       const rateRef = doc(db, 'deliveryRates', activeCityId);
+      const shouldWriteSedan = sedanConfigured || isSavingSedanNow;
+
+      const cleanMoto = sanitizeParcelVehicleRates(
+        ratesConfig.parcel.motorcycle,
+        20,
+        ratesConfig.riderCommissionPercent ?? 80,
+        ratesConfig.surcharges
+      );
+
+      // Remove legacy flat fields from parcel map cleanly; only write parcel.sedan if configured or explicitly saving Sedan
+      const parcelFirestorePayload: Record<string, any> = {
+        motorcycle: cleanMoto,
+        baseFare: deleteField(),
+        includedKm: deleteField(),
+        perKm: deleteField(),
+        minFee: deleteField(),
+        maxFee: deleteField(),
+        serviceFee: deleteField(),
+        serviceFeeType: deleteField(),
+        serviceFeeMin: deleteField(),
+        serviceFeeMax: deleteField(),
+        driverShare: deleteField(),
+        maxWeightKg: deleteField(),
+        peakEnabled: deleteField(),
+        peakMultiplier: deleteField(),
+        nightEnabled: deleteField(),
+        nightFlat: deleteField()
+      };
+
+      if (shouldWriteSedan) {
+        parcelFirestorePayload.sedan = sanitizeParcelVehicleRates(
+          ratesConfig.parcel.sedan,
+          100,
+          cleanMoto.driverShare ?? ratesConfig.riderCommissionPercent ?? 80,
+          ratesConfig.surcharges
+        );
+      } else {
+        parcelFirestorePayload.sedan = deleteField();
+      }
+
+      const riderPayToSave: RiderPayConfig = {
+        ...(ratesConfig.riderPay || DEFAULT_RIDER_PAY),
+        parcelSedan:
+          ratesConfig.riderPay?.parcelSedan ||
+          ratesConfig.riderPay?.single ||
+          DEFAULT_RIDER_PAY.single
+      };
+
       const payload = {
         ...ratesConfig,
         services: {
           food: ratesConfig.food,
           convenience: ratesConfig.convenience,
-          parcel: ratesConfig.parcel,
+          parcel: parcelFirestorePayload,
           pabili: ratesConfig.pabili,
           request_rider: ratesConfig.request_rider
         },
         food: ratesConfig.food,
         convenience: ratesConfig.convenience,
-        parcel: ratesConfig.parcel,
+        parcel: parcelFirestorePayload,
         pabili: ratesConfig.pabili,
         request_rider: ratesConfig.request_rider,
         rideRates: ratesConfig.rideRates,
-        riderPay: ratesConfig.riderPay || DEFAULT_RIDER_PAY,
+        riderPay: riderPayToSave,
         updatedAt: nowTs()
       };
 
       await setDoc(rateRef, payload, { merge: true });
+
+      setParcelMigrated(false);
+      if (shouldWriteSedan) {
+        setSedanConfigured(true);
+      }
 
       await logAuditEvent({
         adminId: adminProfile?.uid || 'admin',
@@ -483,10 +703,14 @@ export const DeliveryRates: React.FC = () => {
         action: 'UPDATE_DELIVERY_AND_TAXI_RATES',
         entityType: 'deliveryRates',
         entityId: activeCityId,
-        details: `Saved rates & fares (services, rideRates & riderPay) for city ${activeCityId}`
+        details: `Saved rates & fares (services, parcel${shouldWriteSedan ? ' motorcycle+sedan' : ' motorcycle'}, rideRates & riderPay) for city ${activeCityId}`
       });
 
-      showSuccess('Rates & Fares schedule saved successfully.');
+      showSuccess(
+        isSavingSedanNow && !sedanConfigured
+          ? 'Parcel Sedan fares saved and enabled for this city.'
+          : 'Rates & Fares schedule saved successfully.'
+      );
       setConfirmSaveRatesModal(false);
     } catch (err: any) {
       showError(err);
@@ -498,22 +722,39 @@ export const DeliveryRates: React.FC = () => {
   // Rider Pay Memo Calculation
   const calculatedRiderPay = useMemo(() => {
     const payConfig = ratesConfig?.riderPay || DEFAULT_RIDER_PAY;
-    const pickupFare = payConfig.pickup.minFare + Math.max(0, calcRiderPickupDist - payConfig.pickup.freeKm) * payConfig.pickup.perKmExtra;
+    const pickupFare =
+      payConfig.pickup.minFare +
+      Math.max(0, calcRiderPickupDist - payConfig.pickup.freeKm) * payConfig.pickup.perKmExtra;
 
     let booking1Fare = 0;
     let booking2Fare = 0;
     let booking3Fare = 0;
 
     if (calcRiderPayMode === 'single') {
-      booking1Fare = payConfig.single.minFare + Math.max(0, calcRiderOrder1Dist - payConfig.single.includedKm) * payConfig.single.perKmExtra;
+      const singleTier =
+        calcRiderSingleVehicle === 'parcelSedan'
+          ? payConfig.parcelSedan || payConfig.single
+          : payConfig.single;
+      booking1Fare =
+        singleTier.minFare +
+        Math.max(0, calcRiderOrder1Dist - singleTier.includedKm) * singleTier.perKmExtra;
     } else {
       // First booking uses double.first
-      booking1Fare = payConfig.double.first.minFare + Math.max(0, calcRiderOrder1Dist - payConfig.double.first.includedKm) * payConfig.double.first.perKmExtra;
+      booking1Fare =
+        payConfig.double.first.minFare +
+        Math.max(0, calcRiderOrder1Dist - payConfig.double.first.includedKm) *
+          payConfig.double.first.perKmExtra;
       // Second booking uses double.second
-      booking2Fare = payConfig.double.second.minFare + Math.max(0, calcRiderOrder2Dist - payConfig.double.second.includedKm) * payConfig.double.second.perKmExtra;
+      booking2Fare =
+        payConfig.double.second.minFare +
+        Math.max(0, calcRiderOrder2Dist - payConfig.double.second.includedKm) *
+          payConfig.double.second.perKmExtra;
       if (calcRiderPayMode === 'triple') {
         // Third booking uses double.third
-        booking3Fare = payConfig.double.third.minFare + Math.max(0, calcRiderOrder3Dist - payConfig.double.third.includedKm) * payConfig.double.third.perKmExtra;
+        booking3Fare =
+          payConfig.double.third.minFare +
+          Math.max(0, calcRiderOrder3Dist - payConfig.double.third.includedKm) *
+            payConfig.double.third.perKmExtra;
       }
     }
 
@@ -533,7 +774,15 @@ export const DeliveryRates: React.FC = () => {
       avgPerBooking,
       payConfig
     };
-  }, [ratesConfig, calcRiderPayMode, calcRiderPickupDist, calcRiderOrder1Dist, calcRiderOrder2Dist, calcRiderOrder3Dist]);
+  }, [
+    ratesConfig,
+    calcRiderPayMode,
+    calcRiderSingleVehicle,
+    calcRiderPickupDist,
+    calcRiderOrder1Dist,
+    calcRiderOrder2Dist,
+    calcRiderOrder3Dist
+  ]);
 
   // 1. Delivery Fee Simulator Calculation (Percent applies to items subtotal + delivery fee)
   const calculatedDeliveryFee = useMemo(() => {
@@ -549,10 +798,16 @@ export const DeliveryRates: React.FC = () => {
         itemsSubtotal: calcItemSubtotal,
         grandTotal: 0,
         driverCut: 0,
+        driverSharePercent: 80,
         platformMargin: 0
       };
     }
-    const rates = ratesConfig[calcService] || DEFAULT_SERVICE_RATES;
+
+    const parcelVehicleCfg = ratesConfig.parcel?.[calcParcelVehicle] || DEFAULT_PARCEL_VEHICLE_RATES;
+    const rates: ServiceRates =
+      calcService === 'parcel'
+        ? parcelVehicleCfg
+        : (ratesConfig[calcService] as ServiceRates) || DEFAULT_SERVICE_RATES;
 
     const baseFare = Number(rates.baseFare) || 0;
     const includedKm = Number(rates.includedKm) || 0;
@@ -564,13 +819,29 @@ export const DeliveryRates: React.FC = () => {
     if (rates.minFee && deliverySubtotal < rates.minFee) deliverySubtotal = rates.minFee;
     if (rates.maxFee && deliverySubtotal > rates.maxFee) deliverySubtotal = rates.maxFee;
 
+    const peakEnabled =
+      calcService === 'parcel'
+        ? Boolean(parcelVehicleCfg.peakEnabled)
+        : Boolean(ratesConfig.surcharges?.peak?.enabled);
+    const peakMult =
+      calcService === 'parcel'
+        ? Number(parcelVehicleCfg.peakMultiplier || 1.2)
+        : Number(ratesConfig.surcharges?.peak?.multiplier || 1.2);
+    const nightEnabled =
+      calcService === 'parcel'
+        ? Boolean(parcelVehicleCfg.nightEnabled)
+        : Boolean(ratesConfig.surcharges?.night?.enabled);
+    const nightFlat =
+      calcService === 'parcel'
+        ? Number(parcelVehicleCfg.nightFlat || 25)
+        : Number(ratesConfig.surcharges?.night?.flat || 25);
+
     let surchargeTotal = 0;
-    if (calcIsPeak && ratesConfig.surcharges?.peak?.enabled) {
-      const mult = ratesConfig.surcharges.peak.multiplier || 1.2;
-      surchargeTotal += deliverySubtotal * (mult - 1);
+    if (calcIsPeak && peakEnabled) {
+      surchargeTotal += deliverySubtotal * (peakMult - 1);
     }
-    if (calcIsNight && ratesConfig.surcharges?.night?.enabled) {
-      surchargeTotal += ratesConfig.surcharges.night.flat || 25;
+    if (calcIsNight && nightEnabled) {
+      surchargeTotal += nightFlat;
     }
 
     const totalDeliveryFee = deliverySubtotal + surchargeTotal;
@@ -599,7 +870,10 @@ export const DeliveryRates: React.FC = () => {
     }
 
     const grandTotal = calcItemSubtotal + totalDeliveryFee + calculatedServiceFee;
-    const driverCommission = ratesConfig.riderCommissionPercent ?? 80;
+    const driverCommission =
+      calcService === 'parcel'
+        ? Number(parcelVehicleCfg.driverShare ?? ratesConfig.riderCommissionPercent ?? 80)
+        : Number(ratesConfig.riderCommissionPercent ?? 80);
     const driverCut = (totalDeliveryFee * driverCommission) / 100;
     const platformMargin = (totalDeliveryFee - driverCut) + calculatedServiceFee;
 
@@ -614,9 +888,10 @@ export const DeliveryRates: React.FC = () => {
       itemsSubtotal: calcItemSubtotal,
       grandTotal,
       driverCut,
+      driverSharePercent: driverCommission,
       platformMargin
     };
-  }, [ratesConfig, calcService, calcDeliveryDistance, calcIsPeak, calcIsNight, calcItemSubtotal]);
+  }, [ratesConfig, calcService, calcParcelVehicle, calcDeliveryDistance, calcIsPeak, calcIsNight, calcItemSubtotal]);
 
   // 2. Taxi Fare Calculator Calculation (Percent applies to ride fare + stop fee)
   const calculatedTaxiFare = useMemo(() => {
@@ -898,291 +1173,451 @@ export const DeliveryRates: React.FC = () => {
                 <button
                   key={srv}
                   onClick={() => setActiveServiceTab(srv)}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-bold capitalize transition-all ${
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold capitalize transition-all flex items-center gap-1.5 ${
                     activeServiceTab === srv
                       ? 'bg-amber-400 text-black shadow-xs font-black'
                       : 'bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-zinc-400 hover:bg-gray-200'
                   }`}
                 >
-                  {srv.replace('_', ' ')}
+                  <span>{srv.replace('_', ' ')}</span>
+                  {srv === 'parcel' && parcelMigrated && (
+                    <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-900/15 text-amber-900 dark:bg-amber-300/20 dark:text-amber-200">
+                      Migrated
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
 
+            {/* Parcel Vehicle Sub-Tabs & Status Banners */}
+            {activeServiceTab === 'parcel' && (
+              <div className="space-y-3">
+                <div className="flex flex-wrap gap-2 p-1.5 rounded-xl bg-gray-100 dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700">
+                  <button
+                    type="button"
+                    onClick={() => setActiveParcelVehicleTab('motorcycle')}
+                    className={`flex-1 min-w-[140px] py-2 px-3 rounded-lg text-xs font-extrabold transition-all flex items-center justify-center gap-2 ${
+                      activeParcelVehicleTab === 'motorcycle'
+                        ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-white shadow-xs border border-amber-300 dark:border-amber-700'
+                        : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white'
+                    }`}
+                  >
+                    <Bike className="w-4 h-4 text-amber-500" />
+                    <span>Motorcycle</span>
+                    {parcelMigrated && (
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                        Migrated - review and save
+                      </span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setActiveParcelVehicleTab('sedan')}
+                    className={`flex-1 min-w-[180px] py-2 px-3 rounded-lg text-xs font-extrabold transition-all flex items-center justify-center gap-2 ${
+                      activeParcelVehicleTab === 'sedan'
+                        ? 'bg-white dark:bg-zinc-900 text-gray-900 dark:text-white shadow-xs border border-amber-300 dark:border-amber-700'
+                        : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white'
+                    }`}
+                  >
+                    <Car className="w-4 h-4 text-blue-500" />
+                    <span>Sedan (4 and 8 wheel cars)</span>
+                    {!sedanConfigured && (
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-red-100 text-red-700 dark:bg-red-950/70 dark:text-red-300">
+                        Not set yet
+                      </span>
+                    )}
+                  </button>
+                </div>
+
+                {parcelMigrated && (
+                  <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 flex items-center justify-between gap-3 text-xs">
+                    <div className="flex items-center gap-2.5 text-amber-900 dark:text-amber-200">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                      <div>
+                        <span className="font-extrabold">Migrated - review and save:</span>{' '}
+                        <span>
+                          Existing city parcel fares were copied into <strong>Motorcycle</strong> (with max weight 20 kg). Review values and save to persist the new structure.
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {activeParcelVehicleTab === 'sedan' && !sedanConfigured && (
+                  <div className="p-3.5 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                    <div className="flex items-start gap-2.5 text-red-900 dark:text-red-200">
+                      <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                      <div>
+                        <span className="font-black uppercase tracking-wide block">
+                          Sedan fares not set yet
+                        </span>
+                        <span className="text-[11px] text-red-800 dark:text-red-300">
+                          Starting values below mirror Motorcycle (with max weight 100 kg). <code>parcel.sedan</code> will not be written to Firestore until you explicitly save on this Sedan tab.
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmSaveRatesModal(true)}
+                      className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold flex items-center gap-1.5 shrink-0 self-start sm:self-auto"
+                    >
+                      <Save className="w-3.5 h-3.5" /> Save Sedan Fares
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Rate Inputs */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                  Base Fare (₱)
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  value={ratesConfig[activeServiceTab]?.baseFare || 0}
-                  onChange={(e) => updateDeliveryRateField('baseFare', Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
-                />
-              </div>
+            {(() => {
+              const activeFormRates: Partial<ParcelVehicleRates> =
+                activeServiceTab === 'parcel'
+                  ? ratesConfig.parcel?.[activeParcelVehicleTab] || DEFAULT_PARCEL_VEHICLE_RATES
+                  : (ratesConfig[activeServiceTab] as ServiceRates) || DEFAULT_SERVICE_RATES;
+              const activeDriverShare =
+                activeServiceTab === 'parcel'
+                  ? Number(activeFormRates.driverShare ?? ratesConfig.riderCommissionPercent ?? 80)
+                  : Number(ratesConfig.riderCommissionPercent ?? 80);
+              const activePeakEnabled =
+                activeServiceTab === 'parcel'
+                  ? Boolean(activeFormRates.peakEnabled)
+                  : Boolean(ratesConfig.surcharges?.peak?.enabled);
+              const activePeakMultiplier =
+                activeServiceTab === 'parcel'
+                  ? Number(activeFormRates.peakMultiplier ?? 1.2)
+                  : Number(ratesConfig.surcharges?.peak?.multiplier ?? 1.2);
+              const activeNightEnabled =
+                activeServiceTab === 'parcel'
+                  ? Boolean(activeFormRates.nightEnabled)
+                  : Boolean(ratesConfig.surcharges?.night?.enabled);
+              const activeNightFlat =
+                activeServiceTab === 'parcel'
+                  ? Number(activeFormRates.nightFlat ?? 25)
+                  : Number(ratesConfig.surcharges?.night?.flat ?? 25);
 
-              <div>
-                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                  Included Distance (km)
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={ratesConfig[activeServiceTab]?.includedKm || 0}
-                  onChange={(e) => updateDeliveryRateField('includedKm', Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
-                />
-              </div>
+              return (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Base Fare (₱)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={activeFormRates.baseFare || 0}
+                        onChange={(e) => updateDeliveryRateField('baseFare', Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                      />
+                    </div>
 
-              <div>
-                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                  Per Additional Km (₱)
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.5"
-                  value={ratesConfig[activeServiceTab]?.perKm || 0}
-                  onChange={(e) => updateDeliveryRateField('perKm', Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
-                />
-              </div>
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Included Distance (km)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={activeFormRates.includedKm || 0}
+                        onChange={(e) => updateDeliveryRateField('includedKm', Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                      />
+                    </div>
 
-              <div>
-                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                  Minimum Fee (₱)
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  value={ratesConfig[activeServiceTab]?.minFee || 0}
-                  onChange={(e) => updateDeliveryRateField('minFee', Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
-                />
-              </div>
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Per Additional Km (₱)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        value={activeFormRates.perKm || 0}
+                        onChange={(e) => updateDeliveryRateField('perKm', Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                      />
+                    </div>
 
-              <div>
-                <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                  Maximum Fee (₱)
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  value={ratesConfig[activeServiceTab]?.maxFee || 0}
-                  onChange={(e) => updateDeliveryRateField('maxFee', Number(e.target.value))}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
-                />
-              </div>
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Minimum Fee (₱)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={activeFormRates.minFee || 0}
+                        onChange={(e) => updateDeliveryRateField('minFee', Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                      />
+                    </div>
 
-              {/* Platform Service Fee Configuration */}
-              <div className="sm:col-span-2 p-3.5 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/50 dark:bg-amber-950/20 space-y-3">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-amber-900 dark:text-amber-300">
-                      Platform Service Fee
-                    </label>
-                    <p className="text-[11px] text-amber-700/80 dark:text-amber-400/80">
-                      Charged to customer. If percent, applies to items subtotal + delivery fee.
-                    </p>
-                  </div>
-                  <div className="inline-flex rounded-lg border border-amber-300 dark:border-amber-800 p-0.5 bg-white dark:bg-zinc-900">
-                    <button
-                      type="button"
-                      onClick={() => updateDeliveryRateField('serviceFeeType', 'flat')}
-                      className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${
-                        (ratesConfig[activeServiceTab]?.serviceFeeType || 'flat') === 'flat'
-                          ? 'bg-amber-500 text-white shadow-xs'
-                          : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white'
-                      }`}
-                    >
-                      Flat ₱
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => updateDeliveryRateField('serviceFeeType', 'percent')}
-                      className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${
-                        ratesConfig[activeServiceTab]?.serviceFeeType === 'percent'
-                          ? 'bg-amber-500 text-white shadow-xs'
-                          : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white'
-                      }`}
-                    >
-                      Percent %
-                    </button>
-                  </div>
-                </div>
+                    <div>
+                      <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                        Maximum Fee (₱)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={activeFormRates.maxFee || 0}
+                        onChange={(e) => updateDeliveryRateField('maxFee', Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                      />
+                    </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                      {ratesConfig[activeServiceTab]?.serviceFeeType === 'percent' ? 'Fee Rate (%)' : 'Flat Fee (₱)'}
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      step={ratesConfig[activeServiceTab]?.serviceFeeType === 'percent' ? '0.1' : '1'}
-                      value={ratesConfig[activeServiceTab]?.serviceFee || 0}
-                      onChange={(e) => updateDeliveryRateField('serviceFee', Number(e.target.value))}
-                      className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-amber-600"
-                    />
-                  </div>
-
-                  {ratesConfig[activeServiceTab]?.serviceFeeType === 'percent' && (
-                    <>
+                    {activeServiceTab === 'parcel' && (
                       <div>
-                        <label className="block text-[11px] font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                          Min Fee Cap (₱) <span className="text-gray-400 lowercase">(optional)</span>
+                        <label className="block text-xs font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                          Max weight (kg)
                         </label>
                         <input
                           type="number"
-                          min="0"
-                          value={ratesConfig[activeServiceTab]?.serviceFeeMin || 0}
-                          onChange={(e) => updateDeliveryRateField('serviceFeeMin', Number(e.target.value))}
-                          placeholder="e.g. 5"
-                          className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                          min="1"
+                          step="1"
+                          value={
+                            activeFormRates.maxWeightKg ??
+                            (activeParcelVehicleTab === 'sedan' ? 100 : 20)
+                          }
+                          onChange={(e) => updateDeliveryRateField('maxWeightKg', Number(e.target.value))}
+                          className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                        />
+                        <span className="text-[10px] text-gray-400 mt-0.5 block">
+                          Default: {activeParcelVehicleTab === 'sedan' ? '100 kg' : '20 kg'}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Platform Service Fee Configuration */}
+                    <div className="sm:col-span-2 p-3.5 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/50 dark:bg-amber-950/20 space-y-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div>
+                          <label className="block text-xs font-bold uppercase tracking-wider text-amber-900 dark:text-amber-300">
+                            Platform Service Fee
+                          </label>
+                          <p className="text-[11px] text-amber-700/80 dark:text-amber-400/80">
+                            Charged to customer. If percent, applies to items subtotal + delivery fee.
+                          </p>
+                        </div>
+                        <div className="inline-flex rounded-lg border border-amber-300 dark:border-amber-800 p-0.5 bg-white dark:bg-zinc-900">
+                          <button
+                            type="button"
+                            onClick={() => updateDeliveryRateField('serviceFeeType', 'flat')}
+                            className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${
+                              (activeFormRates.serviceFeeType || 'flat') === 'flat'
+                                ? 'bg-amber-500 text-white shadow-xs'
+                                : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white'
+                            }`}
+                          >
+                            Flat ₱
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => updateDeliveryRateField('serviceFeeType', 'percent')}
+                            className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${
+                              activeFormRates.serviceFeeType === 'percent'
+                                ? 'bg-amber-500 text-white shadow-xs'
+                                : 'text-gray-600 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-white'
+                            }`}
+                          >
+                            Percent %
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                          <label className="block text-[11px] font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                            {activeFormRates.serviceFeeType === 'percent' ? 'Fee Rate (%)' : 'Flat Fee (₱)'}
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step={activeFormRates.serviceFeeType === 'percent' ? '0.1' : '1'}
+                            value={activeFormRates.serviceFee || 0}
+                            onChange={(e) => updateDeliveryRateField('serviceFee', Number(e.target.value))}
+                            className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-amber-600"
+                          />
+                        </div>
+
+                        {activeFormRates.serviceFeeType === 'percent' && (
+                          <>
+                            <div>
+                              <label className="block text-[11px] font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                                Min Fee Cap (₱) <span className="text-gray-400 lowercase">(optional)</span>
+                              </label>
+                              <input
+                                type="number"
+                                min="0"
+                                value={activeFormRates.serviceFeeMin || 0}
+                                onChange={(e) => updateDeliveryRateField('serviceFeeMin', Number(e.target.value))}
+                                placeholder="e.g. 5"
+                                className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
+                                Max Fee Cap (₱) <span className="text-gray-400 lowercase">(0 = no cap)</span>
+                              </label>
+                              <input
+                                type="number"
+                                min="0"
+                                value={activeFormRates.serviceFeeMax || 0}
+                                onChange={(e) => updateDeliveryRateField('serviceFeeMax', Number(e.target.value))}
+                                placeholder="0"
+                                className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                              />
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Driver Share & Surcharges Section */}
+                  <div className="pt-4 border-t border-gray-100 dark:border-zinc-800 space-y-4">
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-zinc-300 mb-1">
+                        {activeServiceTab === 'parcel'
+                          ? `Driver Share for Parcel ${activeParcelVehicleTab === 'sedan' ? 'Sedan' : 'Motorcycle'} (% of delivery fee)`
+                          : 'Driver Commission Share (% of delivery fee paid to driver)'}
+                      </label>
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="range"
+                          min="50"
+                          max="95"
+                          value={activeDriverShare}
+                          onChange={(e) => {
+                            if (activeServiceTab === 'parcel') {
+                              updateDeliveryRateField('driverShare', Number(e.target.value));
+                            } else {
+                              setRatesConfig({
+                                ...ratesConfig,
+                                riderCommissionPercent: Number(e.target.value)
+                              });
+                            }
+                          }}
+                          className="flex-1 accent-amber-500"
+                        />
+                        <span className="font-black text-sm text-gray-900 dark:text-white w-12 text-right">
+                          {activeDriverShare}%
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Surcharges */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+                      <div className="p-4 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-850 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-xs text-gray-900 dark:text-white">
+                            Peak Hours Multiplier
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={activePeakEnabled}
+                            onChange={(e) => {
+                              if (activeServiceTab === 'parcel') {
+                                updateDeliveryRateField('peakEnabled', e.target.checked);
+                              } else {
+                                setRatesConfig({
+                                  ...ratesConfig,
+                                  surcharges: {
+                                    ...ratesConfig.surcharges,
+                                    peak: {
+                                      ...ratesConfig.surcharges.peak,
+                                      enabled: e.target.checked
+                                    }
+                                  }
+                                });
+                              }
+                            }}
+                            className="w-4 h-4 rounded-sm text-amber-500"
+                          />
+                        </div>
+                        <input
+                          type="number"
+                          step="0.05"
+                          min="1.0"
+                          max="2.5"
+                          value={activePeakMultiplier}
+                          onChange={(e) => {
+                            if (activeServiceTab === 'parcel') {
+                              updateDeliveryRateField('peakMultiplier', Number(e.target.value));
+                            } else {
+                              setRatesConfig({
+                                ...ratesConfig,
+                                surcharges: {
+                                  ...ratesConfig.surcharges,
+                                  peak: {
+                                    ...ratesConfig.surcharges.peak,
+                                    multiplier: Number(e.target.value)
+                                  }
+                                }
+                              });
+                            }
+                          }}
+                          disabled={!activePeakEnabled}
+                          className="w-full px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold disabled:opacity-40"
                         />
                       </div>
-                      <div>
-                        <label className="block text-[11px] font-semibold uppercase text-gray-600 dark:text-zinc-400 mb-1">
-                          Max Fee Cap (₱) <span className="text-gray-400 lowercase">(0 = no cap)</span>
-                        </label>
+
+                      <div className="p-4 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-850 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-xs text-gray-900 dark:text-white">
+                            Night Time Flat Surcharge (₱)
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={activeNightEnabled}
+                            onChange={(e) => {
+                              if (activeServiceTab === 'parcel') {
+                                updateDeliveryRateField('nightEnabled', e.target.checked);
+                              } else {
+                                setRatesConfig({
+                                  ...ratesConfig,
+                                  surcharges: {
+                                    ...ratesConfig.surcharges,
+                                    night: {
+                                      ...ratesConfig.surcharges.night,
+                                      enabled: e.target.checked
+                                    }
+                                  }
+                                });
+                              }
+                            }}
+                            className="w-4 h-4 rounded-sm text-amber-500"
+                          />
+                        </div>
                         <input
                           type="number"
                           min="0"
-                          value={ratesConfig[activeServiceTab]?.serviceFeeMax || 0}
-                          onChange={(e) => updateDeliveryRateField('serviceFeeMax', Number(e.target.value))}
-                          placeholder="0"
-                          className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold text-gray-900 dark:text-white"
+                          value={activeNightFlat}
+                          onChange={(e) => {
+                            if (activeServiceTab === 'parcel') {
+                              updateDeliveryRateField('nightFlat', Number(e.target.value));
+                            } else {
+                              setRatesConfig({
+                                ...ratesConfig,
+                                surcharges: {
+                                  ...ratesConfig.surcharges,
+                                  night: {
+                                    ...ratesConfig.surcharges.night,
+                                    flat: Number(e.target.value)
+                                  }
+                                }
+                              });
+                            }
+                          }}
+                          disabled={!activeNightEnabled}
+                          className="w-full px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold disabled:opacity-40"
                         />
                       </div>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Driver Commission & Surcharges Section */}
-            <div className="pt-4 border-t border-gray-100 dark:border-zinc-800 space-y-4">
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-zinc-300 mb-1">
-                  Driver Commission Share (% of delivery fee paid to driver)
-                </label>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="range"
-                    min="50"
-                    max="95"
-                    value={ratesConfig.riderCommissionPercent ?? 80}
-                    onChange={(e) =>
-                      setRatesConfig({
-                        ...ratesConfig,
-                        riderCommissionPercent: Number(e.target.value)
-                      })
-                    }
-                    className="flex-1 accent-amber-500"
-                  />
-                  <span className="font-black text-sm text-gray-900 dark:text-white w-12 text-right">
-                    {ratesConfig.riderCommissionPercent ?? 80}%
-                  </span>
-                </div>
-              </div>
-
-              {/* Surcharges */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-                <div className="p-4 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-850 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-xs text-gray-900 dark:text-white">
-                      Peak Hours Multiplier
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(ratesConfig.surcharges?.peak?.enabled)}
-                      onChange={(e) =>
-                        setRatesConfig({
-                          ...ratesConfig,
-                          surcharges: {
-                            ...ratesConfig.surcharges,
-                            peak: {
-                              ...ratesConfig.surcharges.peak,
-                              enabled: e.target.checked
-                            }
-                          }
-                        })
-                      }
-                      className="w-4 h-4 rounded-sm text-amber-500"
-                    />
+                    </div>
                   </div>
-                  <input
-                    type="number"
-                    step="0.05"
-                    min="1.0"
-                    max="2.5"
-                    value={ratesConfig.surcharges?.peak?.multiplier || 1.2}
-                    onChange={(e) =>
-                      setRatesConfig({
-                        ...ratesConfig,
-                        surcharges: {
-                          ...ratesConfig.surcharges,
-                          peak: {
-                            ...ratesConfig.surcharges.peak,
-                            multiplier: Number(e.target.value)
-                          }
-                        }
-                      })
-                    }
-                    disabled={!ratesConfig.surcharges?.peak?.enabled}
-                    className="w-full px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold disabled:opacity-40"
-                  />
-                </div>
-
-                <div className="p-4 rounded-xl border border-gray-200 dark:border-zinc-800 bg-gray-50 dark:bg-zinc-850 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-xs text-gray-900 dark:text-white">
-                      Night Time Flat Surcharge (₱)
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(ratesConfig.surcharges?.night?.enabled)}
-                      onChange={(e) =>
-                        setRatesConfig({
-                          ...ratesConfig,
-                          surcharges: {
-                            ...ratesConfig.surcharges,
-                            night: {
-                              ...ratesConfig.surcharges.night,
-                              enabled: e.target.checked
-                            }
-                          }
-                        })
-                      }
-                      className="w-4 h-4 rounded-sm text-amber-500"
-                    />
-                  </div>
-                  <input
-                    type="number"
-                    min="0"
-                    value={ratesConfig.surcharges?.night?.flat || 25}
-                    onChange={(e) =>
-                      setRatesConfig({
-                        ...ratesConfig,
-                        surcharges: {
-                          ...ratesConfig.surcharges,
-                          night: {
-                            ...ratesConfig.surcharges.night,
-                            flat: Number(e.target.value)
-                          }
-                        }
-                      })
-                    }
-                    disabled={!ratesConfig.surcharges?.night?.enabled}
-                    className="w-full px-3 py-1.5 rounded-lg border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-bold disabled:opacity-40"
-                  />
-                </div>
-              </div>
-            </div>
+                </>
+              );
+            })()}
           </div>
 
           {/* Delivery Fee Simulator */}
@@ -1209,6 +1644,27 @@ export const DeliveryRates: React.FC = () => {
                   ))}
                 </select>
               </div>
+
+              {calcService === 'parcel' && (
+                <div>
+                  <label className="block uppercase font-semibold text-gray-500 mb-1">
+                    Parcel vehicle
+                  </label>
+                  <select
+                    value={calcParcelVehicle}
+                    onChange={(e) => setCalcParcelVehicle(e.target.value as ParcelVehicleType)}
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-gray-900 dark:text-white"
+                  >
+                    <option value="motorcycle">Motorcycle</option>
+                    <option value="sedan">Sedan (4 and 8 wheel cars)</option>
+                  </select>
+                  {calcParcelVehicle === 'sedan' && !sedanConfigured && (
+                    <span className="text-[10px] text-red-600 dark:text-red-400 font-semibold mt-1 block">
+                      Sedan fares not set yet (using draft copy of Motorcycle)
+                    </span>
+                  )}
+                </div>
+              )}
 
               <div>
                 <label className="block uppercase font-semibold text-gray-500 mb-1">
@@ -1306,7 +1762,7 @@ export const DeliveryRates: React.FC = () => {
 
               <div className="pt-2 border-t border-amber-200 dark:border-amber-900 space-y-1">
                 <div className="flex justify-between font-bold text-emerald-600 text-xs">
-                  <span>Driver Payout ({ratesConfig.riderCommissionPercent}% of delivery):</span>
+                  <span>Driver Payout ({calculatedDeliveryFee.driverSharePercent}% of delivery):</span>
                   <span>₱{calculatedDeliveryFee.driverCut.toFixed(2)}</span>
                 </div>
                 <div className="flex justify-between text-[11px] text-gray-600 dark:text-zinc-400">
@@ -1486,6 +1942,81 @@ export const DeliveryRates: React.FC = () => {
                     className="w-full px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-amber-600"
                   />
                   <span className="text-[10px] text-gray-400 mt-0.5 block">Default: ₱8/km</span>
+                </div>
+              </div>
+            </div>
+
+            {/* 1b. Parcel - Sedan (single booking) Tier */}
+            <div className="p-4 rounded-2xl bg-gray-50/70 dark:bg-zinc-850 border border-gray-200 dark:border-zinc-800 space-y-3">
+              <div className="flex items-center justify-between pb-2 border-b border-gray-200 dark:border-zinc-700/60">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 rounded-lg bg-blue-500 text-white">
+                    <Car className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="font-black text-xs uppercase tracking-wider text-gray-900 dark:text-white">
+                      Parcel - Sedan (single booking) (riderPay.parcelSedan)
+                    </h4>
+                    <p className="text-[11px] text-gray-400">
+                      Applied for Sedan parcel orders (4 and 8 wheel cars). Motorcycle parcels use riderPay.single.
+                    </p>
+                  </div>
+                </div>
+                <span className="text-[10px] font-bold text-gray-400">Defaults: same as single</span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-600 dark:text-zinc-400 mb-1">
+                    Minimum Fare (₱)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={
+                      ratesConfig.riderPay?.parcelSedan?.minFare ??
+                      ratesConfig.riderPay?.single?.minFare ??
+                      35
+                    }
+                    onChange={(e) => updateRiderPayField('parcelSedan', 'minFare', e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-gray-900 dark:text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-600 dark:text-zinc-400 mb-1">
+                    Included Distance (km)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value={
+                      ratesConfig.riderPay?.parcelSedan?.includedKm ??
+                      ratesConfig.riderPay?.single?.includedKm ??
+                      2
+                    }
+                    onChange={(e) => updateRiderPayField('parcelSedan', 'includedKm', e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-gray-900 dark:text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-600 dark:text-zinc-400 mb-1">
+                    Extra per Km (₱/km)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value={
+                      ratesConfig.riderPay?.parcelSedan?.perKmExtra ??
+                      ratesConfig.riderPay?.single?.perKmExtra ??
+                      8
+                    }
+                    onChange={(e) => updateRiderPayField('parcelSedan', 'perKmExtra', e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs font-black text-blue-600"
+                  />
                 </div>
               </div>
             </div>
@@ -1754,6 +2285,38 @@ export const DeliveryRates: React.FC = () => {
                   </button>
                 </div>
               </div>
+
+              {calcRiderPayMode === 'single' && (
+                <div>
+                  <label className="block uppercase font-bold text-gray-500 mb-1.5">
+                    Single Booking Vehicle Tier
+                  </label>
+                  <div className="grid grid-cols-2 gap-1.5 p-1 bg-gray-100 dark:bg-zinc-800 rounded-xl">
+                    <button
+                      type="button"
+                      onClick={() => setCalcRiderSingleVehicle('standard')}
+                      className={`py-1.5 px-2 rounded-lg font-bold text-[11px] transition-all ${
+                        calcRiderSingleVehicle === 'standard'
+                          ? 'bg-amber-400 text-black shadow-xs'
+                          : 'text-gray-600 dark:text-zinc-400 hover:text-black dark:hover:text-white'
+                      }`}
+                    >
+                      Standard / Motorcycle Parcel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCalcRiderSingleVehicle('parcelSedan')}
+                      className={`py-1.5 px-2 rounded-lg font-bold text-[11px] transition-all ${
+                        calcRiderSingleVehicle === 'parcelSedan'
+                          ? 'bg-blue-500 text-white shadow-xs'
+                          : 'text-gray-600 dark:text-zinc-400 hover:text-black dark:hover:text-white'
+                      }`}
+                    >
+                      Parcel — Sedan
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Pickup Distance */}
               <div>
@@ -2405,9 +2968,23 @@ export const DeliveryRates: React.FC = () => {
           isOpen={confirmSaveRatesModal}
           onClose={() => setConfirmSaveRatesModal(false)}
           onConfirm={handleSaveRates}
-          title="Confirm Rate Schedule Updates"
-          message={`Are you sure you want to save the new rate schedule for ${cities.find((c) => c.id === activeCityId)?.name}? This takes effect immediately on all new customer orders in this city.`}
-          confirmLabel="Save & Apply Rates"
+          title={
+            isSavingSedanNow && !sedanConfigured
+              ? 'Save & Enable Parcel Sedan Fares'
+              : 'Confirm Rate Schedule Updates'
+          }
+          message={
+            isSavingSedanNow && !sedanConfigured
+              ? `Save Parcel Sedan fares (4 and 8 wheel cars) for ${cities.find((c) => c.id === activeCityId)?.name}? This will write deliveryRates/${activeCityId}.parcel.sedan and enable Sedan parcel bookings in the customer app.`
+              : `Are you sure you want to save the new rate schedule for ${cities.find((c) => c.id === activeCityId)?.name}?${
+                  !sedanConfigured
+                    ? ' (Note: Parcel Sedan fares remain unset until saved from the Parcel > Sedan sub-tab.)'
+                    : ''
+                } This takes effect immediately on all new customer orders in this city.`
+          }
+          confirmLabel={
+            isSavingSedanNow && !sedanConfigured ? 'Save Sedan Fares' : 'Save & Apply Rates'
+          }
           reasonRequired={false}
           isDestructive={false}
         />

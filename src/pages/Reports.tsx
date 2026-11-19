@@ -13,6 +13,12 @@ import { exportToCsv } from '../utils/exportCsv';
 import { ExportDateModal } from '../components/common/ExportDateModal';
 import { formatTimestamp } from '../utils/date';
 import { getChainOptions, resolveOrderChainId, resolveOrderMerchantDisplay } from '../utils/outletUtils';
+import {
+  getOrderCashCollectedAmount,
+  getParcelVehicleLabel,
+  normalizeParcelVehicle,
+  getParcelFeePayer
+} from '../utils/parcel';
 import type { Order, Merchant } from '../types';
 import {
   VEHICLE_TYPES,
@@ -129,6 +135,13 @@ export const Reports: React.FC = () => {
             scheduledFor: dt.scheduledFor,
             paymentMethod: dt.paymentMethod,
             payment: dt.payment,
+            parcel: dt.parcel,
+            feePayer: dt.feePayer || dt.parcel?.feePayer,
+            cashToCollect: dt.cashToCollect,
+            cashCollected: dt.cashCollected,
+            cashCollectedStage: dt.cashCollectedStage,
+            codAmount: dt.codAmount,
+            codCollected: dt.codCollected,
             cityId: dt.cityId,
             cancelReason: dt.cancelReason,
             createdAt: dt.createdAt
@@ -208,13 +221,27 @@ export const Reports: React.FC = () => {
       car8: { name: '8-Seater Car', orders: 0, revenue: 0, color: '#8B5CF6' }
     };
 
+    // Parcel orders & revenue by vehicle tier (Motorcycle vs Sedan)
+    const parcelVehicleMap: Record<'motorcycle' | 'sedan', { name: string; orders: number; revenue: number }> = {
+      motorcycle: { name: 'Motorcycle', orders: 0, revenue: 0 },
+      sedan: { name: 'Sedan (4 & 8 wheel)', orders: 0, revenue: 0 }
+    };
+    let totalCodCashCollected = 0;
+
     filteredOrders.forEach((o) => {
       const pm = (o.paymentMethod || o.payment?.method || 'cod').toLowerCase();
       const pKey = pm === 'cod' ? 'cod' : pm === 'wallet' ? 'wallet' : pm === 'online' ? 'online' : 'other';
       const svc = o.serviceType || 'food';
 
+      totalCodCashCollected += getOrderCashCollectedAmount(o);
+
       if (serviceMap[svc]) {
         serviceMap[svc].orders++;
+      }
+
+      if (svc === 'parcel') {
+        const pv = normalizeParcelVehicle(o.vehicleType);
+        parcelVehicleMap[pv].orders++;
       }
 
       if (svc === 'taxi') {
@@ -239,6 +266,11 @@ export const Reports: React.FC = () => {
 
         if (serviceMap[svc]) {
           serviceMap[svc].revenue += tot;
+        }
+
+        if (svc === 'parcel') {
+          const pv = normalizeParcelVehicle(o.vehicleType);
+          parcelVehicleMap[pv].revenue += tot;
         }
 
         if (svc === 'taxi') {
@@ -326,6 +358,7 @@ export const Reports: React.FC = () => {
 
     const serviceChartData = Object.values(serviceMap);
     const taxiVehicleChartData = Object.values(taxiVehicleMap);
+    const parcelVehicleChartData = Object.values(parcelVehicleMap);
 
     return {
       totalOrders: filteredOrders.length,
@@ -333,13 +366,15 @@ export const Reports: React.FC = () => {
       cancelledCount,
       totalDeliveredRevenue,
       totalPlatformCommission,
+      totalCodCashCollected,
       merchantRankings,
       driverRankings,
       cancellationChartData,
       paymentMap,
       paymentChartData,
       serviceChartData,
-      taxiVehicleChartData
+      taxiVehicleChartData,
+      parcelVehicleChartData
     };
   }, [filteredOrders, merchantsById]);
 
@@ -465,7 +500,11 @@ export const Reports: React.FC = () => {
       OrderNumber: o.orderNumber,
       Fulfillment: o.serviceType === 'taxi' ? 'Delivio Taxi Ride' : o.isPickup ? 'Pick Up' : o.scheduledFor ? 'Scheduled' : 'Delivery',
       Service: SERVICE_LABELS[o.serviceType] || o.serviceType,
-      VehicleType: o.vehicleType || o.riderVehicle?.vehicleType || '',
+      VehicleType:
+        o.serviceType === 'parcel'
+          ? getParcelVehicleLabel(o.vehicleType)
+          : o.vehicleType || o.riderVehicle?.vehicleType || '',
+      FeePayer: o.serviceType === 'parcel' ? getParcelFeePayer(o) || '' : '',
       Status: o.status,
       Customer: o.customerName,
       Merchant: resolveOrderMerchantDisplay(o, merchantsById, true) || o.merchantName || '',
@@ -478,6 +517,9 @@ export const Reports: React.FC = () => {
       TotalSalesExclTip: Math.max(0, (o.fees?.total || 0) - (o.fees?.tip || 0)),
       ServiceFee: o.fees?.serviceFee || 0,
       PaymentMethod: o.paymentMethod || 'cod',
+      CashToCollect: o.cashToCollect ?? o.codAmount ?? 0,
+      CODCollected: getOrderCashCollectedAmount(o),
+      CashCollectedStage: o.cashCollectedStage || '',
       CancelReason: o.cancelReason || '',
       Date: formatTimestamp(o.createdAt)
     }));
@@ -695,21 +737,37 @@ export const Reports: React.FC = () => {
             {metrics.serviceChartData.map((s) => (
               <div
                 key={s.name}
-                className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-850 flex items-center justify-between text-xs"
+                className="p-3.5 rounded-2xl bg-gray-50 dark:bg-zinc-850 space-y-2 text-xs"
               >
-                <div className="flex items-center gap-3">
-                  <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: s.color }} />
-                  <div>
-                    <span className="font-bold text-gray-900 dark:text-white block">{s.name}</span>
-                    <span className="text-[11px] text-gray-400">{s.orders} total order(s)</span>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: s.color }} />
+                    <div>
+                      <span className="font-bold text-gray-900 dark:text-white block">{s.name}</span>
+                      <span className="text-[11px] text-gray-400">{s.orders} total order(s)</span>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-extrabold text-gray-900 dark:text-white block">
+                      ₱{s.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </span>
+                    <span className="text-[10px] text-gray-400">Delivered sales</span>
                   </div>
                 </div>
-                <div className="text-right">
-                  <span className="font-extrabold text-gray-900 dark:text-white block">
-                    ₱{s.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </span>
-                  <span className="text-[10px] text-gray-400">Delivered sales</span>
-                </div>
+                {s.name === 'Delivio Parcel' && s.orders > 0 && (
+                  <div className="pt-2 border-t border-gray-200/70 dark:border-zinc-800 grid grid-cols-2 gap-2 text-[11px]">
+                    {metrics.parcelVehicleChartData.map((pv) => (
+                      <div key={pv.name} className="flex items-center justify-between bg-white dark:bg-zinc-900 px-2.5 py-1.5 rounded-lg border border-gray-100 dark:border-zinc-800">
+                        <span className="font-semibold text-gray-700 dark:text-zinc-300">
+                          {pv.name} ({pv.orders})
+                        </span>
+                        <span className="font-bold text-emerald-600 dark:text-emerald-400">
+                          ₱{pv.revenue.toFixed(0)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -785,6 +843,13 @@ export const Reports: React.FC = () => {
                 ? ((metrics.paymentMap.cod.revenue / metrics.totalDeliveredRevenue) * 100).toFixed(1)
                 : 0}
               % of total delivered sales
+            </p>
+            <p className="text-[11px] font-bold text-emerald-800 dark:text-emerald-300 mt-0.5">
+              Rider cash collected (incl. Parcel pickup): ₱
+              {metrics.totalCodCashCollected.toLocaleString('en-US', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+              })}
             </p>
           </div>
 

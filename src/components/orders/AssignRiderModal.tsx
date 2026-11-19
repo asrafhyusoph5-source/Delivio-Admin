@@ -27,6 +27,11 @@ import { nowTs, arrayNowTs } from '../../utils/date';
 import { formatOrderNumber } from '../../utils/orderNumber';
 import { resolveOrderMerchantDisplay } from '../../utils/outletUtils';
 import {
+  normalizeParcelVehicle,
+  getParcelVehicleLabel,
+  isRiderVehicleEligibleForParcel
+} from '../../utils/parcel';
+import {
   SERVICE_LABELS,
   SERVICES_BY_VEHICLE,
   VEHICLE_LABELS,
@@ -273,6 +278,15 @@ export const AssignRiderModal: React.FC<AssignRiderModalProps> = ({
         reason = 'Busy with another active order';
       } else if (targetCityId && rider.cityId && rider.cityId !== targetCityId) {
         reason = 'Different city';
+      } else if (
+        serviceType === 'parcel' &&
+        !isRiderVehicleEligibleForParcel(normalizedVehicle, order.vehicleType)
+      ) {
+        const parcelLabel = getParcelVehicleLabel(order.vehicleType);
+        reason =
+          normalizeParcelVehicle(order.vehicleType) === 'sedan'
+            ? `Parcel Sedan requires 4-wheel (car4) or 8-seater car (car8)`
+            : `Parcel ${parcelLabel} requires motorcycle`;
       } else if (!supportsVehicleService) {
         reason = `${VEHICLE_LABELS[normalizedVehicle]} cannot take ${serviceLabel}`;
       } else if (!allowedArr.includes(serviceType)) {
@@ -459,9 +473,11 @@ export const AssignRiderModal: React.FC<AssignRiderModalProps> = ({
               <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 border border-gray-200 dark:border-zinc-700">
                 {serviceLabel}
               </span>
-              {order.vehicleType && (
+              {(order.vehicleType || serviceType === 'parcel') && (
                 <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-blue-50 dark:bg-blue-950/50 text-blue-800 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
-                  {order.vehicleType}
+                  {serviceType === 'parcel'
+                    ? getParcelVehicleLabel(order.vehicleType)
+                    : order.vehicleType}
                 </span>
               )}
             </div>
@@ -524,7 +540,10 @@ export const AssignRiderModal: React.FC<AssignRiderModalProps> = ({
               </p>
               <p className="text-[11px] text-gray-400 max-w-md mx-auto">
                 Riders must be active, online, not excluded or busy on another order, and have <code className="font-mono">{serviceType}</code> in <code className="font-mono">allowedServices</code>
-                {serviceType === 'taxi' && order.vehicleType ? ` with vehicleType "${order.vehicleType}"` : ''}.
+                {serviceType === 'taxi' && order.vehicleType ? ` with vehicleType "${order.vehicleType}"` : ''}
+                {serviceType === 'parcel'
+                  ? ` with ${normalizeParcelVehicle(order.vehicleType) === 'sedan' ? '4-wheel (car4) or 8-seater (car8) car' : 'motorcycle'}`
+                  : ''}.
               </p>
             </div>
           ) : (

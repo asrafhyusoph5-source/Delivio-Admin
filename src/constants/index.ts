@@ -243,6 +243,11 @@ export const DEFAULT_RIDER_PAY: RiderPayConfig = {
     includedKm: 2,
     perKmExtra: 8
   },
+  parcelSedan: {
+    minFare: 35,
+    includedKm: 2,
+    perKmExtra: 8
+  },
   double: {
     first: {
       minFare: 35,

@@ -17,6 +17,11 @@ import { haversineKm } from '../merchants/CustomerVisibilityCheckPanel';
 import { parseDate } from '../../utils/date';
 import { formatOrderNumber } from '../../utils/orderNumber';
 import { resolveOrderMerchantDisplay } from '../../utils/outletUtils';
+import {
+  normalizeParcelVehicle,
+  getParcelVehicleLabel,
+  isRiderVehicleEligibleForParcel
+} from '../../utils/parcel';
 import { SERVICE_LABELS, SERVICES_BY_VEHICLE, VEHICLE_LABELS, type VehicleType } from '../../constants';
 import type { Order, OrderServiceType, Rider, Merchant, City } from '../../types';
 
@@ -308,7 +313,12 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
         'Merchant'
       : order.pickup?.label || order.pickup?.address || 'Pickup Location';
 
-    const orderVehicle = order.vehicleType ? normalizeVehicleType(order.vehicleType) : null;
+    const orderVehicle =
+      serviceType === 'parcel'
+        ? null
+        : order.vehicleType
+        ? normalizeVehicleType(order.vehicleType)
+        : null;
 
     return {
       merchant,
@@ -562,15 +572,32 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
         }
 
         // 7. Vehicle type
-        const supportsServiceVehicle = (SERVICES_BY_VEHICLE[vType] || []).includes(serviceType);
-        const matchesRequestedVehicle = !orderVehicle || orderVehicle === vType;
-        const vehiclePass = supportsServiceVehicle && matchesRequestedVehicle;
         const vehicleLabel = VEHICLE_LABELS[vType] || rider.vehicleType || 'Unknown';
+        let vehiclePass = false;
+        let vehicleDetail = vehicleLabel;
         let vehicleFailReason = '';
-        if (!supportsServiceVehicle) {
-          vehicleFailReason = `${vehicleLabel} cannot serve ${serviceLabel}`;
-        } else if (!matchesRequestedVehicle) {
-          vehicleFailReason = `${vehicleLabel} does not match requested ${VEHICLE_LABELS[orderVehicle!]}`;
+
+        if (serviceType === 'parcel') {
+          const parcelTarget = normalizeParcelVehicle(order.vehicleType);
+          const parcelLabel = getParcelVehicleLabel(order.vehicleType);
+          vehiclePass = isRiderVehicleEligibleForParcel(vType, order.vehicleType);
+          if (vehiclePass) {
+            vehicleDetail = `${vehicleLabel} (valid for Parcel ${parcelLabel})`;
+          } else {
+            vehicleFailReason =
+              parcelTarget === 'sedan'
+                ? `Parcel Sedan requires 4-wheel (car4) or 8-seater car (car8); driver has ${vehicleLabel}`
+                : `Parcel Motorcycle requires motorcycle; driver has ${vehicleLabel}`;
+          }
+        } else {
+          const supportsServiceVehicle = (SERVICES_BY_VEHICLE[vType] || []).includes(serviceType);
+          const matchesRequestedVehicle = !orderVehicle || orderVehicle === vType;
+          vehiclePass = supportsServiceVehicle && matchesRequestedVehicle;
+          if (!supportsServiceVehicle) {
+            vehicleFailReason = `${vehicleLabel} cannot serve ${serviceLabel}`;
+          } else if (!matchesRequestedVehicle) {
+            vehicleFailReason = `${vehicleLabel} does not match requested ${VEHICLE_LABELS[orderVehicle!]}`;
+          }
         }
 
         checks = [
@@ -623,7 +650,7 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
             key: 'vehicleType',
             label: 'Vehicle type',
             pass: vehiclePass,
-            detail: vehiclePass ? vehicleLabel : vehicleFailReason,
+            detail: vehiclePass ? vehicleDetail : vehicleFailReason,
             failReason: vehicleFailReason
           },
           {
@@ -731,9 +758,11 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
               <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-zinc-200 border border-gray-200 dark:border-zinc-700">
                 {serviceLabel}
               </span>
-              {order.vehicleType && (
+              {(order.vehicleType || serviceType === 'parcel') && (
                 <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-blue-50 dark:bg-blue-950/50 text-blue-800 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
-                  {VEHICLE_LABELS[normalizeVehicleType(order.vehicleType)] || order.vehicleType}
+                  {serviceType === 'parcel'
+                    ? getParcelVehicleLabel(order.vehicleType)
+                    : VEHICLE_LABELS[normalizeVehicleType(order.vehicleType)] || order.vehicleType}
                 </span>
               )}
               {order.riderRequest?.status ? (

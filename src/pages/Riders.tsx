@@ -24,6 +24,7 @@ import { logAuditEvent, logEditHistory } from '../utils/audit';
 import { exportToCsv } from '../utils/exportCsv';
 import { formatTimestamp, formatRelativeTime, nowTs } from '../utils/date';
 import { formatOrderNumber } from '../utils/orderNumber';
+import { getOrderCashCollectedAmount, getParcelFeePayer } from '../utils/parcel';
 import type {
   Rider,
   Order,
@@ -397,14 +398,22 @@ export const Riders: React.FC = () => {
           id: d.id,
           orderNumber: dt.orderNumber || d.id.substring(0, 8),
           serviceType: dt.serviceType,
+          vehicleType: dt.vehicleType,
+          parcel: dt.parcel,
+          feePayer: dt.feePayer || dt.parcel?.feePayer,
           customerId: dt.customerId,
           customerName: dt.customerName,
           status: dt.status,
           statusHistory: dt.statusHistory || [],
           fees: dt.fees || { subtotal: 0, deliveryFee: 0, serviceFee: 0, discount: 0, total: 0 },
           riderEarning: dt.riderEarning,
+          cashToCollect: dt.cashToCollect,
+          cashCollected: dt.cashCollected,
+          cashCollectedStage: dt.cashCollectedStage,
+          codAmount: dt.codAmount,
           codCollected: dt.codCollected || 0,
           paymentMethod: dt.paymentMethod,
+          payment: dt.payment,
           lateTip: lateTipVal,
           createdAt: dt.createdAt
         });
@@ -1573,7 +1582,7 @@ export const Riders: React.FC = () => {
   }, [riderOrders]);
 
   const totalCodCollected = useMemo(() => {
-    return riderOrders.reduce((acc, o) => acc + (Number(o.codCollected) || 0), 0);
+    return riderOrders.reduce((acc, o) => acc + getOrderCashCollectedAmount(o), 0);
   }, [riderOrders]);
 
   const outstandingCash = Math.max(0, totalCodCollected - (selectedRider?.cashRemitted || 0));
@@ -3278,7 +3287,8 @@ export const Riders: React.FC = () => {
                           Status: o.status,
                           Customer: o.customerName,
                           NetEarning: o.riderEarning?.net || 0,
-                          CODCollected: o.codCollected || 0,
+                          CODCollected: getOrderCashCollectedAmount(o),
+                          CashCollectedStage: o.cashCollectedStage || '',
                           Date: formatTimestamp(o.createdAt)
                         }));
                         exportToCsv(`${selectedRider.name}_orders`, rows);
@@ -3356,6 +3366,58 @@ export const Riders: React.FC = () => {
                       </div>
                     </div>
                   </div>
+
+                  {/* Orders with Cash Collected (including Parcel pickup & dropoff stages) */}
+                  {(() => {
+                    const cashOrders = riderOrders.filter((o) => getOrderCashCollectedAmount(o) > 0);
+                    if (cashOrders.length === 0) return null;
+                    return (
+                      <div className="p-3.5 rounded-2xl bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 space-y-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-bold uppercase text-[10px] text-gray-500 dark:text-zinc-400">
+                            Cash-Collected Orders ({cashOrders.length})
+                          </span>
+                          <span className="font-bold text-gray-900 dark:text-white">
+                            Total: ₱{totalCodCollected.toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                          {cashOrders.map((co) => {
+                            const amt = getOrderCashCollectedAmount(co);
+                            const feePayer = co.serviceType === 'parcel' ? getParcelFeePayer(co) : null;
+                            return (
+                              <div
+                                key={co.id}
+                                className="flex items-center justify-between gap-2 p-2 rounded-xl bg-gray-50 dark:bg-zinc-850 text-xs"
+                              >
+                                <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                                  <span className="font-mono font-bold text-gray-900 dark:text-white">
+                                    {formatOrderNumber(co)}
+                                  </span>
+                                  <span className="capitalize px-1.5 py-0.5 rounded text-[10px] font-bold bg-gray-200 dark:bg-zinc-800 text-gray-700 dark:text-zinc-300">
+                                    {co.serviceType}
+                                  </span>
+                                  {co.cashCollectedStage && (
+                                    <span className="capitalize px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300">
+                                      Collected at {co.cashCollectedStage}
+                                    </span>
+                                  )}
+                                  {feePayer && (
+                                    <span className="capitalize text-[10px] text-gray-500">
+                                      Fee: {feePayer}
+                                    </span>
+                                  )}
+                                </div>
+                                <span className="font-bold text-emerald-600 dark:text-emerald-400 shrink-0 tabular-nums">
+                                  ₱{amt.toFixed(2)}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Record Remittance */}
                   <div className="p-4 rounded-2xl bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 space-y-3">

@@ -93,6 +93,9 @@ export interface OrderItem {
 
 export interface OrderLocationPoint {
   label?: string;
+  name?: string;
+  phone?: string;
+  note?: string;
   address: string;
   area?: string;
   lat: number;
@@ -198,10 +201,14 @@ export interface Order {
   pickup?: OrderLocationPoint;
   dropoff?: OrderLocationPoint;
   parcel?: {
+    size?: string;
+    weightKg?: number;
+    description?: string;
+    fragile?: boolean;
+    feePayer?: 'sender' | 'recipient' | string;
     itemType?: string;
     recipientName?: string;
     recipientPhone?: string;
-    weightKg?: number;
     notes?: string;
   };
   pabili?: {
@@ -220,7 +227,10 @@ export interface Order {
     status?: string;
     [key: string]: any;
   };
+  feePayer?: 'sender' | 'recipient' | string;
   cashToCollect?: number;
+  cashCollected?: boolean | number;
+  cashCollectedStage?: 'pickup' | 'dropoff' | string;
   codAmount?: number;
   codCollected?: number;
   walletRefunded?: boolean;
@@ -613,14 +623,37 @@ export type TaxiVehicleRates = TaxiVehicleFareConfig;
 
 export type DeliveryServiceType = 'food' | 'convenience' | 'parcel' | 'pabili' | 'request_rider';
 
+export type ParcelVehicleType = 'motorcycle' | 'sedan';
+
+export interface ParcelVehicleRates extends ServiceRates {
+  driverShare?: number;
+  maxWeightKg?: number;
+  peakEnabled?: boolean;
+  peakMultiplier?: number;
+  nightEnabled?: boolean;
+  nightFlat?: number;
+}
+
+export interface ParcelRatesByVehicle {
+  motorcycle: ParcelVehicleRates;
+  sedan?: ParcelVehicleRates;
+}
+
 export interface DeliveryRatesConfig {
   id: string; // cityId
   food: ServiceRates;
   convenience: ServiceRates;
-  parcel: ServiceRates;
+  parcel: ParcelRatesByVehicle;
   pabili: ServiceRates;
   request_rider: ServiceRates;
-  services?: Record<string, ServiceRates>;
+  services?: {
+    food?: ServiceRates;
+    convenience?: ServiceRates;
+    parcel?: ParcelRatesByVehicle;
+    pabili?: ServiceRates;
+    request_rider?: ServiceRates;
+    [key: string]: any;
+  };
   rideRates?: Record<string, TaxiVehicleFareConfig>;
   riderPay?: RiderPayConfig;
   riderCommissionPercent: number;
@@ -651,6 +684,7 @@ export interface RiderPayPickupTier {
 
 export interface RiderPayConfig {
   single: RiderPayFareTier;
+  parcelSedan?: RiderPayFareTier;
   double: {
     first: RiderPayFareTier;
     second: RiderPayFareTier;

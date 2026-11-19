@@ -1695,7 +1695,20 @@ export const Settings: React.FC = () => {
           id: 'puerto-princesa',
           food: { ...defaultServiceRates },
           convenience: { ...defaultServiceRates },
-          parcel: { ...defaultServiceRates, baseFare: 40, perKm: 10 },
+          parcel: {
+            motorcycle: {
+              ...defaultServiceRates,
+              baseFare: 40,
+              perKm: 10,
+              serviceFeeType: 'flat',
+              driverShare: 80,
+              maxWeightKg: 20,
+              peakEnabled: false,
+              peakMultiplier: 1.2,
+              nightEnabled: false,
+              nightFlat: 25
+            }
+          },
           pabili: { ...defaultServiceRates, baseFare: 60, serviceFee: 20 },
           request_rider: { ...defaultServiceRates, baseFare: 50 },
           rideRates: DEFAULT_TAXI_RATES,
