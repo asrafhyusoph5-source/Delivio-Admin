@@ -30,7 +30,6 @@ import type {
   PlatformVatConfig,
   DispatchSettings,
   DeliveryOptionType,
-  ReceiptDesignConfig,
   CheckoutSettings,
   City,
   MainCategoriesDoc,
@@ -41,12 +40,10 @@ import {
   SERVICES_BY_VEHICLE,
   DEFAULT_TAXI_RATES,
   DEFAULT_DISPATCH_SETTINGS,
-  DEFAULT_RECEIPT_CONFIG,
   DEFAULT_CHECKOUT_SETTINGS,
   type VehicleType
 } from '../constants';
 import { cleanupExpiredChats } from '../utils/chatCleanup';
-import { ReceiptDesignerTab } from '../components/settings/ReceiptDesignerTab';
 import { CheckoutMustTryTab } from '../components/settings/CheckoutMustTryTab';
 import { StaffTab } from '../components/settings/StaffTab';
 import { DataHealthCheckPanel } from '../components/settings/DataHealthCheckPanel';
@@ -84,7 +81,6 @@ import {
   Radio,
   Compass,
   Zap,
-  Printer,
   Star,
   Users,
   MessageSquare,
@@ -221,12 +217,8 @@ export const Settings: React.FC = () => {
   const [scheduledReleaseLeadMinutes, setScheduledReleaseLeadMinutes] = useState<number>(0);
 
   // Sub-Tab Navigation
-  type SettingsTab = 'general' | 'receipt' | 'checkout' | 'dispatch' | 'taxes' | 'services' | 'staff' | 'tools';
+  type SettingsTab = 'general' | 'checkout' | 'dispatch' | 'taxes' | 'services' | 'staff' | 'tools';
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
-
-  // Receipt Designer (settings/receipt)
-  const [receiptConfig, setReceiptConfig] = useState<ReceiptDesignConfig>(DEFAULT_RECEIPT_CONFIG);
-  const [loadingReceipt, setLoadingReceipt] = useState<boolean>(true);
 
   // Checkout Settings (settings/checkout)
   const [checkoutSettings, setCheckoutSettings] = useState<CheckoutSettings>(DEFAULT_CHECKOUT_SETTINGS);
@@ -512,43 +504,6 @@ export const Settings: React.FC = () => {
           console.warn('Failed to load settings/dispatch:', e);
         } finally {
           setLoadingDispatch(false);
-        }
-
-        // Fetch settings/receipt
-        try {
-          setLoadingReceipt(true);
-          const rRef = doc(db, 'settings', 'receipt');
-          const rSnap = await getDoc(rRef);
-          if (rSnap.exists()) {
-            const dt = rSnap.data();
-            setReceiptConfig({
-              brandLine: dt.brandLine || DEFAULT_RECEIPT_CONFIG.brandLine,
-              headerLines: Array.isArray(dt.headerLines) ? dt.headerLines : DEFAULT_RECEIPT_CONFIG.headerLines,
-              footerText: dt.footerText !== undefined ? dt.footerText : DEFAULT_RECEIPT_CONFIG.footerText,
-              showOrderId: dt.showOrderId !== false,
-              showOrderedAt: dt.showOrderedAt !== false,
-              showCustomerName: dt.showCustomerName !== false,
-              showNote: dt.showNote !== false,
-              showSetChoices: dt.showSetChoices !== false,
-              fontSize: dt.fontSize || DEFAULT_RECEIPT_CONFIG.fontSize,
-              align: dt.align || DEFAULT_RECEIPT_CONFIG.align,
-              separator: dt.separator || DEFAULT_RECEIPT_CONFIG.separator,
-              merchantCopy: {
-                enabled: dt.merchantCopy?.enabled !== false,
-                title: dt.merchantCopy?.title || DEFAULT_RECEIPT_CONFIG.merchantCopy.title,
-                showItemPrices: dt.merchantCopy?.showItemPrices !== false
-              },
-              customerCopy: {
-                enabled: dt.customerCopy?.enabled !== false,
-                title: dt.customerCopy?.title || DEFAULT_RECEIPT_CONFIG.customerCopy.title,
-                showItemPrices: dt.customerCopy?.showItemPrices !== false
-              }
-            });
-          }
-        } catch (e) {
-          console.warn('Failed to load settings/receipt:', e);
-        } finally {
-          setLoadingReceipt(false);
         }
 
         // Fetch settings/checkout
@@ -1809,7 +1764,6 @@ export const Settings: React.FC = () => {
       <div className="flex items-center gap-1.5 overflow-x-auto pb-1 border-b border-gray-200 dark:border-zinc-800">
         {[
           { id: 'general' as const, label: 'General', icon: SettingsIcon },
-          { id: 'receipt' as const, label: 'Print Receipt', icon: Printer },
           { id: 'checkout' as const, label: 'Checkout (Must Try!)', icon: Sparkles },
           { id: 'dispatch' as const, label: 'Dispatch', icon: Compass },
           { id: 'taxes' as const, label: 'Taxes & Fees', icon: Percent },
@@ -1840,15 +1794,6 @@ export const Settings: React.FC = () => {
       {/* STAFF & ROLES TAB */}
       {settingsTab === 'staff' && (
         <StaffTab />
-      )}
-
-      {/* RECEIPT DESIGNER TAB */}
-      {settingsTab === 'receipt' && (
-        <ReceiptDesignerTab
-          receiptConfig={receiptConfig}
-          onConfigChange={setReceiptConfig}
-          loading={loadingReceipt}
-        />
       )}
 
       {/* CHECKOUT / MUST TRY! TAB */}

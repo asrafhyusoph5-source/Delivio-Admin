@@ -18,8 +18,10 @@ import type {
   MainCategoriesDoc,
   Merchant,
   ConvenienceColumnsCount,
-  AppDesignerSettings
+  AppDesignerSettings,
+  ReceiptDesignConfig
 } from '../types';
+import { DEFAULT_RECEIPT_CONFIG } from '../constants';
 import {
   DEFAULT_FOOD_CATEGORIES,
   DEFAULT_CONVENIENCE_CATEGORIES,
@@ -32,6 +34,7 @@ import {
   categoryMatchesTag
 } from '../utils/mainCategories';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
+import { ReceiptDesignerTab } from '../components/settings/ReceiptDesignerTab';
 import {
   Utensils,
   ShoppingBag,
@@ -55,12 +58,73 @@ import {
   ChevronUp,
   Undo2,
   LayoutGrid,
-  Pencil
+  Pencil,
+  Printer,
+  Eye
 } from 'lucide-react';
 
-type DesignerTab = 'categories' | 'layout';
+type DesignerTab = 'categories' | 'layout' | 'receipts';
 type GroupKey = 'food' | 'convenience';
 type ImageStatus = 'loading' | 'ok' | 'error';
+
+const normalizeReceiptConfig = (raw?: Partial<ReceiptDesignConfig> | null): ReceiptDesignConfig => ({
+  brandLine:
+    typeof raw?.brandLine === 'string' && raw.brandLine.trim()
+      ? raw.brandLine
+      : DEFAULT_RECEIPT_CONFIG.brandLine,
+  headerLines: Array.isArray(raw?.headerLines)
+    ? raw.headerLines.filter((l): l is string => typeof l === 'string').slice(0, 3)
+    : [...DEFAULT_RECEIPT_CONFIG.headerLines],
+  footerText:
+    typeof raw?.footerText === 'string' ? raw.footerText : DEFAULT_RECEIPT_CONFIG.footerText,
+  showOrderId:
+    raw?.showOrderId !== undefined ? Boolean(raw.showOrderId) : DEFAULT_RECEIPT_CONFIG.showOrderId,
+  showOrderedAt:
+    raw?.showOrderedAt !== undefined
+      ? Boolean(raw.showOrderedAt)
+      : DEFAULT_RECEIPT_CONFIG.showOrderedAt,
+  showCustomerName:
+    raw?.showCustomerName !== undefined
+      ? Boolean(raw.showCustomerName)
+      : DEFAULT_RECEIPT_CONFIG.showCustomerName,
+  showNote: raw?.showNote !== undefined ? Boolean(raw.showNote) : DEFAULT_RECEIPT_CONFIG.showNote,
+  showSetChoices:
+    raw?.showSetChoices !== undefined
+      ? Boolean(raw.showSetChoices)
+      : DEFAULT_RECEIPT_CONFIG.showSetChoices,
+  fontSize: raw?.fontSize === 'small' || raw?.fontSize === 'large' ? raw.fontSize : 'medium',
+  align: raw?.align === 'left' ? 'left' : 'center',
+  separator:
+    raw?.separator === 'double' || raw?.separator === 'solid' ? raw.separator : 'dashes',
+  merchantCopy: {
+    enabled:
+      raw?.merchantCopy?.enabled !== undefined
+        ? Boolean(raw.merchantCopy.enabled)
+        : DEFAULT_RECEIPT_CONFIG.merchantCopy.enabled,
+    title:
+      typeof raw?.merchantCopy?.title === 'string'
+        ? raw.merchantCopy.title
+        : DEFAULT_RECEIPT_CONFIG.merchantCopy.title,
+    showItemPrices:
+      raw?.merchantCopy?.showItemPrices !== undefined
+        ? Boolean(raw.merchantCopy.showItemPrices)
+        : DEFAULT_RECEIPT_CONFIG.merchantCopy.showItemPrices
+  },
+  customerCopy: {
+    enabled:
+      raw?.customerCopy?.enabled !== undefined
+        ? Boolean(raw.customerCopy.enabled)
+        : DEFAULT_RECEIPT_CONFIG.customerCopy.enabled,
+    title:
+      typeof raw?.customerCopy?.title === 'string'
+        ? raw.customerCopy.title
+        : DEFAULT_RECEIPT_CONFIG.customerCopy.title,
+    showItemPrices:
+      raw?.customerCopy?.showItemPrices !== undefined
+        ? Boolean(raw.customerCopy.showItemPrices)
+        : DEFAULT_RECEIPT_CONFIG.customerCopy.showItemPrices
+  }
+});
 
 interface SampleMartProduct {
   id: string;
@@ -214,6 +278,15 @@ export const CuisinesCategories: React.FC = () => {
   const [persistedColumns, setPersistedColumns] = useState<ConvenienceColumnsCount>(2);
   const [layoutUpdatedAt, setLayoutUpdatedAt] = useState<any>(null);
 
+  // Receipt design state (settings/receipt)
+  const [receiptConfig, setReceiptConfig] = useState<ReceiptDesignConfig>(() =>
+    normalizeReceiptConfig(DEFAULT_RECEIPT_CONFIG)
+  );
+  const [persistedReceiptConfig, setPersistedReceiptConfig] = useState<ReceiptDesignConfig>(() =>
+    normalizeReceiptConfig(DEFAULT_RECEIPT_CONFIG)
+  );
+  const receiptPreviewRef = useRef<HTMLDivElement | null>(null);
+
   // Merchants for category shop count chips & delete migration
   const [merchants, setMerchants] = useState<Merchant[]>([]);
 
@@ -249,6 +322,9 @@ export const CuisinesCategories: React.FC = () => {
   // Reset to Defaults Confirmation
   const [resetModalOpen, setResetModalOpen] = useState(false);
 
+  // Unsaved-changes tab switch confirmation
+  const [pendingTabSwitch, setPendingTabSwitch] = useState<DesignerTab | null>(null);
+
   // Close "..." dropdown when clicking outside
   useEffect(() => {
     if (!openMenuId) return;
@@ -262,9 +338,10 @@ export const CuisinesCategories: React.FC = () => {
       try {
         setLoading(true);
         const actor = adminProfile?.name || adminProfile?.uid || 'Administrator';
-        const [{ data }, designerSnap, mSnap] = await Promise.all([
+        const [{ data }, designerSnap, receiptSnap, mSnap] = await Promise.all([
           loadOrInitMainCategories(actor, true),
           getDoc(doc(db, 'settings', 'appDesigner')),
+          getDoc(doc(db, 'settings', 'receipt')),
           getDocs(collection(db, 'merchants'))
         ]);
 
@@ -291,6 +368,12 @@ export const CuisinesCategories: React.FC = () => {
         setConvenienceColumns(initialCols);
         setPersistedColumns(initialCols);
         setLayoutUpdatedAt(initialLayoutUpdatedAt);
+
+        const initialReceipt = receiptSnap.exists()
+          ? normalizeReceiptConfig(receiptSnap.data() as Partial<ReceiptDesignConfig>)
+          : normalizeReceiptConfig(DEFAULT_RECEIPT_CONFIG);
+        setReceiptConfig(initialReceipt);
+        setPersistedReceiptConfig(normalizeReceiptConfig(initialReceipt));
 
         const mList: Merchant[] = [];
         mSnap.forEach((d) => {
@@ -352,7 +435,27 @@ export const CuisinesCategories: React.FC = () => {
   }, [foodCategories, convenienceCategories, persistedDoc]);
 
   const hasLayoutChanges = convenienceColumns !== persistedColumns;
-  const hasUnsavedChanges = hasCategoryChanges || hasLayoutChanges;
+
+  const hasReceiptChanges = useMemo(() => {
+    return JSON.stringify(receiptConfig) !== JSON.stringify(persistedReceiptConfig);
+  }, [receiptConfig, persistedReceiptConfig]);
+
+  const activeTabHasChanges =
+    activeTab === 'categories'
+      ? hasCategoryChanges
+      : activeTab === 'layout'
+      ? hasLayoutChanges
+      : hasReceiptChanges;
+
+  const handleRequestTabSwitch = (nextTab: DesignerTab) => {
+    if (nextTab === activeTab) return;
+    if (activeTabHasChanges) {
+      setPendingTabSwitch(nextTab);
+      return;
+    }
+    setActiveTab(nextTab);
+    setSavedBanner(false);
+  };
 
   const filteredList = useMemo(() => {
     const q = categorySearch.trim().toLowerCase();
@@ -570,27 +673,47 @@ export const CuisinesCategories: React.FC = () => {
     showSuccess(`Added "${cleanName}". Click Save changes to publish.`);
   };
 
-  // Discard all unsaved changes back to persisted Firestore state
+  // Discard unsaved changes on the ACTIVE tab back to persisted Firestore state
   const handleDiscardChanges = () => {
-    if (persistedDoc) {
-      setFoodCategories(persistedDoc.food.map((c) => ({ ...c, aliases: [...(c.aliases || [])] })));
-      setConvenienceCategories(
-        persistedDoc.convenience.map((c) => ({ ...c, aliases: [...(c.aliases || [])] }))
-      );
+    if (activeTab === 'categories') {
+      if (persistedDoc) {
+        setFoodCategories(persistedDoc.food.map((c) => ({ ...c, aliases: [...(c.aliases || [])] })));
+        setConvenienceCategories(
+          persistedDoc.convenience.map((c) => ({ ...c, aliases: [...(c.aliases || [])] }))
+        );
+      }
+      setEditingImageId(null);
+      setSavedBanner(false);
+      showSuccess('Discarded unsaved category changes.');
+      return;
     }
-    setConvenienceColumns(persistedColumns);
-    setEditingImageId(null);
+
+    if (activeTab === 'layout') {
+      setConvenienceColumns(persistedColumns);
+      setSavedBanner(false);
+      showSuccess('Discarded unsaved Shop layout changes.');
+      return;
+    }
+
+    setReceiptConfig(normalizeReceiptConfig(persistedReceiptConfig));
     setSavedBanner(false);
-    showSuccess('Discarded unsaved changes.');
+    showSuccess('Discarded unsaved receipt changes.');
   };
 
-  // Reset active tab/group to defaults
+  // Reset ACTIVE tab/group to defaults
   const handleResetToDefaults = () => {
     setSavedBanner(false);
     if (activeTab === 'layout') {
       setConvenienceColumns(2);
       setResetModalOpen(false);
-      showSuccess('Reset Shop layout to 2 columns (default). Click Save changes to apply.');
+      showSuccess('Reset Shop layout to 2 columns (default). Click Save to apply.');
+      return;
+    }
+
+    if (activeTab === 'receipts') {
+      setReceiptConfig(normalizeReceiptConfig(DEFAULT_RECEIPT_CONFIG));
+      setResetModalOpen(false);
+      showSuccess('Reset receipt design to defaults. Click Save to apply.');
       return;
     }
 
@@ -604,13 +727,15 @@ export const CuisinesCategories: React.FC = () => {
     setEditingImageId(null);
     setResetModalOpen(false);
     showSuccess(
-      `Reset ${activeGroup === 'food' ? 'Food' : 'Convenience'} categories to defaults. Click Save changes to apply.`
+      `Reset ${activeGroup === 'food' ? 'Food' : 'Convenience'} categories to defaults. Click Save to apply.`
     );
   };
 
-  // Save categories (settings/mainCategories) and/or layout (settings/appDesigner)
+  // Save ONLY the ACTIVE tab to Firestore
   const handleSave = async () => {
-    if (hasCategoryChanges) {
+    if (!activeTabHasChanges) return;
+
+    if (activeTab === 'categories') {
       for (const [groupName, list] of [
         ['Food', foodCategories] as const,
         ['Convenience', convenienceCategories] as const
@@ -644,7 +769,7 @@ export const CuisinesCategories: React.FC = () => {
 
       let movedShopsCount = 0;
 
-      if (hasCategoryChanges) {
+      if (activeTab === 'categories') {
         const finalizeGroup = (
           list: MainCategoryItem[],
           prevPersisted: MainCategoryItem[] | undefined,
@@ -782,9 +907,17 @@ export const CuisinesCategories: React.FC = () => {
           ...payload,
           updatedAt: localNow
         });
+
+        setSavedBanner(true);
+        showSuccess(
+          movedShopsCount > 0
+            ? `Saved categories! Moved ${movedShopsCount} shop(s) to Others.`
+            : 'Saved categories!'
+        );
+        return;
       }
 
-      if (hasLayoutChanges) {
+      if (activeTab === 'layout') {
         const numericColumns = parseConvenienceColumns(convenienceColumns);
         const layoutPayload: AppDesignerSettings = {
           convenienceColumns: numericColumns,
@@ -804,14 +937,63 @@ export const CuisinesCategories: React.FC = () => {
         setConvenienceColumns(numericColumns);
         setPersistedColumns(numericColumns);
         setLayoutUpdatedAt(localNow);
+        setSavedBanner(true);
+        showSuccess('Saved Shop layout!');
+        return;
       }
 
-      setSavedBanner(true);
-      showSuccess(
-        movedShopsCount > 0
-          ? `Saved changes! Moved ${movedShopsCount} shop(s) to Others.`
-          : 'Saved changes!'
+      // activeTab === 'receipts' -> write settings/receipt identically
+      const savedReceipt: ReceiptDesignConfig = {
+        brandLine: receiptConfig.brandLine.trim() || 'Delivio',
+        headerLines: (receiptConfig.headerLines || [])
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .slice(0, 3),
+        footerText: receiptConfig.footerText.trim(),
+        showOrderId: Boolean(receiptConfig.showOrderId),
+        showOrderedAt: Boolean(receiptConfig.showOrderedAt),
+        showCustomerName: Boolean(receiptConfig.showCustomerName),
+        showNote: Boolean(receiptConfig.showNote),
+        showSetChoices: Boolean(receiptConfig.showSetChoices),
+        fontSize: receiptConfig.fontSize || 'medium',
+        align: receiptConfig.align || 'center',
+        separator: receiptConfig.separator || 'dashes',
+        merchantCopy: {
+          enabled: Boolean(receiptConfig.merchantCopy?.enabled),
+          title: receiptConfig.merchantCopy?.title?.trim() || "Merchant's Copy",
+          showItemPrices: Boolean(receiptConfig.merchantCopy?.showItemPrices)
+        },
+        customerCopy: {
+          enabled: Boolean(receiptConfig.customerCopy?.enabled),
+          title: receiptConfig.customerCopy?.title?.trim() || "Customer's Copy",
+          showItemPrices: Boolean(receiptConfig.customerCopy?.showItemPrices)
+        }
+      };
+
+      await setDoc(
+        doc(db, 'settings', 'receipt'),
+        {
+          ...savedReceipt,
+          updatedAt: now,
+          updatedBy
+        },
+        { merge: true }
       );
+
+      await logAuditEvent({
+        adminId: adminProfile?.uid || 'admin',
+        adminName: adminProfile?.name || 'Administrator',
+        adminEmail: adminProfile?.email,
+        action: 'UPDATE_RECEIPT_SETTINGS',
+        entityType: 'settings',
+        entityId: 'receipt',
+        details: `Updated thermal receipt settings (brand: "${savedReceipt.brandLine}", font: ${savedReceipt.fontSize}, align: ${savedReceipt.align})`
+      });
+
+      setReceiptConfig(normalizeReceiptConfig(savedReceipt));
+      setPersistedReceiptConfig(normalizeReceiptConfig(savedReceipt));
+      setSavedBanner(true);
+      showSuccess('Saved receipt settings!');
     } catch (err: any) {
       showError(err);
     } finally {
@@ -904,7 +1086,7 @@ export const CuisinesCategories: React.FC = () => {
                 <h1 className="text-xl sm:text-2xl font-extrabold text-gray-900 dark:text-white tracking-tight">
                   App Designer
                 </h1>
-                {hasUnsavedChanges ? (
+                {activeTabHasChanges ? (
                   <span className="inline-flex items-center gap-1.5 text-xs font-bold text-amber-700 dark:text-amber-400">
                     <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
                     <span>Unsaved changes</span>
@@ -917,12 +1099,29 @@ export const CuisinesCategories: React.FC = () => {
                 ) : null}
               </div>
               <p className="text-xs text-gray-500 dark:text-zinc-400 mt-0.5">
-                Design customer app home categories and Delivio Mart product grid layout.
+                Design the customer home, shop pages, and printed receipts.
               </p>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 max-w-full">
+            {activeTab === 'receipts' && (
+              <button
+                type="button"
+                onClick={() => {
+                  receiptPreviewRef.current?.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'start'
+                  });
+                }}
+                disabled={loading}
+                className="lg:hidden px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs font-bold text-gray-700 dark:text-zinc-200 hover:bg-gray-50 dark:hover:bg-zinc-800 flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50 transition-colors"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>Preview</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => setResetModalOpen(true)}
@@ -936,7 +1135,7 @@ export const CuisinesCategories: React.FC = () => {
             <button
               type="button"
               onClick={handleDiscardChanges}
-              disabled={loading || saving || !hasUnsavedChanges}
+              disabled={loading || saving || !activeTabHasChanges}
               className="px-3 py-2 rounded-xl border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs font-bold text-gray-700 dark:text-zinc-200 hover:bg-gray-50 dark:hover:bg-zinc-800 flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 transition-colors"
             >
               <Undo2 className="w-3.5 h-3.5" />
@@ -946,21 +1145,21 @@ export const CuisinesCategories: React.FC = () => {
             <button
               type="button"
               onClick={handleSave}
-              disabled={loading || saving || !hasUnsavedChanges}
+              disabled={loading || saving || !activeTabHasChanges}
               className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-extrabold flex items-center gap-1.5 shadow-xs whitespace-nowrap shrink-0 disabled:opacity-40"
             >
               {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-              <span>Save changes</span>
+              <span>Save</span>
             </button>
           </div>
         </div>
 
-        {/* Two Primary Tabs: Categories & Shop layout (scrollable inside row on phones) */}
-        <div className="flex items-center gap-2 mt-3 pt-2.5 border-t border-gray-200/70 dark:border-zinc-800/80 overflow-x-auto max-w-full">
+        {/* Three Primary Tabs: Categories, Shop layout, Receipts (wraps cleanly on phones) */}
+        <div className="flex flex-wrap items-center gap-2 mt-3 pt-2.5 border-t border-gray-200/70 dark:border-zinc-800/80 max-w-full">
           <button
             type="button"
-            onClick={() => setActiveTab('categories')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors ${
+            onClick={() => handleRequestTabSwitch('categories')}
+            className={`px-3.5 sm:px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors ${
               activeTab === 'categories'
                 ? 'bg-gray-900 text-white dark:bg-amber-400 dark:text-black shadow-xs'
                 : 'text-gray-600 dark:text-zinc-400 hover:bg-gray-200/60 dark:hover:bg-zinc-800'
@@ -968,12 +1167,19 @@ export const CuisinesCategories: React.FC = () => {
           >
             <Utensils className="w-3.5 h-3.5" />
             <span>Categories</span>
+            {hasCategoryChanges && (
+              <span
+                className="w-2 h-2 rounded-full bg-amber-500 shrink-0"
+                title="Unsaved changes"
+                aria-label="Unsaved changes"
+              />
+            )}
           </button>
 
           <button
             type="button"
-            onClick={() => setActiveTab('layout')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors ${
+            onClick={() => handleRequestTabSwitch('layout')}
+            className={`px-3.5 sm:px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors ${
               activeTab === 'layout'
                 ? 'bg-gray-900 text-white dark:bg-amber-400 dark:text-black shadow-xs'
                 : 'text-gray-600 dark:text-zinc-400 hover:bg-gray-200/60 dark:hover:bg-zinc-800'
@@ -984,6 +1190,33 @@ export const CuisinesCategories: React.FC = () => {
             <span className="text-[11px] font-mono tabular-nums opacity-75">
               {persistedColumns} col
             </span>
+            {hasLayoutChanges && (
+              <span
+                className="w-2 h-2 rounded-full bg-amber-500 shrink-0"
+                title="Unsaved changes"
+                aria-label="Unsaved changes"
+              />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleRequestTabSwitch('receipts')}
+            className={`px-3.5 sm:px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors ${
+              activeTab === 'receipts'
+                ? 'bg-gray-900 text-white dark:bg-amber-400 dark:text-black shadow-xs'
+                : 'text-gray-600 dark:text-zinc-400 hover:bg-gray-200/60 dark:hover:bg-zinc-800'
+            }`}
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Receipts</span>
+            {hasReceiptChanges && (
+              <span
+                className="w-2 h-2 rounded-full bg-amber-500 shrink-0"
+                title="Unsaved changes"
+                aria-label="Unsaved changes"
+              />
+            )}
           </button>
         </div>
       </div>
@@ -1466,7 +1699,7 @@ export const CuisinesCategories: React.FC = () => {
             </div>
           </div>
         </div>
-      ) : (
+      ) : activeTab === 'layout' ? (
         /* ======================== SHOP LAYOUT TAB ======================== */
         <div className="space-y-6 min-w-0">
           <div className="bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-2xl p-4 sm:p-6 space-y-5 min-w-0">
@@ -1660,6 +1893,17 @@ export const CuisinesCategories: React.FC = () => {
             </div>
           </div>
         </div>
+      ) : (
+        /* ======================== RECEIPTS TAB ======================== */
+        <ReceiptDesignerTab
+          receiptConfig={receiptConfig}
+          onConfigChange={(cfg) => {
+            setReceiptConfig(cfg);
+            setSavedBanner(false);
+          }}
+          loading={loading}
+          previewRef={receiptPreviewRef}
+        />
       )}
 
       {/* Add Category Modal */}
@@ -1805,18 +2049,49 @@ export const CuisinesCategories: React.FC = () => {
           title={
             activeTab === 'layout'
               ? 'Reset Shop layout to 2 columns?'
+              : activeTab === 'receipts'
+              ? 'Reset receipt design to defaults?'
               : `Reset ${activeGroup === 'food' ? 'Food' : 'Convenience'} categories to defaults?`
           }
           message={
             activeTab === 'layout'
-              ? 'This sets Delivio Mart convenience shop grid back to the recommended 2 columns. Click Save changes afterward to apply to Firestore.'
+              ? 'This sets Delivio Mart convenience shop grid back to the recommended 2 columns. Click Save afterward to apply to Firestore.'
+              : activeTab === 'receipts'
+              ? 'This restores the default thermal receipt header, footer, visibility toggles, and copy labels. Click Save afterward to apply to Firestore.'
               : `This restores the default ${
                   activeGroup === 'food' ? 'Food' : 'Convenience'
-                } categories, names, order, and asset image URLs. Click Save changes afterward to apply to Firestore.`
+                } categories, names, order, and asset image URLs. Click Save afterward to apply to Firestore.`
           }
           confirmLabel="Reset to Defaults"
           reasonRequired={false}
           isDestructive={true}
+        />
+      )}
+
+      {/* Unsaved Changes Tab Switch Confirmation */}
+      {pendingTabSwitch && (
+        <ConfirmationModal
+          isOpen={Boolean(pendingTabSwitch)}
+          onClose={() => setPendingTabSwitch(null)}
+          onConfirm={() => {
+            const target = pendingTabSwitch;
+            setPendingTabSwitch(null);
+            if (target) {
+              setActiveTab(target);
+              setSavedBanner(false);
+            }
+          }}
+          title="Leave tab with unsaved changes?"
+          message={`You have unsaved changes in ${
+            activeTab === 'categories'
+              ? 'Categories'
+              : activeTab === 'layout'
+              ? 'Shop layout'
+              : 'Receipts'
+          }. Your draft edits will remain marked with an unsaved dot until you return to save or discard them.`}
+          confirmLabel="Switch Tab"
+          reasonRequired={false}
+          isDestructive={false}
         />
       )}
     </div>
