@@ -141,6 +141,9 @@ export interface Order {
   seq?: number;
   noCash?: boolean;
   excludeRiderIds?: string[];
+  onHold?: boolean;
+  holdReason?: string | null;
+  holdReportId?: string | null;
   sourceCustomerId?: string | null;
   sourceMerchantId?: string | null;
   riderFeeFixed?: number;
@@ -534,6 +537,8 @@ export interface Rider {
   linkedCustomerEmail?: string | null;
   linkedCustomerName?: string | null;
   linkedAt?: any;
+  falseReportCount?: number;
+  lastFalseReportAt?: any;
   createdAt?: any;
 }
 
@@ -1321,6 +1326,135 @@ export interface ChatMessage {
   expireAt: any;
   [key: string]: any;
 }
+
+export type OrderReportType = 'close_restaurant' | 'cr_cancellation';
+export type OrderReportStatus = 'Pending' | 'Reviewing' | 'Resolved' | 'Rejected' | 'Auto';
+export type OrderReportResolution = 'force_closed' | 'cancelled' | 'redispatched' | 'rejected';
+
+export interface OrderReportItem {
+  name: string;
+  qty: number;
+  variantLabel?: string | null;
+  [key: string]: any;
+}
+
+export interface OrderReport {
+  id: string;
+  type: OrderReportType;
+  orderId: string;
+  orderNumber: string;
+  serviceType: OrderServiceType | string;
+  merchantId?: string | null;
+  merchantName?: string | null;
+  branchName?: string | null;
+  customerId?: string | null;
+  customerName?: string | null;
+  riderId: string;
+  riderName: string;
+  amount: number;
+  paymentMethod: string;
+  items: OrderReportItem[];
+  status: OrderReportStatus;
+  resolution?: OrderReportResolution | null;
+  note: string;
+  createdAt: any;
+  acceptedAt?: any;
+  acceptedBy?: string | null;
+  acceptedByName?: string | null;
+  resolvedAt?: any;
+  resolvedBy?: string | null;
+  resolvedById?: string | null;
+  forceCloseDurationLabel?: string | null;
+  followUpOrderAction?: 'cancelled' | 'redispatched' | null;
+  updatedAt?: any;
+  [key: string]: any;
+}
+
+export type ScheduleSessionStatus = 'open' | 'closed' | 'cancelled';
+
+export interface ScheduleSessionRewards {
+  emoji: string;
+  perDelivery?: number;
+  streakEvery?: number;
+  streakBonus?: number;
+  completionTarget?: number;
+  completionBonus?: number;
+  minEarnings?: number;
+  multiplier?: number;
+  coins?: number;
+  onlineBonus?: number;
+  onlineMinPercent?: number;
+  services?: OrderServiceType[];
+  note?: string;
+}
+
+export interface ScheduleSession {
+  id: string;
+  title?: string;
+  cityId: string;
+  startAt: any;
+  endAt: any;
+  slots: number;
+  bookedCount: number;
+  status: ScheduleSessionStatus;
+  vehicleTypes: string[];
+  bookingCloseMin: number;
+  cancelCutoffMin: number;
+  rewards?: ScheduleSessionRewards;
+  createdAt: any;
+  createdBy?: string;
+  updatedAt?: any;
+}
+
+export interface ScheduleBooking {
+  id: string;
+  riderId: string;
+  riderName: string;
+  startAt: any;
+  endAt: any;
+  bookedAt: any;
+  vehicleType?: string;
+}
+
+export interface RiderSlotLock {
+  id: string;
+  riderId: string;
+  sessionId: string;
+}
+
+export type SessionClaimStatus = 'Pending' | 'Settled' | 'Rejected';
+
+export interface SessionClaimBreakdown {
+  perDelivery: number;
+  streak: number;
+  completion: number;
+  minEarningsTopUp: number;
+  multiplierExtra: number;
+  onlineBonus: number;
+  coins: number;
+  recomputedDeliveries?: number;
+  recomputedEarned?: number;
+  onlineMinutes?: number;
+  onlinePercent?: number;
+}
+
+export interface SessionClaim {
+  id: string;
+  sessionId: string;
+  riderId: string;
+  riderName: string;
+  status: SessionClaimStatus;
+  deliveries: number;
+  earned: number;
+  onlineMinutes: number;
+  createdAt: any;
+  settledAt?: any;
+  settledBy?: string;
+  bonusTotal?: number;
+  breakdown?: SessionClaimBreakdown;
+  note?: string;
+}
+
 
 
 

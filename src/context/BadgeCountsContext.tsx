@@ -14,6 +14,8 @@ interface BadgeCountsContextType {
   activeOrdersCount: number;
   onlineRidersCount: number;
   openTicketsCount: number;
+  pendingRiderReportsCount: number;
+  pendingSessionClaimsCount: number;
   recentUnreadNotifications: AdminNotification[];
 }
 
@@ -31,6 +33,8 @@ export const BadgeCountsProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [activeOrdersCount, setActiveOrdersCount] = useState(0);
   const [onlineRidersCount, setOnlineRidersCount] = useState(0);
   const [openTicketsCount, setOpenTicketsCount] = useState(0);
+  const [pendingRiderReportsCount, setPendingRiderReportsCount] = useState(0);
+  const [pendingSessionClaimsCount, setPendingSessionClaimsCount] = useState(0);
   const [recentUnreadNotifications, setRecentUnreadNotifications] = useState<AdminNotification[]>([]);
 
   useEffect(() => {
@@ -158,6 +162,37 @@ export const BadgeCountsProvider: React.FC<{ children: React.ReactNode }> = ({ c
       (err) => console.error('Error listening to support tickets:', err)
     );
 
+    // 9. Pending close_restaurant rider reports
+    const qOrderReports = query(
+      collection(db, 'orderReports'),
+      where('status', '==', 'Pending')
+    );
+    const unsubOrderReports = onSnapshot(
+      qOrderReports,
+      (snap) => {
+        let count = 0;
+        snap.forEach((d) => {
+          const dt = d.data();
+          if (dt.type === 'close_restaurant') count += 1;
+        });
+        setPendingRiderReportsCount(count);
+      },
+      (err) => console.error('Error listening to orderReports:', err)
+    );
+
+    // 10. Pending schedule session claims
+    const qSessionClaims = query(
+      collection(db, 'sessionClaims'),
+      where('status', '==', 'Pending')
+    );
+    const unsubSessionClaims = onSnapshot(
+      qSessionClaims,
+      (snap) => {
+        setPendingSessionClaimsCount(snap.size);
+      },
+      (err) => console.error('Error listening to sessionClaims:', err)
+    );
+
     return () => {
       unsubMerchantApps();
       unsubRiderApps();
@@ -167,6 +202,8 @@ export const BadgeCountsProvider: React.FC<{ children: React.ReactNode }> = ({ c
       unsubTier();
       unsubRiders();
       unsubSupport();
+      unsubOrderReports();
+      unsubSessionClaims();
     };
   }, [currentUser, adminProfile]);
 
@@ -183,6 +220,8 @@ export const BadgeCountsProvider: React.FC<{ children: React.ReactNode }> = ({ c
         activeOrdersCount,
         onlineRidersCount,
         openTicketsCount,
+        pendingRiderReportsCount,
+        pendingSessionClaimsCount,
         recentUnreadNotifications
       }}
     >

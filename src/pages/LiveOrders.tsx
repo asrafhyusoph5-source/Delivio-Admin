@@ -880,6 +880,7 @@ export const LiveOrders: React.FC = () => {
   // Manual Rider Assignment Modal State
   const [assignRiderOrder, setAssignRiderOrder] = useState<Order | null>(null);
   const canManualAssignRider = (ord: Order) => {
+    if (ord.onHold) return false;
     if (ord.riderId) return false;
     if (ord.isPickup || ord.fulfillmentType === 'pickup' || (ord.serviceType as any) === 'pickup') {
       return false;
@@ -986,6 +987,9 @@ export const LiveOrders: React.FC = () => {
             sourceCustomerId: data.sourceCustomerId,
             sourceMerchantId: data.sourceMerchantId,
             excludeRiderIds: data.excludeRiderIds,
+            onHold: Boolean(data.onHold),
+            holdReason: data.holdReason || null,
+            holdReportId: data.holdReportId || null,
             searchRadiusKm: data.searchRadiusKm ?? data.dispatch?.searchRadiusKm,
             riderFeeFixed: data.riderFeeFixed,
             noCash: Boolean(data.noCash),
@@ -1575,6 +1579,7 @@ export const LiveOrders: React.FC = () => {
         riderPhotoUrl: null,
         riderStep: null,
         riderVehicle: null,
+        batchId: null,
         status: 'Placed Order',
         statusHistory: arrayUnion({
           status: 'Placed Order',
@@ -2255,13 +2260,20 @@ export const LiveOrders: React.FC = () => {
                         <ServiceChips order={order} />
                       </td>
                       <td className="px-4 py-3">
-                        <span
-                          className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${getStatusBadge(
-                            order.status
-                          )}`}
-                        >
-                          {order.status}
-                        </span>
+                        <div className="flex flex-col gap-1 items-start">
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${getStatusBadge(
+                              order.status
+                            )}`}
+                          >
+                            {order.status}
+                          </span>
+                          {order.onHold && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                              On Hold{order.holdReason ? ` (${order.holdReason})` : ''}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3">
                         <div className="font-semibold text-gray-900 dark:text-white">
@@ -2968,6 +2980,22 @@ export const LiveOrders: React.FC = () => {
                   )}
                 </div>
               </div>
+
+              {/* On-Hold Dispatch Guard Banner */}
+              {selectedOrder.onHold && (
+                <div className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 flex items-start gap-2.5 text-xs shadow-2xs">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-extrabold text-amber-950 dark:text-amber-200 block">
+                      Order is currently ON HOLD{selectedOrder.holdReason ? ` (${selectedOrder.holdReason})` : ''}
+                    </span>
+                    <span className="text-[11px] text-amber-800 dark:text-amber-300/90">
+                      Dispatch is paused and will not offer this order to riders until the Rider Report is resolved (Cancel or Redispatch).
+                      {selectedOrder.holdReportId ? ` Report ID: ${selectedOrder.holdReportId}` : ''}
+                    </span>
+                  </div>
+                </div>
+              )}
 
               {/* Parcel 6-Step Progress Bar & Cash Collection Rule */}
               {selectedOrder.serviceType === 'parcel' &&

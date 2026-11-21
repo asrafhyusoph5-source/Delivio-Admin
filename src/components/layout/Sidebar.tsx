@@ -25,7 +25,9 @@ import {
   Trophy,
   MessageSquare,
   LayoutGrid,
-  CreditCard
+  CreditCard,
+  AlertTriangle,
+  CalendarClock
 } from 'lucide-react';
 import { useBadgeCounts } from '../../context/BadgeCountsContext';
 import { useAuth } from '../../context/AuthContext';
@@ -49,7 +51,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
     pendingPromoRequestsCount,
     pendingTierEventsCount,
     pendingChangeRequestsCount,
-    openTicketsCount
+    openTicketsCount,
+    pendingRiderReportsCount,
+    pendingSessionClaimsCount
   } = useBadgeCounts();
 
   const role = adminProfile?.adminRole || (adminProfile?.role === 'admin' ? 'admin' : 'support');
@@ -68,6 +72,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-amber-500'
     },
     { name: 'Drivers', path: '/riders', icon: Car },
+    {
+      name: 'Schedule Sessions',
+      path: '/schedule-sessions',
+      icon: CalendarClock,
+      badge: pendingSessionClaimsCount > 0 ? pendingSessionClaimsCount : undefined,
+      badgeColor: 'bg-amber-500'
+    },
     { name: 'Fraud Flags', path: '/flags', icon: ShieldAlert },
     { name: 'Quests', path: '/quests', icon: Trophy },
     {
@@ -97,6 +108,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-red-500'
     },
     {
+      name: 'Rider Reports',
+      path: '/rider-reports',
+      icon: AlertTriangle,
+      badge: pendingRiderReportsCount > 0 ? pendingRiderReportsCount : undefined,
+      badgeColor: 'bg-red-500'
+    },
+    {
       name: 'Tiers & Coins',
       path: '/tiers',
       icon: Award,
@@ -118,6 +136,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       '/wallet-transfers',
       '/merchants',
       '/riders',
+      '/schedule-sessions',
       '/flags',
       '/quests',
       '/applications',
@@ -128,13 +147,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       '/inbox',
       '/chats',
       '/support',
+      '/rider-reports',
       '/tiers',
       '/reports',
       '/pos-sales',
       '/audit',
       '/settings'
     ],
-    support: ['/', '/map', '/orders', '/inbox', '/chats', '/support', '/flags'],
+    support: ['/', '/map', '/orders', '/inbox', '/chats', '/support', '/rider-reports', '/flags'],
     finance: ['/', '/wallet-transfers', '/merchants', '/riders', '/reports', '/pos-sales']
   };
 

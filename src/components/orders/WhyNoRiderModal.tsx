@@ -863,6 +863,18 @@ export const WhyNoRiderModal: React.FC<WhyNoRiderModalProps> = ({
           </div>
         </div>
 
+        {/* Order On Hold Alert */}
+        {order.onHold && !loading && (
+          <div className="mx-4 sm:mx-5 mt-3 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 flex items-start gap-2 text-xs text-amber-900 dark:text-amber-300">
+            <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-extrabold">Order is ON HOLD: </span>
+              Dispatch never offers this order to any rider while <code>onHold</code> is true
+              {order.holdReason ? ` (reason: ${order.holdReason})` : ''}. Resolve or reject the Rider Report to release dispatch.
+            </div>
+          </div>
+        )}
+
         {/* Platform/City Global Alert if selected service is off */}
         {(!platformServiceOn ||
           requestedTaxiVehicleDisabled ||

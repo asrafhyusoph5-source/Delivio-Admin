@@ -32,6 +32,8 @@ import { FraudFlags } from './pages/FraudFlags';
 import { Chats } from './pages/Chats';
 import { CuisinesCategories } from './pages/CuisinesCategories';
 import { PosSales } from './pages/PosSales';
+import { RiderReports } from './pages/RiderReports';
+import { ScheduleSessions } from './pages/ScheduleSessions';
 
 export default function App() {
   return (
@@ -54,6 +56,7 @@ export default function App() {
                     <Route path="wallet-transfers" element={<WalletTransfers />} />
                     <Route path="merchants" element={<Merchants />} />
                     <Route path="riders" element={<Riders />} />
+                    <Route path="schedule-sessions" element={<ScheduleSessions />} />
                     <Route path="quests" element={<Quests />} />
                     <Route path="applications" element={<Applications />} />
                     <Route path="rates" element={<DeliveryRates />} />
@@ -63,6 +66,7 @@ export default function App() {
                     <Route path="inbox" element={<Inbox />} />
                     <Route path="chats" element={<Chats />} />
                     <Route path="support" element={<Support />} />
+                    <Route path="rider-reports" element={<RiderReports />} />
                     <Route path="tiers" element={<TiersCoins />} />
                     <Route path="notifications" element={<Notifications />} />
                     <Route path="reports" element={<Reports />} />

@@ -355,7 +355,7 @@ export const AssignRiderModal: React.FC<AssignRiderModalProps> = ({
   }, [evaluated.eligibleRiders, searchQuery]);
 
   const handleConfirmAssign = async () => {
-    if (!selectedRiderId) return;
+    if (!selectedRiderId || order.onHold) return;
     const chosen = evaluated.eligibleRiders.find((c) => c.rider.id === selectedRiderId);
     if (!chosen) return;
 
@@ -521,6 +521,16 @@ export const AssignRiderModal: React.FC<AssignRiderModalProps> = ({
           </div>
         </div>
 
+        {/* On Hold Warning */}
+        {order.onHold && (
+          <div className="mx-4 sm:mx-5 mt-3 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              <strong>Order is ON HOLD</strong> ({order.holdReason || 'close_restaurant'}). Resolve the Rider Report before assigning a rider.
+            </span>
+          </div>
+        )}
+
         {/* Riders List */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-2.5">
           {loading ? (
@@ -629,7 +639,7 @@ export const AssignRiderModal: React.FC<AssignRiderModalProps> = ({
           <button
             type="button"
             onClick={handleConfirmAssign}
-            disabled={!selectedRiderId || submitting || loading}
+            disabled={!selectedRiderId || submitting || loading || Boolean(order.onHold)}
             className="delivio-btn-yellow px-4 py-2 rounded-xl text-xs font-extrabold flex items-center gap-1.5 disabled:opacity-50"
           >
             {submitting ? (
